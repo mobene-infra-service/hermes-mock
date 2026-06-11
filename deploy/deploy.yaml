@@ -109,22 +109,3 @@ spec:
       targetPort: 5060
   type: ClusterIP
 
----
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: ${APP}-ingress
-  namespace: ${PROJECT}
-spec:
-  ingressClassName: nginx
-  rules:
-    - host: ${APP}-${MODE}.miraflow.io
-      http:
-        paths:
-          - backend:
-              service:
-                name: ${APP}-svc
-                port:
-                  number: 80
-            path: /
-            pathType: Prefix
