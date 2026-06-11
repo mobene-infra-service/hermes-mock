@@ -1,0 +1,63 @@
+package config
+
+import (
+	"github.com/caarlos0/env/v10"
+)
+
+// Config 集中声明所有环境变量配置。
+// mock 只演被叫客户线路：无主叫/坐席/SIP REGISTER/录音相关配置。
+type Config struct {
+	// ---- HTTP / Web 配置后台 ----
+	HTTPPort int `env:"HTTP_PORT" envDefault:"8080"`
+
+	// ---- SIP agent（diago，被叫 UAS）----
+	// FS 把 INVITE 发到这里；mock 作被叫按客户集群行为应答。
+	SIPListenIP   string `env:"SIP_LISTEN_IP" envDefault:"0.0.0.0"`
+	SIPListenPort int    `env:"SIP_LISTEN_PORT" envDefault:"5060"`
+	SIPTransport  string `env:"SIP_TRANSPORT" envDefault:"udp"` // udp/tcp/tls
+	// 提供给 SDP 协商的音频编解码列表（逗号分隔，按优先级）：PCMU,PCMA,opus。
+	Codecs string `env:"CODECS" envDefault:"PCMU,PCMA"`
+	// agent 对 FreeSWITCH 暴露的可达 IP（写入 SDP / Contact）。为空时尝试自动探测。
+	ExternalIP string `env:"EXTERNAL_IP" envDefault:""`
+	// RTP 端口段（按并发开）
+	RTPPortStart int `env:"RTP_PORT_START" envDefault:"20000"`
+	RTPPortEnd   int `env:"RTP_PORT_END" envDefault:"21000"`
+
+	// ---- 媒体 ----
+	AudioDir        string `env:"AUDIO_DIR" envDefault:"assets/audio"`     // 预置 G.711 WAV 目录
+	DefaultPlayback string `env:"DEFAULT_PLAYBACK" envDefault:"hello.wav"` // 默认应答后放音
+
+	// ---- 行为默认值（客户集群未命中时的兜底应答）----
+	DefaultRingMs int `env:"DEFAULT_RING_MS" envDefault:"2000"`
+	DefaultTalkMs int `env:"DEFAULT_TALK_MS" envDefault:"8000"`
+
+	// ---- hermes_mock 库（mock 自身持久化：客户集群/机构配置/呼叫记录/链路/回调；独立库，不碰业务表）----
+	// 必配（无纯内存模式）。
+	//   DBType=mysql（默认）：DSN_URL 整串优先，否则按组件拼（密码经 ${PROJECT}-secret 注 MYSQL_MASTER_PASSWORD，
+	//     地址/库名等经 ${APP}-config 注 DBAddr/DBPort/DBName/DBUser）。
+	//   DBType=sqlite：本地零依赖跑（DBPath 文件路径）。
+	// Hermes 服务地址 / OpenAPI 凭据 / hermes-ws 等业务接入配置一律在「机构」页（mock_org_config）维护，
+	// 不走环境变量。
+	DBType     string `env:"DBType" envDefault:"mysql"`
+	DSNURL     string `env:"DSN_URL" envDefault:""`
+	DBUser     string `env:"DBUser" envDefault:"root"`
+	DBPassword string `env:"MYSQL_MASTER_PASSWORD" envDefault:"jQGmXTqEIYZqrClN"`
+	// 默认指向测试环境 MySQL（与 hermes 各服务 application-local.yml 一致）。
+	DBAddr string `env:"DBAddr" envDefault:"172.16.4.141"`
+	DBPort string `env:"DBPort" envDefault:"31509"`
+	DBName string `env:"DBName" envDefault:"hermes_mock"`
+	DBPath string `env:"DBPath" envDefault:"datas/hermes-mock.db"`
+
+	// ---- 日志 ----
+	LogLevel string `env:"LOG_LEVEL" envDefault:"info"`
+	Mode     string `env:"MODE" envDefault:"DEV"` // DEV / TEST / PROD
+}
+
+// Load 解析环境变量为 Config。
+func Load() (*Config, error) {
+	c := &Config{}
+	if err := env.Parse(c); err != nil {
+		return nil, err
+	}
+	return c, nil
+}

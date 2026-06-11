@@ -1,0 +1,17 @@
+# 构建 context 瘦身：本地产物/依赖不进镜像，前端在 Dockerfile 内重新 npm install + build。
+.git
+*.jpeg
+*.png
+
+# 前端本地依赖与产物（容器内重建）
+web/node_modules
+web/dist
+
+# 交叉编译产物 / 内嵌目录占位（容器内由 web 阶段重新生成）
+dist
+cmd/hermes-mock/web/dist
+
+# 本地栈与文档（与镜像无关）
+deploy/hermes-stack
+docs
+*.md

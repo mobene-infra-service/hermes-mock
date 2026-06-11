@@ -1,0 +1,130 @@
+---
+# hermes-mock K8s 部署模板（平台 CI 经 envsubst 注入变量后 kubectl apply；注释里不能出现字面量花括号变量，会被平台当未定义变量拒绝）。
+# 关键设计：
+#   1) 单镜像同时跑 HTTP 配置后台（80，Dockerfile ENV HTTP_PORT=80）+ SIP 被叫 UAS（5060/udp）+ RTP 媒体段；
+#   2) 健康检查路径是 /api/health；
+#   3) EXTERNAL_IP 用 Downward API 取 Pod IP 写进 SDP，让同集群 FreeSWITCH 能回 RTP。
+# HTTP 经 nginx Ingress 对外；SIP/RTP 经 ClusterIP Service 供「同集群」FS 直连（Ingress 不路由 UDP）。
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: ${APP}
+  name: ${APP}
+  namespace: ${PROJECT}
+spec:
+  replicas: ${REPLICAS}
+  selector:
+    matchLabels:
+      app: ${APP}
+  template:
+    metadata:
+      labels:
+        app: ${APP}
+    spec:
+      terminationGracePeriodSeconds: 15 # 终止 Pod 之前等待的秒数
+      containers:
+        - name: ${APP}
+          image: ${IMAGE}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 80
+            - name: sip
+              containerPort: 5060
+              protocol: UDP
+          resources:
+            limits:                   # 资源限制
+              cpu: ${LIMITS_CPU}
+              memory: ${LIMITS_MEMORY}
+            requests:                 # 资源需求
+              cpu: ${REQUETS_CPU}
+              memory: ${REQUETS_MEMORY}
+          livenessProbe:              # 存活性探针，判断容器是否健康
+            failureThreshold: 3       # 检测失败几次表示不健康
+            initialDelaySeconds: 45   # 延迟加载时间
+            periodSeconds: 10         # 重试时间间隔
+            successThreshold: 1       # 检查成功几次表示就绪
+            timeoutSeconds: 3         # 超时时间设置
+            httpGet:
+              path: /api/health
+              port: 80
+              scheme: HTTP
+          readinessProbe:             # 就绪性探针，判断容器内程序是否可服务
+            failureThreshold: 3
+            periodSeconds: 10
+            initialDelaySeconds: 45
+            successThreshold: 1
+            timeoutSeconds: 3
+            httpGet:
+              path: /api/health
+              port: 80
+              scheme: HTTP
+          startupProbe:               # 启动探针，防止启动慢被其他探针误杀
+            failureThreshold: 3
+            initialDelaySeconds: 45
+            periodSeconds: 5
+            timeoutSeconds: 3
+            tcpSocket:
+              port: 80
+          envFrom:
+            - secretRef:
+                name: ${PROJECT}-secret
+            # 业务配置（DB 组件/OpenAPI/Hermes 服务地址等）。mock 全部配置有默认值（无库退纯内存），
+            # 故标 optional：configmap 未建时 Pod 也能启动，建好后 kubectl rollout restart 生效。
+            - configMapRef:
+                name: ${APP}-config
+                optional: true
+          env:
+            - name: MODE
+              value: ${MODE}
+            # SIP 被叫腿监听全网卡；SDP/Contact 通告 Pod IP（同集群 FS 据此回 RTP）。
+            - name: SIP_LISTEN_IP
+              value: "0.0.0.0"
+            - name: EXTERNAL_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+      restartPolicy: Always
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${APP}-svc
+  namespace: ${PROJECT}
+  labels:
+    app: ${APP}
+spec:
+  selector:
+    app: ${APP}
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80                    # svc 端口
+      targetPort: 80              # pod 端口（Dockerfile ENV HTTP_PORT=80）
+    - name: sip
+      protocol: UDP
+      port: 5060                  # 同集群 FreeSWITCH 经 ${APP}-svc:5060 把 INVITE 送到被叫腿
+      targetPort: 5060
+  type: ClusterIP
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ${APP}-ingress
+  namespace: ${PROJECT}
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: ${APP}-${MODE}.miraflow.io
+      http:
+        paths:
+          - backend:
+              service:
+                name: ${APP}-svc
+                port:
+                  number: 80
+            path: /
+            pathType: Prefix

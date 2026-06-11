@@ -1,0 +1,44 @@
+/* 全局样式：CSS 变量 + 统一页面容器 + 响应式。 */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+:root {
+  --header-height: 56px;
+  --sidebar-width: 200px;
+  --padding-page: 24px;
+  --margin-block: 16px;
+}
+
+/* 页面容器统一内边距（所有 page 顶层用它，替代各自手写 padding） */
+.page-container {
+  padding: var(--padding-page);
+}
+
+/* 移动端适配 */
+@media (max-width: 768px) {
+  .page-container {
+    padding: 12px;
+  }
+
+  .ant-table-wrapper {
+    overflow-x: auto;
+  }
+
+  .ant-card-body {
+    padding: 16px;
+  }
+}

@@ -1,0 +1,61 @@
+# Go 构建产物
+/hermes-mock
+/hermes-mock-*
+*.exe
+.gocache/
+/dist/
+
+# Node / 前端
+web/node_modules/
+web/dist/
+web/*.tsbuildinfo
+cmd/hermes-mock/web/dist/
+# vite 配置的 tsc 编译产物（源码是 vite.config.ts）
+web/vite.config.js
+web/vite.config.d.ts
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+
+# 运行时
+*.log
+datas/
+
+# 调试 / 抓取临时产物（playwright MCP、页面文本快照）
+.playwright-mcp/
+/*-page-text.txt
+/*-final-text.txt
+
+# 本地实验 / 辅助（留本地、不进仓库）
+# 本地真实 Hermes 栈（机器相关：.env 绝对路径、FS 全量配置 194 文件、jar 挂载；mock 自己的 DDL 在 deploy/ddl/）
+/deploy/hermes-stack/
+# 旧 FS 实验室栈（单机联调，已被 hermes-stack 真实栈取代）
+/deploy/Dockerfile.fs
+/deploy/Dockerfile.runtime
+/deploy/docker-compose.yml
+/deploy/docker-compose.e2e.yml
+/deploy/fs/
+/deploy/e2e-call.sh
+/deploy/e2e-agent.sh
+/deploy/e2e-agent-ops.sh
+# 本地离线 SIP 冒烟 CLI（go run ./cmd/probe 仍可用）
+/cmd/probe/
+# docs 兼容旧链接的转发指针（实质内容在 docs/hermes/ 与 docs/archive/）
+/docs/AGENT-OUTBOUND-CALL.md
+/docs/CURRENT-VS-EXPECTED.md
+/docs/REDESIGN-PLAN.md
+# 临时示意图
+/group-call-refactored.jpeg
+*.jpeg
+*.jpg
+*.jepe
+
+
+# 本地启动环境变量（密码等，不进 git；样例见 .env.example）
+/.env
+/.env.example
+
+# 本地 mock 配置（按机器/环境维护，不进 git）
+/deploy/hermes-mock-config.json
