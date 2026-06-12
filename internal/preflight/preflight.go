@@ -1,5 +1,5 @@
 // Package preflight 对「业务测试场景」做就绪自检：触发群呼/外呼/OTP/线路呼叫前，
-// 检查前置条件（业务接口地址、机构 OpenAPI、mock 侧线路绑定）是否齐备，给出可操作诊断，
+// 检查前置条件（业务接口地址、机构 OpenAPI、mock 侧端口绑定）是否齐备，给出可操作诊断，
 // 避免「触发了但什么都没进 mock」的盲目排查。
 // 注意：mock 只演客户被叫腿；群呼/手动外呼接通后转坐席由真实 Hermes 坐席承担，不在此自检。
 package preflight
@@ -33,9 +33,9 @@ type Inputs struct {
 	CallBotBaseURL    string // 自动外呼/任务
 	OTPBaseURL        string // 语音验证码
 	LineDBConnected   bool   // 机构 OpenAPI 已配置（可核验 Hermes 侧配置）
-	LineCount         int    // mock 侧线路绑定数
+	LineCount         int    // mock 侧端口绑定数
 	CustomerGroups    int    // 客户组数
-	LineBindings      int    // 线路绑定数
+	LineBindings      int    // 端口绑定数
 }
 
 func add(checks *[]Check, name string, st Status, detail string) {
@@ -53,7 +53,7 @@ func finalize(scenario string, checks []Check) Report {
 	return Report{Scenario: scenario, Ready: ready, Checks: checks}
 }
 
-// CallCenterTask 群呼任务就绪：需 call-center 地址 + mock 侧线路绑定。
+// CallCenterTask 群呼任务就绪：需 call-center 地址 + mock 侧端口绑定。
 // 接通后转坐席由真实 Hermes 坐席承担，不在此检查 mock 坐席。
 func CallCenterTask(in Inputs) Report {
 	var c []Check
@@ -67,7 +67,7 @@ func CallCenterTask(in Inputs) Report {
 	return finalize("callcenter-task", c)
 }
 
-// AutoCall 自动外呼就绪：需 call-bot 地址 + mock 侧线路绑定。
+// AutoCall 自动外呼就绪：需 call-bot 地址 + mock 侧端口绑定。
 func AutoCall(in Inputs) Report {
 	var c []Check
 	if in.CallBotBaseURL == "" {
@@ -79,7 +79,7 @@ func AutoCall(in Inputs) Report {
 	return finalize("autocall", c)
 }
 
-// OTP 语音验证码就绪：需 otp OpenAPI 地址 + mock 侧线路绑定。
+// OTP 语音验证码就绪：需 otp OpenAPI 地址 + mock 侧端口绑定。
 func OTP(in Inputs) Report {
 	var c []Check
 	if in.OTPBaseURL == "" {
@@ -91,19 +91,19 @@ func OTP(in Inputs) Report {
 	return finalize("otp", c)
 }
 
-// lineReadiness 线路路由就绪：客户号要被路由到 mock，需 Hermes 侧线路 address 指向 mock，并在 mock 侧配置线路绑定。
+// lineReadiness 线路路由就绪：客户号要被路由到 mock，需 Hermes 侧线路 address 指向 mockIP:port，并在 mock 侧配置端口绑定。
 func lineReadiness(c *[]Check, in Inputs) {
 	switch {
 	case !in.LineDBConnected:
 		add(c, "Hermes 机构", Warn, "未配置当前机构 OpenAPI；无法核验 Hermes 侧线路/TTS 等配置")
 	case in.LineCount == 0:
-		add(c, "线路绑定", Warn, "mock 侧无线路绑定；请确认 Hermes 侧线路 address→mock，并在「客户配置」维护线路绑定")
+		add(c, "端口绑定", Warn, "mock 侧无端口绑定；请确认 Hermes 侧线路 address→mockIP:port，并在「客户配置」维护端口绑定")
 	default:
-		add(c, "线路绑定", OK, "mock 侧已有线路绑定")
+		add(c, "端口绑定", OK, "mock 侧已有端口绑定")
 	}
 	if in.LineBindings == 0 {
-		add(c, "客户组绑定", Warn, "无 线路→客户组 绑定；客户行为将走号码/默认匹配（非按线路）")
+		add(c, "客户组绑定", Warn, "无 端口→客户组 绑定；客户行为将走号码/默认匹配（非按端口）")
 	} else {
-		add(c, "客户组绑定", OK, "已配置线路→客户组绑定")
+		add(c, "客户组绑定", OK, "已配置端口→客户组绑定")
 	}
 }

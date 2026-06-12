@@ -57,6 +57,7 @@ make build   # 交叉编译 Linux 二进制
 |---|---|
 | [docs/SCOPE.md](docs/SCOPE.md) | 背景 / 预期定位 / 核心能力 / **非目标**（防膨胀锚点） |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | 架构图 / 目录树 / 模块职责 / 技术栈版本 / 数据流 / DB 表（以代码为准） |
+| [docs/CALL-FLOWS.md](docs/CALL-FLOWS.md) | **各通话场景端到端流程**（群呼/callbot/otp/坐席外呼/接来电/回调）+ 流程图 + 数据结构与样例 |
 | [docs/STATUS.md](docs/STATUS.md) | 当前焦点 / feature 进度 / 已知 bug / 本地栈速查（**最常更新**） |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | 关键决策日志（为什么这么定，倒序） |
 | [docs/CHANGELOG.md](docs/CHANGELOG.md) | 改动记录（改了什么 + 验证状态，倒序） |

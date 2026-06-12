@@ -62,7 +62,7 @@ export default function OverviewPage() {
                   { title: '类型', dataIndex: 'kind', width: 72, render: (k: string) => <Tag>{kindText[k] || k}</Tag> },
                   { title: '会话', dataIndex: 'title', ellipsis: true },
                   { title: '腿', dataIndex: 'legs', width: 56, render: (l: string[]) => <Badge count={l?.length || 0} showZero color="#1677ff" /> },
-                  { title: '事件', width: 50, render: (_: unknown, r: TraceSession) => r.events?.length || 0 },
+                  { title: '事件', width: 50, render: (_: unknown, r: TraceSession) => r.eventCount ?? 0 },
                   { title: '时间', dataIndex: 'startedAt', width: 90, render: (t: string) => new Date(t).toLocaleTimeString() },
                 ]} />
             )}

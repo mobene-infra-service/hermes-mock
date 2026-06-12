@@ -59,23 +59,36 @@ func TestResolveByNumberGroupAndOverride(t *testing.T) {
 	}
 }
 
-func TestResolveByLineBinding(t *testing.T) {
+func TestResolveByPortBinding(t *testing.T) {
 	s := NewMemory()
 	s.UpsertProfile(BehaviorProfile{Code: "ans", Outcome: "ANSWER", AnswerRatio: 100})
 	s.UpsertGroup(CustomerGroup{Code: "gA", NumberPrefix: "", NumberStart: 100, Count: 10, BehaviorCode: "ans", State: "ENABLED"})
-	s.UpsertBinding(LineBinding{LineCode: "line_mock", LineAddress: "192.168.107.9:5060", GroupCode: "gA", Enabled: 1})
+	s.UpsertBinding(LineBinding{ListenPort: 5060, LineCode: "line_mock", GroupCode: "gA", Enabled: 1})
 
 	// 号码命中组
-	if r := s.ResolveByLine("line_mock", "105"); r == nil || r.GroupCode != "gA" {
-		t.Errorf("按 line_code 解析错: %+v", r)
-	}
-	// 按 address 解析
-	if r := s.ResolveByLine("192.168.107.9:5060", "103"); r == nil || r.GroupCode != "gA" {
-		t.Errorf("按 address 解析错: %+v", r)
+	if r := s.ResolveByPort(5060, "105"); r == nil || r.GroupCode != "gA" {
+		t.Errorf("按 listen_port 解析错: %+v", r)
 	}
 	// 号码不在组但线路绑了组 → 组行为兜底
-	if r := s.ResolveByLine("line_mock", "999"); r == nil || r.Profile == nil || r.Profile.Outcome != "ANSWER" {
-		t.Errorf("线路兜底解析错: %+v", r)
+	if r := s.ResolveByPort(5060, "999"); r == nil || r.Profile == nil || r.Profile.Outcome != "ANSWER" {
+		t.Errorf("端口兜底解析错: %+v", r)
+	}
+}
+
+func TestResolveByPortSeparatesSameNumberAcrossGroups(t *testing.T) {
+	s := NewMemory()
+	s.UpsertProfile(BehaviorProfile{Code: "ans", Outcome: "ANSWER", AnswerRatio: 100})
+	s.UpsertProfile(BehaviorProfile{Code: "busy", Outcome: "BUSY", HangupCode: 486, AnswerRatio: 100})
+	s.UpsertGroup(CustomerGroup{Code: "gA", NumberPrefix: "861", NumberStart: 100, Count: 10, BehaviorCode: "ans", State: "ENABLED"})
+	s.UpsertGroup(CustomerGroup{Code: "gB", NumberPrefix: "861", NumberStart: 100, Count: 10, BehaviorCode: "busy", State: "ENABLED"})
+	s.UpsertBinding(LineBinding{ListenPort: 5060, GroupCode: "gA", Enabled: 1})
+	s.UpsertBinding(LineBinding{ListenPort: 5061, GroupCode: "gB", Enabled: 1})
+
+	if r := s.ResolveByPort(5060, "861105"); r == nil || r.GroupCode != "gA" || r.Profile.Outcome != "ANSWER" {
+		t.Errorf("5060 应命中 gA/ANSWER, got %+v", r)
+	}
+	if r := s.ResolveByPort(5061, "861105"); r == nil || r.GroupCode != "gB" || r.Profile.Outcome != "BUSY" {
+		t.Errorf("5061 应命中 gB/BUSY, got %+v", r)
 	}
 }
 
@@ -84,7 +97,7 @@ func TestResolveByLineName(t *testing.T) {
 	s.UpsertProfile(BehaviorProfile{Code: "ans", Outcome: "ANSWER", AnswerRatio: 100})
 	s.UpsertGroup(CustomerGroup{Code: "gN", NumberStart: 100, Count: 10, BehaviorCode: "ans", State: "ENABLED"})
 	// 绑定用线路名 "MOCK-CB-CN"；FS 注入的 X-Line-Name 是规范化后 "mockcbcn"
-	s.UpsertBinding(LineBinding{LineCode: "lc1", LineName: "MOCK-CB-CN", GroupCode: "gN", Enabled: 1})
+	s.UpsertBinding(LineBinding{ListenPort: 5060, LineCode: "lc1", LineName: "MOCK-CB-CN", GroupCode: "gN", Enabled: 1})
 
 	// 用规范化后的线路名解析（模拟 dialogLine 取到的 X-Line-Name）
 	if r := s.ResolveByLine("mockcbcn", "999"); r == nil || r.GroupCode != "gN" {

@@ -1,11 +1,11 @@
 // Package cluster 实现 mock 的核心抽象：可批量编排的虚拟客户集群。
 //
 //	行为档 BehaviorProfile  ← 一组可复用的应答行为（接听/拒接/振铃/放音/DTMF/故障/接通率）
-//	客户组 CustomerGroup    ← 号段批量 N 个客户，引用行为档，绑定线路
+//	客户组 CustomerGroup    ← 号段批量 N 个客户，引用行为档，绑定 mock SIP 入口端口
 //	客户个例 CustomerOverride ← 组内个别号码的例外行为/状态
-//	线路绑定 LineBinding    ← 客户组 ↔ Hermes 线路(t_line.address→mock)
+//	端口绑定 LineBinding    ← mock SIP 入口端口 ↔ 客户组
 //
-// 解析一通呼叫的行为：被叫号 → 命中客户组(号段) → 若有个例覆盖用个例，否则用组行为档。
+// 解析一通呼叫的行为：入口端口/被叫号 → 命中客户组 → 若有个例覆盖用个例，否则用组行为档。
 // 本包是「内存缓存 + 解析」领域服务：DB 读写经 model.Repository（写穿透、读走缓存——
 // Resolve* 是 SIP 来话热路径，绝不查库）。实体定义在 internal/entity。
 package cluster
@@ -14,6 +14,7 @@ import (
 	"context"
 	"errors"
 	"math/rand"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -45,8 +46,8 @@ type Store struct {
 
 	profiles  map[string]*BehaviorProfile  // by code
 	groups    map[string]*CustomerGroup    // by code
-	overrides map[string]*CustomerOverride // by number
-	bindings  map[string]*LineBinding      // by line_code（也按 address 索引）
+	overrides map[string]*CustomerOverride // by overrideKey(groupCode, number)
+	bindings  map[int]*LineBinding         // by listen_port
 
 	takeMu     sync.Mutex     // 保护 takeCursor
 	takeCursor map[string]int // 每组取号游标（多次测试错开取号、避免撞号）
@@ -71,7 +72,7 @@ func NewMemory() *Store {
 		profiles:   map[string]*BehaviorProfile{},
 		groups:     map[string]*CustomerGroup{},
 		overrides:  map[string]*CustomerOverride{},
-		bindings:   map[string]*LineBinding{},
+		bindings:   map[int]*LineBinding{},
 		takeCursor: map[string]int{},
 	}
 }
@@ -107,18 +108,30 @@ func (s *Store) Reload() error {
 	defer s.mu.Unlock()
 	s.profiles = indexBy(profiles, func(p *BehaviorProfile) string { return p.Code })
 	s.groups = indexBy(groups, func(g *CustomerGroup) string { return g.Code })
-	s.overrides = indexBy(overrides, func(o *CustomerOverride) string { return o.Number })
-	s.bindings = indexBy(bindings, func(b *LineBinding) string { return b.LineCode })
+	s.overrides = indexBy(overrides, func(o *CustomerOverride) string { return overrideKey(o.GroupCode, o.Number) })
+	s.bindings = map[int]*LineBinding{}
+	for i := range bindings {
+		b := bindings[i]
+		if b.ListenPort <= 0 {
+			continue
+		}
+		s.bindings[b.ListenPort] = &b
+	}
 	return nil
 }
 
-func indexBy[T any](items []T, key func(*T) string) map[string]*T {
-	m := make(map[string]*T, len(items))
+func indexBy[K comparable, T any](items []T, key func(*T) K) map[K]*T {
+	m := make(map[K]*T, len(items))
 	for i := range items {
 		it := items[i]
 		m[key(&it)] = &it
 	}
 	return m
+}
+
+// overrideKey 客户个例的内存索引键：组 + 号（对应 DB 复合唯一 (group_code, number)）。
+func overrideKey(groupCode, number string) string {
+	return groupCode + "\x00" + number
 }
 
 // ---- 解析（核心热路径）：一通呼叫 → 有效行为。只读缓存，不查库 ----
@@ -127,8 +140,8 @@ func indexBy[T any](items []T, key func(*T) string) map[string]*T {
 func (s *Store) ResolveByNumber(number string) *Resolved {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	// 1) 个例优先
-	if ov, ok := s.overrides[number]; ok {
+	// 1) 个例优先（无端口/组上下文，按号尽力命中任一个例）
+	if ov := s.findOverrideByNumberLocked(number); ov != nil {
 		r := &Resolved{Number: number, GroupCode: ov.GroupCode, Disabled: ov.State == "DISABLED"}
 		code := ov.BehaviorCode
 		if code == "" {
@@ -152,39 +165,73 @@ func (s *Store) ResolveByNumber(number string) *Resolved {
 	return nil
 }
 
-// ResolveByLine 按线路(line_code 或 address)找到绑定的客户组，再按被叫号解析。
-func (s *Store) ResolveByLine(lineCodeOrAddr, number string) *Resolved {
+// ResolveByPort 按 mock SIP 入口端口找到绑定的客户组，再按组内个例/组默认行为解析。
+func (s *Store) ResolveByPort(listenPort int, number string) *Resolved {
+	if listenPort <= 0 {
+		return s.ResolveByNumber(number)
+	}
 	s.mu.RLock()
-	var groupCode string
-	if b, ok := s.bindings[lineCodeOrAddr]; ok && b.Enabled != 0 {
-		groupCode = b.GroupCode
-	} else {
-		norm := normalizeLineName(lineCodeOrAddr)
-		for _, b := range s.bindings {
-			if b.Enabled == 0 {
-				continue
-			}
-			// 匹配 line_code / line_address 原值，或规范化后的 line_name（FS 注入的 X-Line-Name）。
-			if b.LineAddress == lineCodeOrAddr || b.LineCode == lineCodeOrAddr ||
-				(b.LineName != "" && normalizeLineName(b.LineName) == norm) {
-				groupCode = b.GroupCode
-				break
-			}
+	defer s.mu.RUnlock()
+	b := s.bindings[listenPort]
+	if b == nil || b.Enabled == 0 {
+		return nil
+	}
+	return s.resolveByGroupLocked(b.GroupCode, number)
+}
+
+// ResolveByLine 按可选线路 code/name 找绑定。保留给解析预览与旧数据兼容；SIP 热路径优先 ResolveByPort。
+func (s *Store) ResolveByLine(lineCodeOrName, number string) *Resolved {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	norm := normalizeLineName(lineCodeOrName)
+	for _, b := range s.bindings {
+		if b.Enabled == 0 {
+			continue
 		}
-	}
-	s.mu.RUnlock()
-	// 优先用号码解析（含个例）；若号码没命中但线路绑了组，用组行为兜底
-	if r := s.ResolveByNumber(number); r != nil {
-		return r
-	}
-	if groupCode != "" {
-		s.mu.RLock()
-		defer s.mu.RUnlock()
-		if g := s.groups[groupCode]; g != nil {
-			return &Resolved{Number: number, GroupCode: g.Code, Disabled: g.State == "DISABLED", Profile: s.profiles[g.BehaviorCode]}
+		if b.LineCode == lineCodeOrName || (b.LineName != "" && normalizeLineName(b.LineName) == norm) {
+			return s.resolveByGroupLocked(b.GroupCode, number)
 		}
 	}
 	return nil
+}
+
+func (s *Store) resolveByGroupLocked(groupCode, number string) *Resolved {
+	if groupCode != "" {
+		if g := s.groups[groupCode]; g != nil {
+			code := g.BehaviorCode
+			disabled := g.State == "DISABLED"
+			ov := s.overrides[overrideKey(groupCode, number)]
+			if ov == nil {
+				ov = s.overrides[overrideKey("", number)] // 全局个例（无组）兜底
+			}
+			if ov != nil {
+				if ov.BehaviorCode != "" {
+					code = ov.BehaviorCode
+				}
+				disabled = ov.State == "DISABLED"
+			}
+			return &Resolved{Number: number, GroupCode: g.Code, Disabled: disabled, Profile: s.profiles[code]}
+		}
+	}
+	return nil
+}
+
+// findOverrideByNumberLocked 按号查个例（无组上下文，ResolveByNumber 兜底用）：
+// 优先全局个例（GroupCode==""），否则返回任一同号个例。须在持读锁下调用。
+func (s *Store) findOverrideByNumberLocked(number string) *CustomerOverride {
+	var anyOv *CustomerOverride
+	for _, ov := range s.overrides {
+		if ov.Number != number {
+			continue
+		}
+		if ov.GroupCode == "" {
+			return ov
+		}
+		if anyOv == nil {
+			anyOv = ov
+		}
+	}
+	return anyOv
 }
 
 // ---- 查询（读缓存）----
@@ -210,7 +257,7 @@ func (s *Store) ListBindings() []LineBinding {
 	return values(s.bindings)
 }
 
-func values[T any](m map[string]*T) []T {
+func values[K comparable, T any](m map[K]*T) []T {
 	out := make([]T, 0, len(m))
 	for _, v := range m {
 		out = append(out, *v)
@@ -320,22 +367,21 @@ func (s *Store) UpsertOverride(o CustomerOverride) (*CustomerOverride, error) {
 		}
 	}
 	s.mu.Lock()
-	s.overrides[o.Number] = &o
+	s.overrides[overrideKey(o.GroupCode, o.Number)] = &o
 	s.mu.Unlock()
 	return &o, nil
 }
 
-// UpsertBinding 写线路绑定。
+// UpsertBinding 写入口端口绑定。
 func (s *Store) UpsertBinding(b LineBinding) (*LineBinding, error) {
-	if b.LineCode == "" && b.LineAddress == "" {
-		return nil, errors.New("line_code 或 line_address 必填")
+	if b.ListenPort <= 0 || b.ListenPort > 65535 {
+		return nil, errors.New("listen_port 必须是 1-65535")
 	}
-	if b.Enabled == 0 {
-		b.Enabled = 1
+	if b.LineCode == "" {
+		b.LineCode = "port_" + strconv.Itoa(b.ListenPort)
 	}
-	key := b.LineCode
-	if key == "" {
-		key = b.LineAddress
+	if b.GroupCode == "" {
+		return nil, errors.New("group_code 必填")
 	}
 	if s.repo != nil {
 		ctx, cancel := s.ctx()
@@ -345,7 +391,7 @@ func (s *Store) UpsertBinding(b LineBinding) (*LineBinding, error) {
 		}
 	}
 	s.mu.Lock()
-	s.bindings[key] = &b
+	s.bindings[b.ListenPort] = &b
 	s.mu.Unlock()
 	return &b, nil
 }
@@ -399,25 +445,29 @@ func (s *Store) DeleteOverride(number string) error {
 		}
 	}
 	s.mu.Lock()
-	delete(s.overrides, number)
+	for k, ov := range s.overrides {
+		if ov.Number == number {
+			delete(s.overrides, k)
+		}
+	}
 	s.mu.Unlock()
 	return nil
 }
 
-// DeleteBinding 按 line_code 删线路绑定。
-func (s *Store) DeleteBinding(lineCode string) error {
-	if lineCode == "" {
-		return errors.New("line_code 必填")
+// DeleteBinding 按入口端口删绑定。
+func (s *Store) DeleteBinding(listenPort int) error {
+	if listenPort <= 0 {
+		return errors.New("listen_port 必填")
 	}
 	if s.repo != nil {
 		ctx, cancel := s.ctx()
 		defer cancel()
-		if err := s.repo.DeleteLineBinding(ctx, lineCode); err != nil {
+		if err := s.repo.DeleteLineBinding(ctx, listenPort); err != nil {
 			return err
 		}
 	}
 	s.mu.Lock()
-	delete(s.bindings, lineCode)
+	delete(s.bindings, listenPort)
 	s.mu.Unlock()
 	return nil
 }

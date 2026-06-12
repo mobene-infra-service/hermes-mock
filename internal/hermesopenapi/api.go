@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -79,6 +80,31 @@ func (c *Client) ListAgentsWithFilter(ctx context.Context, pageNum, pageSize int
 		return nil, 0, err
 	}
 	return p.Records, p.Total, nil
+}
+
+// AgentGroupInfo 坐席组（带真名，basic /api/agentGroup 返回子集）。
+type AgentGroupInfo struct {
+	Code  string `json:"agentGroupCode"`
+	Name  string `json:"agentGroupName"`
+	Count int64  `json:"agentCount"`
+}
+
+// ListAgentGroups 查机构下所有坐席组（带真名 + 坐席数；basic GET /api/agentGroup/getAgentGroupsByOrgCode/{orgCode}）。
+// 注：这是 basic 的 /api 端点（非 /openapi）——direct 模式直连可用；gateway 模式可能不在网关 openapi 路由内，
+// 故调用方应对失败做降级（如从坐席列表聚合出 code+count）。
+func (c *Client) ListAgentGroups(ctx context.Context, orgCode string) ([]AgentGroupInfo, error) {
+	if orgCode == "" {
+		orgCode = c.cred.OrgCode
+	}
+	data, err := c.call(ctx, prodBasic, "GET", "/api/agentGroup/getAgentGroupsByOrgCode/"+url.PathEscape(orgCode), nil)
+	if err != nil {
+		return nil, err
+	}
+	var groups []AgentGroupInfo
+	if err := json.Unmarshal(data, &groups); err != nil {
+		return nil, err
+	}
+	return groups, nil
 }
 
 // BatchAddAgentsReq 批量建坐席（POST /openapi/agent/batch/add，对照 BatchAddAgentReq）。
@@ -202,14 +228,18 @@ func (c *Client) ListTts(ctx context.Context) ([]TtsVoice, error) {
 				break
 			}
 		}
-		for _, k := range []string{"name", "ttsName", "voiceName"} {
+		// Hermes basic TtsVoiceDTO 用 name/displayName（音色名/显示名）；兼容其它版本字段名。
+		for _, k := range []string{"displayName", "name", "ttsName", "voiceName", "description"} {
 			if s, ok := r[k].(string); ok && s != "" {
 				v.Name = s
 				break
 			}
 		}
-		if s, ok := r["lang"].(string); ok {
-			v.Lang = s
+		for _, k := range []string{"lang", "locale", "countryCode"} {
+			if s, ok := r[k].(string); ok && s != "" {
+				v.Lang = s
+				break
+			}
 		}
 		if v.TtsCode != "" {
 			out = append(out, v)
@@ -225,9 +255,26 @@ func (c *Client) CreateCallCenterTask(ctx context.Context, body any) (json.RawMe
 	return c.call(ctx, prodCallCenter, "POST", "/openapi/task/createAndImport", body)
 }
 
-// StartCallCenterTask 启动任务（POST /openapi/task/status/start/{taskCode}）。
+// StartCallCenterTask 恢复**已暂停**的任务（POST /openapi/task/status/start/{taskCode}）。
+// 注意：Hermes createAndImport 建任务后即自动拨号（NotifyDialJob），start 仅用于恢复 PAUSE 态任务——
+// 对刚建好的运行中任务调用会返回 "Task status is incorrect"。证据：Hermes CallTaskService.startTask（仅接受 PAUSE）。
 func (c *Client) StartCallCenterTask(ctx context.Context, taskCode string) (json.RawMessage, error) {
 	return c.call(ctx, prodCallCenter, "POST", "/openapi/task/status/start/"+taskCode, map[string]any{})
+}
+
+// StopCallCenterTask 暂停任务（POST /openapi/task/status/stop/{taskCode}）。
+func (c *Client) StopCallCenterTask(ctx context.Context, taskCode string) (json.RawMessage, error) {
+	return c.call(ctx, prodCallCenter, "POST", "/openapi/task/status/stop/"+taskCode, map[string]any{})
+}
+
+// CancelCallCenterTask 取消任务（POST /openapi/task/cancel/{taskCode}）。
+func (c *Client) CancelCallCenterTask(ctx context.Context, taskCode string) (json.RawMessage, error) {
+	return c.call(ctx, prodCallCenter, "POST", "/openapi/task/cancel/"+taskCode, map[string]any{})
+}
+
+// GetCallCenterTaskStatus 查任务状态（GET /openapi/task/status/{taskCode}）。
+func (c *Client) GetCallCenterTaskStatus(ctx context.Context, taskCode string) (json.RawMessage, error) {
+	return c.call(ctx, prodCallCenter, "GET", "/openapi/task/status/"+taskCode, nil)
 }
 
 // ConvMessage 一条对话消息（ASR/TTS/系统），字段宽松映射。

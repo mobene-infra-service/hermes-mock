@@ -59,7 +59,8 @@ export interface TraceSession {
   startedAt: string
   updatedAt: string
   legs: string[]
-  events: TraceEvent[]
+  eventCount?: number // 列表摘要的事件数（瘦身后列表只回这个，不回 events）
+  events?: TraceEvent[] // 仅单查 /trace/sessions/:id 或 ?match= 时返回
 }
 
 // ===== Hermes 栈服务健康（仅健康，不查业务库）=====
@@ -163,7 +164,7 @@ export interface PreflightResp {
 
 export interface BootstrapResult {
   profileCode: string; customerGroup: string; agentGroup: string
-  lineCode?: string; lineBinding: string; notes: string[]
+  lineCode?: string; listenPort?: number; lineBinding: string; notes: string[]
 }
 
 export interface ScenarioMetrics {
@@ -207,12 +208,12 @@ export interface CallRecord {
   lineName: string
   direction: string
   callType: string
+  expectOutcome?: string
   status: string
   result: string
   hangupCode: number
   traceId: string
   callUuid: string
-  sipCallId: string
   startedAt: string
   answeredAt?: string
   endedAt?: string
@@ -221,9 +222,6 @@ export interface CallRecord {
   stepsJson: string
   detailJson: string
   lastSummary: string
-  signalSummary: string
-  mediaSummary: string
-  callbackSummary: string
 }
 
 export interface CallRecordPage {
@@ -261,10 +259,10 @@ export interface AgentCallRecord {
   expectOutcome?: string; expectFault?: string; expectDisabled?: boolean
   answered: boolean; endCause?: string; inbound?: boolean
   verdict?: string; verdictReason?: string
-  traceId?: string; displayCaller?: string; startedAtMs?: number; durationMs?: number
+  traceId?: string; displayCaller?: string; startedAtMs?: number; answeredAtMs?: number; durationMs?: number
 }
 
-// ===== mock 客户配置（号段组 + 个例 + 线路绑定 + 行为档）=====
+// ===== mock 客户配置（号段组 + 个例 + 端口绑定 + 行为档）=====
 export interface BehaviorProfile {
   id?: number
   code: string
@@ -316,8 +314,9 @@ export interface CustomerOverride {
 
 export interface LineBinding {
   id?: number
+  listenPort: number
   lineCode?: string
-  lineAddress?: string
+  lineName?: string
   groupCode?: string
   enabled?: number
   remark?: string
@@ -349,7 +348,7 @@ export interface OrgsResp { orgs: OrgConfig[]; current: string }
 // 群呼表单联动：真实 TTS 模板 + 技能组（从坐席聚合）
 export interface TtsVoice { ttsCode: string; name: string; lang?: string }
 
-export interface AgentGroupAgg { code: string; count: number }
+export interface AgentGroupAgg { code: string; name?: string; count: number }
 
 // Hermes 回调
 export interface CallbackRecord { seq: number; ts: string; source: string; event: string; orgCode: string; callUuid: string; remote: string; payload: unknown }

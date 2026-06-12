@@ -6,6 +6,7 @@
 package tracelog
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -37,7 +38,7 @@ type Event struct {
 	Seq     int64             `json:"seq"`
 	TS      time.Time         `json:"ts"`
 	Session string            `json:"session"` // 会话 ID（一通通话/一次测试）
-	Leg     string            `json:"leg"`     // 哪条腿：customer / agent / ""（如 5002、客户号）
+	Leg     string            `json:"leg"`     // mock 侧腿标识：客户号 / agent:分机 / ""（角色名放 Detail）
 	Channel Channel           `json:"channel"`
 	Dir     Dir               `json:"dir"`
 	Method  string            `json:"method"`  // INVITE / 200 / CHANNEL_ANSWER / agent-login …
@@ -56,6 +57,46 @@ type Event struct {
 type HeaderKV struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
+}
+
+// 业务 callUuid 头名（FreeSWITCH 经 sip_h_X- 注入）。提取优先级按 Hermes 真实链路证据排定：
+//   - `x-session-id`（值形如 CCMDL{uuid}）是**所有被叫场景的通用 callUuid 载体**——hermes-common
+//     `EslEventConstant.SID = "variable_sip_h_x-session-id"`，群呼/callbot/otp/坐席外呼共用；
+//     坐席 jssip 外呼也注 `x-session-id:CCMDL{uuid}`，坐席侧 saveCallRecord 写的 `CCMDL+callId` 与之对齐。
+//     证据：docs/hermes/{agent-outbound-call,otp}.md。
+//   - `x-call-uuid`/`x-callid`/`x-call-id`：真 callUuid 头（若链路确实带），与 session-id 同权优先。
+//   - `x-jcallid`(=X-JCallId)：**坐席外呼里传的是 businessId，不是 callUuid**（agent-outbound-call.md:80），
+//     故降为**最末兜底**，仅在前两族都取不到时才用——避免错把 businessId 当 callUuid 致两腿关联不上。
+//
+// 同一通话的被叫腿与坐席腿用同一 callUuid 关联，多条报文也据此聚合，必须稳定取同一个值。
+var (
+	bizUUIDPrimary  = []string{"x-call-uuid", "x-callid", "x-call-id", "x-session-id", "x-session_id"}
+	bizUUIDFallback = []string{"x-jcallid"}
+)
+
+// BizUUIDFromHeaders 按优先级从 SIP 头提取 Hermes 业务 callUuid（会话聚合键）：
+// 先取真 callUuid / session-id 族任一非空值，都没有才退到 x-jcallid(businessId)；大小写不敏感。
+//
+// siptrace（传输层抓真包）与 sipagent（业务 handler）**共用本函数**，保证「同一 INVITE →
+// 同一聚合键」——否则同一通话的 SIP 报文事件与 mock 决策事件会分裂成两个会话。
+func BizUUIDFromHeaders(headers []HeaderKV) string {
+	if v := firstHeaderValue(headers, bizUUIDPrimary); v != "" {
+		return v
+	}
+	return firstHeaderValue(headers, bizUUIDFallback)
+}
+
+// firstHeaderValue 返回 headers 中首个名在 names（小写）内且值非空的头值。
+func firstHeaderValue(headers []HeaderKV, names []string) string {
+	for _, h := range headers {
+		ln := strings.ToLower(h.Name)
+		for _, n := range names {
+			if ln == n && h.Value != "" {
+				return h.Value
+			}
+		}
+	}
+	return ""
 }
 
 // Session 一通通话/一次测试的完整轨迹。
@@ -140,13 +181,13 @@ func (b *Bus) emit(e Event) {
 	}
 }
 
-// Sessions 返回最近会话（新→旧）。
+// Sessions 返回最近会话（新→旧）的**读快照**（深拷贝，脱锁后可安全 Marshal）。
 func (b *Bus) Sessions() []*Session {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	out := make([]*Session, 0, len(b.order))
 	for i := len(b.order) - 1; i >= 0; i-- {
-		out = append(out, b.sessions[b.order[i]])
+		out = append(out, cloneSession(b.sessions[b.order[i]]))
 	}
 	return out
 }
@@ -178,11 +219,26 @@ func (b *Bus) SessionByCallID(callID string) string {
 	return ""
 }
 
-// Session 取单个会话（含全部事件）。
+// Session 取单个会话的**读快照**（含全部事件，深拷贝）。无则返回 nil。
 func (b *Bus) Session(id string) *Session {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.sessions[id]
+	return cloneSession(b.sessions[id])
+}
+
+// cloneSession 返回 Session 的读快照：复制结构体并一级复制 Events/Legs 切片。
+//
+// 不变量：Event 一旦经 emit 追加即不可变（emit 只 append 新 Event，从不回改旧值），
+// 因此 Event.Detail/Headers 共享引用对并发读是安全的；只需复制会被 append 改写的
+// Events/Legs 切片头与底层数组，读取侧脱锁后即可安全遍历/Marshal，不与 emit 竞争。
+func cloneSession(s *Session) *Session {
+	if s == nil {
+		return nil
+	}
+	cp := *s
+	cp.Events = append([]Event(nil), s.Events...)
+	cp.Legs = append([]string(nil), s.Legs...)
+	return &cp
 }
 
 func contains(ss []string, s string) bool {

@@ -1,6 +1,9 @@
 package siptrace
 
-import "testing"
+import (
+	"strconv"
+	"testing"
+)
 
 // 一条真实风格的 Hermes INVITE（含 FS 注入的业务头与 SDP）。
 const sampleInvite = "INVITE sip:123@192.168.107.9:5060 SIP/2.0\r\n" +
@@ -77,6 +80,39 @@ func TestParseResponse(t *testing.T) {
 	}
 }
 
+func TestResolveLegSticksToInviteCallee(t *testing.T) {
+	tr := &Tracer{cid2leg: map[string]string{}}
+	invite := parse([]byte(
+		"INVITE sip:8613800100009@10.24.140.92:5060 SIP/2.0\r\n" +
+			"From: \"1222\" <sip:1222@172.16.7.27>;tag=caller\r\n" +
+			"To: <sip:8613800100009@10.24.140.92:5060>\r\n" +
+			"Call-ID: same-dialog\r\n\r\n",
+	))
+	if got := tr.resolveLeg(invite, "IN"); got != "8613800100009" {
+		t.Fatalf("INVITE leg=%q, want callee", got)
+	}
+
+	bye := parse([]byte(
+		"BYE sip:1222@172.16.7.27 SIP/2.0\r\n" +
+			"From: <sip:8613800100009@10.24.140.92:5060>;tag=callee\r\n" +
+			"To: \"1222\" <sip:1222@172.16.7.27>;tag=caller\r\n" +
+			"Call-ID: same-dialog\r\n\r\n",
+	))
+	if got := tr.resolveLeg(bye, "OUT"); got != "8613800100009" {
+		t.Fatalf("BYE leg=%q, want sticky callee（不能误标成 1222）", got)
+	}
+
+	byeOK := parse([]byte(
+		"SIP/2.0 200 OK\r\n" +
+			"From: <sip:8613800100009@10.24.140.92:5060>;tag=callee\r\n" +
+			"To: \"1222\" <sip:1222@172.16.7.27>;tag=caller\r\n" +
+			"Call-ID: same-dialog\r\n\r\n",
+	))
+	if got := tr.resolveLeg(byeOK, "IN"); got != "8613800100009" {
+		t.Fatalf("BYE 200 leg=%q, want sticky callee", got)
+	}
+}
+
 func TestParseNonSIPIgnored(t *testing.T) {
 	if p := parse([]byte("\r\n\r\n")); p != nil { // keepalive ping
 		t.Errorf("keepalive 应忽略, got %+v", p)
@@ -124,5 +160,46 @@ func TestResolveAggKeyStickyBizUUID(t *testing.T) {
 	}
 	if got := tr.resolveAggKey("leg-call-id-2", ""); got != biz {
 		t.Errorf("第二条腿响应应复用 bizUUID, got %q", got)
+	}
+}
+
+// parse() 应按优先级取 call-uuid 族，即使 X-SESSION-ID 排在 X-CALL-UUID 之前——
+// 与 sipagent 共用 tracelog.BizUUIDFromHeaders，保证两路聚合键一致。
+// TestParseBizUUIDIgnoresJCallId 验证：被叫腿 INVITE 同时带 X-JCallId(businessId) 与
+// x-session-id(=CCMDL{uuid}=真 callUuid) 时，提取必须取 x-session-id 而非 X-JCallId——
+// 否则坐席外呼两腿（坐席侧记录 CCMDL{uuid} vs 被叫腿）关联不上。这是 BizUUID 优先级修复的回归守卫。
+func TestParseBizUUIDIgnoresJCallId(t *testing.T) {
+	msg := "INVITE sip:123@h SIP/2.0\r\n" +
+		"From: <sip:a@h>;tag=1\r\n" +
+		"To: <sip:123@h>\r\n" +
+		"Call-ID: cid-x\r\n" +
+		"X-JCallId: BIZ\r\n" + // businessId，非 callUuid，不该被取
+		"x-session-id: CCMDLuuid\r\n" + // Hermes 通用 callUuid 载体
+		"\r\n"
+	p := parse([]byte(msg))
+	if p == nil {
+		t.Fatal("parse nil")
+	}
+	if p.bizUUID != "CCMDLuuid" {
+		t.Errorf("bizUUID=%q, 应取 x-session-id(CCMDLuuid) 而非 X-JCallId(businessId)", p.bizUUID)
+	}
+}
+
+// resolveAggKey/resolveLeg 写入的 cid 映射必须有容量上限：灌入 > maxCID 个 Call-ID 后
+// 映射不超限、最旧被淘汰、最新仍可解析（堵内存泄漏的回归）。
+func TestRememberCIDEvictsOldest(t *testing.T) {
+	tr := &Tracer{cid2biz: map[string]string{}, cid2leg: map[string]string{}}
+	for i := 0; i < maxCID+100; i++ {
+		tr.resolveAggKey("cid-"+strconv.Itoa(i), "biz-"+strconv.Itoa(i))
+	}
+	if len(tr.cid2biz) > maxCID || len(tr.cidOrder) > maxCID {
+		t.Errorf("超上限: cid2biz=%d cidOrder=%d max=%d", len(tr.cid2biz), len(tr.cidOrder), maxCID)
+	}
+	if _, ok := tr.cid2biz["cid-0"]; ok {
+		t.Error("最旧 cid-0 应被淘汰")
+	}
+	last := "cid-" + strconv.Itoa(maxCID+99)
+	if got := tr.resolveAggKey(last, ""); got != "biz-"+strconv.Itoa(maxCID+99) {
+		t.Errorf("最新 %s 应仍解析到 bizUUID, got %q", last, got)
 	}
 }

@@ -5,14 +5,14 @@
 --          **绝不**包含任何 Hermes 业务表（t_line/t_agent/t_cdr 等）。
 --          mock 写 Hermes 业务库（如供给线路）是另一回事，走 basic 库，不在此。
 --
--- 核心抽象：mock 是「可批量编排的虚拟客户/坐席集群」：
+-- 核心抽象：mock 是「可批量编排的虚拟客户集群」：
 --   行为档(behavior_profile)  ← 一组可自定义的应答行为
---   客户组(customer_group)    ← 一个号段 N 个客户，引用一个行为档，绑定到一条线路
+--   客户组(customer_group)    ← 一个号段 N 个客户，引用一个行为档，绑定到一个 mock SIP 入口端口
 --   客户个例(customer_override)← 组内个别号码的例外行为（覆盖组行为）
---   线路绑定(line_binding)    ← 客户组 ↔ Hermes 线路(t_line.address→mock) 的对应
---   坐席组(agent_group)       ← 一批分机，批量注册/控制
+--   端口绑定(line_binding)    ← mock SIP 入口端口 ↔ 客户组 的对应
 --
 -- 形态：复用 hermes-stack 的 MySQL 实例，独立库 hermes_mock，逻辑隔离。
+-- Schema 单源：本 DDL 是 internal/entity 各 GORM 实体 tag 的生成快照；改表结构先改实体，再同步此处。
 -- 加载：mysql -uroot -p123456 < hermes_mock.sql
 -- =====================================================================
 
@@ -46,11 +46,11 @@ CREATE TABLE `mock_behavior_profile` (
   `gmt_create`    datetime     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `gmt_modified`  datetime     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_code` (`code`)
+  UNIQUE KEY `uk_behavior_code` (`code`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='mock 行为档（可复用应答行为）';
 
 -- ---------------------------------------------------------------------
--- 2) 客户组：一个号段 N 个虚拟客户 + 引用行为档 + 绑定线路
+-- 2) 客户组：一个号段 N 个虚拟客户 + 引用行为档
 --    号码范围 [number_start, number_start+count)，或显式前缀+起始。
 -- ---------------------------------------------------------------------
 DROP TABLE IF EXISTS `mock_customer_group`;
@@ -67,7 +67,7 @@ CREATE TABLE `mock_customer_group` (
   `gmt_create`     datetime     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `gmt_modified`   datetime     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_code` (`code`)
+  UNIQUE KEY `uk_group_code` (`code`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='mock 客户组（号段批量）';
 
 -- ---------------------------------------------------------------------
@@ -84,52 +84,38 @@ CREATE TABLE `mock_customer_override` (
   `gmt_create`     datetime     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `gmt_modified`   datetime     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_number` (`number`),
-  KEY `idx_group` (`group_code`)
+  UNIQUE KEY `uk_group_number` (`group_code`, `number`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='mock 客户个例覆盖';
 
 -- ---------------------------------------------------------------------
--- 4) 线路绑定：客户组 ↔ Hermes 线路（t_line.address→mock）
---    一条线路来的呼叫 → 命中绑定的客户组 → 按组(或个例)行为应答。
---    line_code/address 是被测系统(basic 库)里的线路标识，这里只存“对应关系”。
+-- 4) 入口端口绑定：mock SIP 入口端口 ↔ 客户组
+--    Hermes 线路 address 仍在 Hermes 侧配置为 mockIP:listen_port；
+--    mock 只按 INVITE 到达的本地端口命中客户组，再按组(或个例)行为应答。
 -- ---------------------------------------------------------------------
 DROP TABLE IF EXISTS `mock_line_binding`;
 CREATE TABLE `mock_line_binding` (
   `id`             bigint unsigned NOT NULL AUTO_INCREMENT,
-  `line_code`      varchar(64)  NOT NULL DEFAULT ''      COMMENT 'Hermes 线路 code（被测系统的，仅记录对应）',
-  `line_address`   varchar(128) NOT NULL DEFAULT ''      COMMENT '线路 address（=mock 监听地址，呼叫据此到达）',
-  `line_name`      varchar(128) NOT NULL DEFAULT ''      COMMENT '线路名（FS 经 X-Line-Name 注入，规范化后匹配：去横杠+小写）',
+  `listen_port`    int          NOT NULL                 COMMENT 'mock SIP 入口端口，如 5060/5061',
+  `line_code`      varchar(64)  NOT NULL DEFAULT ''      COMMENT '可选：Hermes 线路 code，仅作标识/兼容',
+  `line_name`      varchar(128) NOT NULL DEFAULT ''      COMMENT '可选：线路名（FS 经 X-Line-Name 注入，主要用于观测）',
   `group_code`     varchar(64)  NOT NULL DEFAULT ''      COMMENT '绑定的客户组 code',
   `enabled`        tinyint      NOT NULL DEFAULT 1,
   `remark`         varchar(255) NOT NULL DEFAULT '',
   `gmt_create`     datetime     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `gmt_modified`   datetime     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_line` (`line_code`),
+  UNIQUE KEY `uk_port` (`listen_port`),
+  KEY `idx_line_code` (`line_code`),
   KEY `idx_group` (`group_code`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='mock 客户组↔线路 绑定';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='mock 入口端口↔客户组绑定';
 
 -- ---------------------------------------------------------------------
 -- 5) （已移除）坐席组 mock_agent_group：mock 只演客户被叫腿，坐席由真实 Hermes 坐席承担。
 -- ---------------------------------------------------------------------
 
 -- ---------------------------------------------------------------------
--- 6) 测试用例定义：可自定义的「触发 + 期望剧本」（参数 JSON）
+-- 6) （已移除）测试用例定义 mock_test_case：用例是 testkit 代码内的 Run* 方法，无数据驱动需求。
 -- ---------------------------------------------------------------------
-DROP TABLE IF EXISTS `mock_test_case`;
-CREATE TABLE `mock_test_case` (
-  `id`            bigint unsigned NOT NULL AUTO_INCREMENT,
-  `code`          varchar(64)  NOT NULL                  COMMENT '用例编码',
-  `name`          varchar(128) NOT NULL DEFAULT '',
-  `kind`          varchar(32)  NOT NULL DEFAULT 'line-call' COMMENT 'line-call/outbound/inbound/agent-bridge…',
-  `params_json`   json         NULL                      COMMENT '触发参数 + 期望（可自定义）',
-  `enabled`       tinyint      NOT NULL DEFAULT 1,
-  `remark`        varchar(255) NOT NULL DEFAULT '',
-  `gmt_create`    datetime     NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  `gmt_modified`  datetime     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_code` (`code`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='mock 测试用例定义';
 
 -- ---------------------------------------------------------------------
 -- 7) 测试运行历史：每次运行结果 + 步骤断言（回归趋势）
@@ -152,23 +138,25 @@ CREATE TABLE `mock_test_run` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='mock 测试运行历史';
 
 -- ---------------------------------------------------------------------
--- 8) 通话链路会话：一通通话/一次观测的元信息
+-- 8) 通话链路（单腿）：一条 SIP 对话腿的元信息。
+--     写入侧严格单腿（一条 SIP Call-ID 一行）；「一通业务通话含多腿」由读时按 call_uuid 归并。
 -- ---------------------------------------------------------------------
-DROP TABLE IF EXISTS `mock_trace_session`;
-CREATE TABLE `mock_trace_session` (
+DROP TABLE IF EXISTS `mock_trace_leg`;
+CREATE TABLE `mock_trace_leg` (
   `id`            bigint unsigned NOT NULL AUTO_INCREMENT,
-  `session_id`    varchar(32)  NOT NULL,
-  `call_uuid`     varchar(64)  NOT NULL DEFAULT ''        COMMENT '业务 callUuid（SIP 业务头提取，多腿聚合键）',
+  `session_id`    varchar(64)  NOT NULL                     COMMENT '单腿聚合键（业务 callUuid 优先，否则 SIP Call-ID）',
+  `call_uuid`     varchar(96)  NOT NULL DEFAULT ''          COMMENT '业务 callUuid：同一通业务通话的多腿共享（关联锚）',
+  `leg_role`      varchar(16)  NOT NULL DEFAULT ''          COMMENT 'customer / agent',
+  `line`          varchar(128) NOT NULL DEFAULT ''          COMMENT '线路名/标识（观测用）',
   `kind`          varchar(24)  NOT NULL DEFAULT '',
   `title`         varchar(255) NOT NULL DEFAULT '',
-  `legs`          varchar(255) NOT NULL DEFAULT '',
   `started_at`    datetime(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   `updated_at`    datetime(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
   PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_session` (`session_id`),
-  KEY `idx_call_uuid` (`call_uuid`),
-  KEY `idx_time` (`started_at`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='mock 通话链路会话';
+  UNIQUE KEY `uk_leg_session` (`session_id`),
+  KEY `idx_leg_call_uuid` (`call_uuid`),
+  KEY `idx_leg_time` (`started_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='mock 通话链路（单腿）';
 
 -- ---------------------------------------------------------------------
 -- 9) 通话链路事件：SIP/媒体/WS 时间线（含原始 SIP 报文）
@@ -187,19 +175,20 @@ CREATE TABLE `mock_trace_event` (
   `headers_json`  json         NULL                      COMMENT '结构化 SIP 头（含 X- 业务头）',
   `raw_message`   mediumtext   NULL                      COMMENT '原始 SIP 报文（req.String()）',
   PRIMARY KEY (`id`),
-  KEY `idx_session_seq` (`session_id`, `seq`)
+  KEY `idx_event_session_seq` (`session_id`, `seq`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='mock 通话链路事件（含原始 SIP 报文）';
 
 -- ---------------------------------------------------------------------
--- 10) mock 自己保存的呼叫记录：一行代表一通业务/客户电话。
---     任务发起时先写入预期通话，真实 SIP/媒体/WS 事件到达后按 trace/callUuid 补齐。
+-- 10) mock 通话记录（聚合根）：一行代表一通业务/客户电话。
+--     发起侧（testkit/坐席外呼）先写预期，被叫腿（calltrace.Tracker 按 call_uuid 主键）补齐状态。
+--     SIP 报文级观测在 mock_trace_leg/event，不在本表（已下沉）。
 -- ---------------------------------------------------------------------
-DROP TABLE IF EXISTS `mock_call_record`;
-CREATE TABLE `mock_call_record` (
+DROP TABLE IF EXISTS `mock_call`;
+CREATE TABLE `mock_call` (
   `id`               bigint unsigned NOT NULL AUTO_INCREMENT,
-  `record_id`        varchar(96)  NOT NULL,
-  `scenario`         varchar(32)  NOT NULL DEFAULT 'unknown' COMMENT 'manual-outbound/callcenter-task/callbot-task/otp/sip-call',
-  `source`           varchar(24)  NOT NULL DEFAULT 'mock'    COMMENT 'testkit/sip/callback 等',
+  `record_id`        varchar(96)  NOT NULL                  COMMENT '主键：被叫腿=call_uuid，发起侧=run/trace/call 派生',
+  `scenario`         varchar(32)  NOT NULL DEFAULT 'unknown' COMMENT 'sip-inbound/callcenter-task/callbot-task/otp/agent-call 等',
+  `source`           varchar(24)  NOT NULL DEFAULT 'mock'    COMMENT 'testkit/sip/agent 等',
   `run_id`           varchar(64)  NOT NULL DEFAULT '',
   `org_code`         varchar(64)  NOT NULL DEFAULT '',
   `task_name`        varchar(128) NOT NULL DEFAULT '',
@@ -213,12 +202,12 @@ CREATE TABLE `mock_call_record` (
   `line_name`        varchar(128) NOT NULL DEFAULT '',
   `direction`        varchar(32)  NOT NULL DEFAULT 'HERMES_TO_MOCK',
   `call_type`        varchar(32)  NOT NULL DEFAULT '',
+  `expect_outcome`   varchar(24)  NOT NULL DEFAULT ''       COMMENT '发起侧期望行为（断言用）',
   `status`           varchar(24)  NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING/RINGING/ANSWERED/ENDED/REJECTED/FAILED',
   `result`           varchar(64)  NOT NULL DEFAULT '',
   `hangup_code`      int          NOT NULL DEFAULT 0,
   `trace_id`         varchar(64)  NOT NULL DEFAULT '',
-  `call_uuid`        varchar(96)  NOT NULL DEFAULT '',
-  `sip_call_id`      varchar(128) NOT NULL DEFAULT '',
+  `call_uuid`        varchar(96)  NOT NULL DEFAULT ''       COMMENT '关联锚：与 mock_trace_leg.call_uuid 关联',
   `started_at`       datetime(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   `answered_at`      datetime(3)  NULL,
   `ended_at`         datetime(3)  NULL,
@@ -227,34 +216,37 @@ CREATE TABLE `mock_call_record` (
   `steps_json`       json         NULL,
   `detail_json`      json         NULL,
   `last_summary`     varchar(512) NOT NULL DEFAULT '',
-  `signal_summary`   varchar(512) NOT NULL DEFAULT '',
-  `media_summary`    varchar(512) NOT NULL DEFAULT '',
-  `callback_summary` varchar(512) NOT NULL DEFAULT '',
   `gmt_create`       datetime     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `gmt_modified`     datetime     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_record` (`record_id`),
-  KEY `idx_scenario_time` (`scenario`, `started_at`),
-  KEY `idx_status_time` (`status`, `started_at`),
-  KEY `idx_org_time` (`org_code`, `started_at`),
-  KEY `idx_customer` (`customer_group`, `customer_number`),
-  KEY `idx_agent` (`agent_group_code`, `agent_number`),
-  KEY `idx_task` (`task_name`, `task_code`),
-  KEY `idx_trace` (`trace_id`),
+  KEY `idx_call_scenario_time` (`scenario`, `started_at`),
+  KEY `idx_call_status_time` (`status`, `started_at`),
+  KEY `idx_call_org_time` (`org_code`, `started_at`),
+  KEY `idx_call_customer` (`customer_group`, `customer_number`),
+  KEY `idx_call_agent` (`agent_group_code`, `agent_number`),
+  KEY `idx_call_task` (`task_name`, `task_code`),
+  KEY `idx_call_trace` (`trace_id`),
   KEY `idx_call_uuid` (`call_uuid`),
-  KEY `idx_sip_call` (`sip_call_id`),
-  KEY `idx_line` (`line_code`, `line_address`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='mock 自有呼叫记录（任务 + SIP 观测聚合）';
+  KEY `idx_call_line` (`line_code`, `line_address`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='mock 通话记录（聚合根：发起预期 + 被叫腿结果）';
 
 SET FOREIGN_KEY_CHECKS = 1;
 
 -- =====================================================================
 -- 关系总览：
---   behavior_profile ◄── customer_group ──► line_binding ──► (basic.t_line)
---                    ◄── customer_override (组内例外)
---                    ◄── agent_group
---   解析一通呼叫的行为：line_binding(按 address/line_code) → customer_group
---      → 若被叫号有 customer_override 用个例行为，否则用组 behavior_code。
+--   配置域：behavior_profile ◄── customer_group ──► line_binding(listen_port→组)
+--                            ◄── customer_override（组内例外，复合唯一 group_code+number）
+--     解析一通呼叫的行为：line_binding(按 listen_port/line) → customer_group
+--        → 若被叫号有 customer_override 用个例行为，否则用组 behavior_code。
+--   记录域：mock_call（聚合根，一通电话 1 行）
+--             │ call_uuid（被叫腿=record_id；与下表关联锚）
+--             ▼
+--           mock_trace_leg（单腿 SIP 对话，sip_call_id=session_id）
+--             │ session_id
+--             ▼
+--           mock_trace_event（单腿时间线 + 原始报文）
+--     mock_callback 按 call_uuid 关联；「一通含多腿」由读时按 call_uuid 归并（写入侧不跨腿聚合）。
 -- =====================================================================
 
 -- ============================================================
@@ -275,6 +267,10 @@ CREATE TABLE `mock_org_config` (
   `otp_url`          varchar(256) NOT NULL DEFAULT ''      COMMENT 'otp 服务地址(direct 模式)',
   `agent_ws_url`     varchar(256) NOT NULL DEFAULT ''      COMMENT 'hermes-ws 工作台地址(host:port)',
   `user_code`        varchar(64)  NOT NULL DEFAULT ''      COMMENT '直连模式注入的操作人(审计)',
+  `default_agent_group_code` varchar(64)  NOT NULL DEFAULT '' COMMENT '坐席外呼默认技能组',
+  `default_agent_role_code`  varchar(64)  NOT NULL DEFAULT '' COMMENT '坐席外呼默认角色',
+  `default_dep_code`         varchar(64)  NOT NULL DEFAULT '' COMMENT '坐席外呼默认部门',
+  `default_agent_password`   varchar(128) NOT NULL DEFAULT '' COMMENT '坐席默认登录口令（明文，仅内网测试）',
   `remark`           varchar(255) NOT NULL DEFAULT '',
   `gmt_create`       datetime     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `gmt_modified`     datetime     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -298,7 +294,7 @@ CREATE TABLE `mock_callback` (
   `remote`       varchar(64)  NOT NULL DEFAULT ''         COMMENT '来源 IP',
   `payload_json` mediumtext   NULL                        COMMENT '原始回调 JSON',
   PRIMARY KEY (`id`),
-  KEY `idx_ts` (`ts`),
-  KEY `idx_call_uuid` (`call_uuid`),
-  KEY `idx_source_event` (`source`, `event`)
+  KEY `idx_cb_ts` (`ts`),
+  KEY `idx_cb_call_uuid` (`call_uuid`),
+  KEY `idx_cb_source_event` (`source`, `event`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='mock 收到的 Hermes 回调';

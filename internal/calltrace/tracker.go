@@ -1,5 +1,5 @@
 // Package calltrace 记录 agent 处理的每通被叫通话（活跃 + 最近 + 统计），供监控页与断言查询。
-// 持久化经 model.Repository 落 mock_call_record（持久、重启不丢）；repo=nil 仅单测（内存）。
+// 持久化经 model.Repository 落 mock_call（持久、重启不丢）；repo=nil 仅单测（内存）。
 package calltrace
 
 import (
@@ -36,7 +36,7 @@ type Call struct {
 	EndedAt    *time.Time `json:"endedAt,omitempty"`
 }
 
-// Tracker 通话跟踪：落 mock_call_record（scenario=sip-inbound）；repo=nil 仅单测（内存）。
+// Tracker 通话跟踪：落 mock_call（scenario=sip-inbound）；repo=nil 仅单测（内存）。
 type Tracker struct {
 	repo model.Repository
 	now  func() time.Time
@@ -59,23 +59,30 @@ func (t *Tracker) ctx() (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 5*time.Second)
 }
 
-func (t *Tracker) save(row entity.CallRecord) {
+func (t *Tracker) save(row entity.MockCall) {
 	ctx, cancel := t.ctx()
 	defer cancel()
 	_ = t.repo.SaveCallRecord(ctx, &row)
 }
 
 // Start 登记一通新通话（被叫腿 RINGING），返回 record id。
-func (t *Tracker) Start(callee, caller, outcome string) string {
-	id := uuid.NewString()
+// callUUID 为 Hermes 业务 callUuid（被叫腿 INVITE 的 X-CALL-UUID 提取，由 sipagent 传入）：
+// 用作 record_id 主键，使本记录与同一通话的 trace 会话（同 call_uuid）天然关联，
+// 也让 INVITE 重传/同一通话多次落库幂等合并到一行（根除「一通电话多条记录」）。空则回退随机 uuid。
+func (t *Tracker) Start(callUUID, callee, caller, outcome string) string {
+	id := callUUID
+	if id == "" {
+		id = uuid.NewString()
+	}
 	now := t.now()
 	if t.persistent() {
 		detail, _ := json.Marshal(map[string]string{"caller": caller})
-		t.save(entity.CallRecord{
+		t.save(entity.MockCall{
 			RecordID: id, Scenario: "sip-inbound", Source: "sip",
 			CustomerNumber: callee, Result: outcome,
 			Status:    entity.CallRecordStatusRinging,
 			Direction: "HERMES_TO_MOCK", StartedAt: now, LastEventAt: now,
+			CallUUID:   callUUID,
 			DetailJSON: string(detail),
 		})
 		return id
@@ -90,7 +97,7 @@ func (t *Tracker) Start(callee, caller, outcome string) string {
 func (t *Tracker) Answered(id string) {
 	if t.persistent() {
 		now := t.now()
-		t.save(entity.CallRecord{
+		t.save(entity.MockCall{
 			RecordID: id, Status: entity.CallRecordStatusAnswered, AnsweredAt: &now, LastEventAt: now,
 		})
 		return
@@ -108,7 +115,7 @@ func (t *Tracker) Answered(id string) {
 func (t *Tracker) Rejected(id string, code int) {
 	if t.persistent() {
 		now := t.now()
-		t.save(entity.CallRecord{
+		t.save(entity.MockCall{
 			RecordID: id, Status: entity.CallRecordStatusRejected, HangupCode: code, EndedAt: &now, LastEventAt: now,
 		})
 		return
@@ -120,7 +127,7 @@ func (t *Tracker) Rejected(id string, code int) {
 func (t *Tracker) Ended(id string) {
 	if t.persistent() {
 		now := t.now()
-		t.save(entity.CallRecord{
+		t.save(entity.MockCall{
 			RecordID: id, Status: entity.CallRecordStatusEnded, EndedAt: &now, LastEventAt: now,
 		})
 		return
@@ -232,7 +239,7 @@ func (t *Tracker) Stats() Stats {
 }
 
 // recentRows 取最近的 sip-inbound 记录（DB 模式）。
-func (t *Tracker) recentRows() []entity.CallRecord {
+func (t *Tracker) recentRows() []entity.MockCall {
 	ctx, cancel := t.ctx()
 	defer cancel()
 	rows, _, err := t.repo.ListCallRecords(ctx, entity.CallRecordFilter{Scenario: "sip-inbound", PageSize: 200})
@@ -243,7 +250,7 @@ func (t *Tracker) recentRows() []entity.CallRecord {
 }
 
 // rowToCall 把落库的呼叫记录映射回监控页模型（caller 从 detail_json 还原）。
-func rowToCall(r entity.CallRecord) *Call {
+func rowToCall(r entity.MockCall) *Call {
 	caller := ""
 	if r.DetailJSON != "" {
 		var m map[string]string

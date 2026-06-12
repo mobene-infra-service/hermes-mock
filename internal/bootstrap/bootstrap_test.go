@@ -7,14 +7,14 @@ import (
 	"hermes-mock/internal/preflight"
 )
 
-// 播种后：行为档/客户组/线路绑定齐全（mock 只演客户腿，无坐席组）。
+// 播种后：行为档/客户组/端口绑定齐全（mock 只演客户腿，无坐席组）。
 func TestSeedMakesClusterReady(t *testing.T) {
 	clu := cluster.NewMemory() // 单测内存座
-	res, err := Seed(clu, Params{LineAddress: "192.168.107.30:5060"})
+	res, err := Seed(clu, Params{ListenPort: 5060})
 	if err != nil {
 		t.Fatalf("Seed 失败: %v", err)
 	}
-	if res.CustomerGroup == "" || res.LineBinding == "" || res.ProfileCode == "" {
+	if res.CustomerGroup == "" || res.LineBinding == "" || res.ProfileCode == "" || res.ListenPort != 5060 {
 		t.Errorf("播种结果不完整: %+v", res)
 	}
 
@@ -23,7 +23,7 @@ func TestSeedMakesClusterReady(t *testing.T) {
 		t.Errorf("应有 1 客户组, got %d", len(clu.ListGroups()))
 	}
 	if len(clu.ListBindings()) != 1 {
-		t.Errorf("应有 1 线路绑定, got %d", len(clu.ListBindings()))
+		t.Errorf("应有 1 端口绑定, got %d", len(clu.ListBindings()))
 	}
 
 	// 群呼 preflight：配齐 call-center 地址 + 线路后就绪（坐席由真实 Hermes 承担，不卡 mock 坐席）。
@@ -39,7 +39,7 @@ func TestSeedMakesClusterReady(t *testing.T) {
 // 客户组展开的号码应落在号段内（供后续群呼/外呼取号）。
 func TestSeedCustomerNumbers(t *testing.T) {
 	clu := cluster.NewMemory()
-	if _, err := Seed(clu, Params{CustomerPrefix: "861", CustomerStart: 100, CustomerCount: 3, LineAddress: "gw"}); err != nil {
+	if _, err := Seed(clu, Params{CustomerPrefix: "861", CustomerStart: 100, CustomerCount: 3, ListenPort: 5061}); err != nil {
 		t.Fatal(err)
 	}
 	g := clu.ListGroups()[0]
@@ -52,8 +52,8 @@ func TestSeedCustomerNumbers(t *testing.T) {
 // 幂等：重复播种不应报错也不应翻倍（Upsert 语义）。
 func TestSeedIdempotent(t *testing.T) {
 	clu := cluster.NewMemory()
-	_, _ = Seed(clu, Params{LineAddress: "gw"})
-	_, err := Seed(clu, Params{LineAddress: "gw"})
+	_, _ = Seed(clu, Params{ListenPort: 5060})
+	_, err := Seed(clu, Params{ListenPort: 5060})
 	if err != nil {
 		t.Fatalf("重复播种应成功: %v", err)
 	}

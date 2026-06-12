@@ -2,3 +2,46 @@
 
 > 本项目改动按主题记录（倒序，最新在上）。决策原因见 [DECISIONS.md](DECISIONS.md)，当前状态见 [STATUS.md](STATUS.md)。
 ---
+
+## 2026-06-12
+
+- **群呼坐席分配下拉就绪标记 + TTS 名称展示加固 + 期望WS坐席说明**（群呼表单后续打磨）：
+  - **坐席号下拉「就绪」标记 + 排序**：新增跨页轻量 store `hooks/useReadyAgents`（`useSyncExternalStore`），常驻单例 `AgentSoftphone` 把 `sipReady` 的坐席号广播出去；`GroupCallPage` 坐席分配下拉精简为「号码 · 姓名」、用 `optionRender` 加「就绪/未就绪」Tag、**已就绪默认排前**（就绪=坐席已在「坐席外呼」页软电话上线，才能被群呼转接接听）。
+  - **TTS 名称展示加固**：对照 Hermes basic `TtsVoiceDTO`（`code`/`name`/`displayName`），后端 `ListTts` 名称候选补 `displayName`/`description`、lang 候选补 `locale`/`countryCode`；前端 TTS code 已由 AutoComplete 改 Select（下拉 + 选中态均显示 `code · 名称`）。
+  - **「期望WS坐席」澄清**：是 mock 侧断言参数 `observeAgent`（不进 Hermes 请求体）——填坐席号则额外断言其工作台 WS 收到来电/调度通知，留空只断客户腿；label/tooltip 已写明。
+  - 验证：`gofmt`、`go build ./...`、`go test ./internal/{api,testkit,orchestrator}` 绿；`tsc -b`、`vite build`、`make sync-web` 通过。
+- **群呼任务参数补全 + 模式策略组合校验（后端+前端）**（对照 Hermes `AddCallTaskAndImportNumberReq` 全字段 + `CallTaskService.validateAddRequest`）：
+  - **参数透传重构**：`BizCaller.CallCenterTask` 由 13 个位置参数的长签名收敛为单一 `entity.CallCenterTaskReq` 结构体（entity 叶子包，无 import cycle）；`orchestrator.CallCenterTaskScenario` 改为该结构体别名（顺带删掉早已不用的 `ObserveAgent/WaitSec/AutoStart` 死字段）；`testkit.CallCenterTaskParams.toReq()` 装配，两处调用点同步。
+  - **模式策略组合**：`modeStrategy=1(比例)` → 下发 `proportion(1-10)`；`modeStrategy=2(PID)` → 下发 `lossRate(0-99)+historicalConnectionRate(1-100)`（互斥，按 Hermes 校验分支）。补齐 `sortMethod`、`isPriorityTask`、`isVmHangup`、`maxRedialTimes`、`redialInterval`、`bestRingDuration(默认40)`、`agentMaxRingDuration`、`assignDelaySeconds`、`transferType`、`description`——可选项仅在有值时入 body，缺省走 Hermes 默认。
+  - **前端表单**（`GroupCallPage`）：① **删除「自动启动」开关**（createAndImport 即自动拨号，开关无效）；② **TTS code 由 AutoComplete 改 Select**（下拉展示 `code · 名称`，选后仍显示名称）；③ lineType 维持 AutoComplete（支持自由输入自定义 type）；④ 新增「模式策略」下拉 + 条件渲染（=1 显示比例 / =2 显示呼损率+历史接通率，均必填）；⑤ 新增「高级参数」折叠面板（排序方式 / 转接类型 / 分配延迟 / 重拨次数·间隔 / 最佳响铃 / 坐席最大响铃 / 优先任务 / 语音信箱即挂 / 任务描述）。`api.ts` 的 `runCallCenterTask` 参数类型同步扩充，删 `autoStart`。
+  - 验证：`gofmt`、`go build ./...`、`go test`（除 hermesopenapi 沙箱）全绿；`tsc -b`、`vite build`、`make sync-web` 通过。**端到端实测待本地栈**。
+
+## 2026-06-11
+
+- **群呼任务参数对照 Hermes `AddCallTaskAndImportNumberReq` 修正（后端+前端）**：① **移除多余的「组织码」字段**——orgCode 不在请求体，Hermes 经凭据头 `ORG_CODE` 取机构；前端表单「组织码」改为只读显示当前机构。② **坐席分配改二选一**——`agentNumbers`（坐席号列表，max 500）或 `agentGroupCodes`（技能组，Hermes `@Size(max=1,min=1)` 仅接受 1 个）；原 orchestrator 写死 `agentNumbers:[]` + 多选技能组会触发 Hermes Size 校验失败，已修：body 二选一、技能组只取首个；testkit `CallCenterTaskParams`+`BizCaller` 加 `agentNumbers`。③ **技能组展示真名**——`/orgs/agent-groups` 优先调 basic `GET /api/agentGroup/getAgentGroupsByOrgCode/{orgCode}` 拿 `{code,name,count}`，失败降级为坐席聚合（仅 code+count）；前端技能组选项显示 `名称（code·N 坐席）`。前端 `GroupCallPage` 加坐席分配 Radio（技能组单选 / 坐席号多选，数据源 `listManagedAgents`）。`go build`/`go test`（除 hermesopenapi 沙箱）全绿。
+- **群呼任务：移除多余的 `status/start` 调用 + 补暂停/取消/查状态（后端+前端全打通）**（对照 Hermes `TaskOpenApiController`/`CallTaskService`）：`createAndImport` 后 Hermes 即 `NotifyDialJob` 自动拨号、状态按日期判为 `IN_PROGRESS`，`status/start` 仅用于恢复 `PAUSE` 任务——原 `RunCallCenterTask` 默认调 start 再吞 `Task status is incorrect` 是无意义调用，已移除（`AutoStart` 字段保留但不再触发，前端开关 tooltip 标注已无效）。新增 `StopCallCenterTask`/`CancelCallCenterTask`/`GetCallCenterTaskStatus` 客户端方法 + orchestrator 包装 + 路由 `POST/GET /tests/callcenter-task/:taskCode/{pause,resume,cancel,status}`（`api.Deps` 增 `Orch`）。**打通数据链路**：testkit `RunCallCenterTaskObserved` 用 `parseTaskCode(out)` 提取 Hermes taskCode 塞进 `Run.Artifacts["taskCode"]`；前端 `api.ts` 加 `pause/resume/cancel/getStatus` 请求函数，`GroupCallPage` 结果区加 taskCode 展示 + 暂停/恢复/取消/查状态按钮。`go build`/`go test`（除 hermesopenapi 沙箱）全绿。
+- 新增 `docs/CALL-FLOWS.md`：各通话场景端到端流程（群呼/callbot/otp/坐席外呼/接来电/回调）+ 流程图 + 数据结构与样例；扩充 trace_leg events 样例（含各 channel/故障注入/IVR/RTP 统计）、补清「群呼为何落两条 mock_call（两视角，预测式拨号无法发起即对齐 call_uuid）」、坐席转接可接听及其前提。
+- **修正坐席记录 `call_uuid` 前缀按腿区分**（对照 Hermes 源码 `BizType.kt`/`TransferService.kt:366-368`）：`saveCallRecord`（仅坐席软电话调用）原对 inbound/outbound 一律写 `CCMDL+in.CallID`。但 Hermes 里 `CCMDL`=坐席手动外呼、`CCINC`=呼入、`CCTSK`=群呼，各 5 位前缀；坐席接来电时前端 `in.CallID` 取自 `x-session-id` 头**已含正确前缀**，再叠 `CCMDL` 会成 `CCMDLCCINC{uuid}` 双前缀且对不上被叫腿。改为：坐席外呼补 `CCMDL`（前端裸 uuid），坐席接来电直接用 `in.CallID`。`go build`/`go test ./internal/api` 绿。
+- **修正 `BizUUIDFromHeaders` 提取优先级**（审查坐席外呼关联链路时发现）：旧优先级把 `x-jcallid` 排在 `x-session-id` 之前，但 Hermes 真实链路里 `x-session-id`(=`CCMDL{uuid}`) 才是所有被叫场景的通用 callUuid 载体（`EslEventConstant.SID`），而 `X-JCallId` 在坐席外呼传的是 businessId。改为「真 callUuid + x-session-id 同权优先 → x-jcallid 最末兜底」。两个优先级测试改为验证新语义。
+- **DB 模型重构（阶段0–3）**：根除「一通电话散成 3 条 call_record + 2 个 bus session」的核心病，确立 `call_uuid` 为唯一跨场景聚合锚，配置/观测分离，trace 单腿化。
+  - 阶段0 止血：`customer_override` 改复合唯一 `(group_code,number)`（同号可跨组）；全部 upsert 改 `clause.OnConflict` 消「先查后写」竞态；配置实体补 `gmt_create/gmt_modified`；补齐实体 `uniqueIndex` tag 并全库唯一命名（sqlite 索引名全局唯一约束：`uk_behavior_code`/`uk_group_code`）；DDL 与实体对齐（删死表 `mock_test_case`、org_config 补 4 列、callback 索引名、override 复合唯一），头部声明「实体 tag 为 schema 权威、DDL 为快照」。
+  - 阶段1 砍双写：删 `cluster/call_record_trace.go`（`CallRecordFromTraceSession` 从 SIP 反推、拆 agent/customer 腿——越界且是病根）；`traceFlushLoop` 只落 trace；`calltrace.Tracker.Start(callUUID,…)` 改用被叫腿真实 `call_uuid` 作 record_id 主键 → INVITE 重传幂等合并到一行，与 trace 同 call_uuid。
+  - 阶段2 拆表：`mock_call_record`→`mock_call`（聚合根，删 4 个已死的 SIP 观测列 sip_call_id/signal/media/callback_summary，加 expect_outcome；`SaveCallRecord` upsert 键纯 record_id）；`mock_trace_session`→`mock_trace_leg`（**写入严格单腿**：加 leg_role/line，删 legs）；新增 `ListTraceLegsByCallUUID`，「一通含多腿」由 api 读时按 call_uuid 归并（纯展示装配，不写回、守 SCOPE）；DDL 全量同步；前端 `CallRecord` 的 4 个观测字段改可选（条件渲染，零逻辑破坏）。老观测表 DROP 重建，配置 5 表数据保留。
+  - 阶段3 治理：`OBSERVE_TTL_DAYS`（默认 7）+ `PruneObservations` + main `pruneLoop` 周期清理观测表防膨胀；凭据暂不加密（内网测试，仅注释）。坐席 jssip 外呼已注 `x-session-id: CCMDL{callId}`，与坐席侧 `CCMDL+callID` 天然同 call_uuid（待实测 FS bridge 透传）。
+  - 验证：`go build ./...`、`go test $(go list ./... | grep -v hermesopenapi)` 全绿（新增 `TestTraceLegsByCallUUID`/`TestPruneObservations`，改造 `TestCallRecordSaveMergeAndList`/`TestTraceSessionRoundTrip`）；迁移冒烟确认 10 张新表建出、旧表名消失；`go vet` 干净。`hermesopenapi` 因沙箱禁 httptest 绑端口失败（环境所致，无关）。**DB/前端端到端实测待本地栈**。
+- 降低 `/trace/sessions` 轮询开销：列表接口瘦身为**摘要**（不含 events，新增 `eventCount`），events 改走 `/trace/sessions/:id` 单查；坐席软电话用 `?match=<jssip callId>` 让服务端按整 session 子串匹配回完整单条，不再每卡每轮拉全量列表再前端 `find`。前端轮询加可见性守卫（标签页隐藏 / 常驻软电话切到别页 `display:none` 时跳过）、非终态轮询设上限、周期放宽（CallTracePage 2s→3s、坐席卡 1.5s→2.5s）；`hermesOverview` 的 trace.sessions 同步改摘要。验证：`go build ./...`、`go test ./internal/{api,tracelog}`、`tsc -b`、`vite build`、`make sync-web` 通过；`eslint` 因本机缺可执行文件未运行。
+- 修复 sipagent/siptrace/tracelog 的并发与逻辑问题（审查后批量修）：
+  - `tracelog.Bus` 的 `Sessions()/Session()` 改为返回深拷贝快照，消除 HTTP 读取侧与 SIP/agent `emit` 的跨 goroutine 数据竞争（`c.JSON` 在高并发下可能 panic）。
+  - `siptrace.Tracer` 的 `cid2biz/cid2leg` 加 `maxCID` 容量上限淘汰，堵批量压测长跑的内存泄漏。
+  - 业务 callUuid 提取抽成 `tracelog.BizUUIDFromHeaders`（call-uuid 族优先于 session-id 族），siptrace 与 sipagent 共用，保证同一通话两路聚合键一致、不分裂。
+  - sipagent：接听后写流来源改为**单一互斥分派**（媒体故障 / 发 DTMF / 持续放音三选一），修复「RTP_LOSS/REORDER + 发 DTMF」并发双写同一 AudioWriter 导致 RTP 损坏；IVR 改为只取一次 AudioReader + 单个 Listen（修复每步重复 `AudioReader(WithAudioReaderDTMF)` 覆盖/泄漏拦截器）。
+  - 清理/打磨：删未用字段 `Agent.ua`；INVITE 聚合键提取轻量化（不再每通 `req.String()` 构建原始报文）；WAV 解码帧按路径进程级缓存；NO_ANSWER 走默认振铃时长；自定义 SIP 码按码匹配 reason 文案。
+  - 验证：`go build ./...`、`go test ./internal/{sipagent,siptrace,tracelog,cluster}`、`go test -race ./internal/{tracelog,siptrace}` 全绿；全量 `go test ./...` 仅 `internal/hermesopenapi` 因沙箱禁止 httptest 绑定本地端口失败（环境所致，与本次改动无关）。
+- 优化坐席外呼页（/agent-call）交互与布局：顶部使用说明默认折叠；坐席选择由下拉多选改为表格多选（搜索 + 技能组/状态筛选 + 表头全选/全不选，技能组改为独立列、不再混入下拉文本）；坐席卡片改网格多列并排（折叠态 sm12/lg8、展开态全宽）、默认折叠、单卡链路/日志收进默认收起的 Collapse。验证：`tsc -b`、`vite build` 通过；`eslint` 因本机缺可执行文件未运行。
+- 调整 cluster 绑定模型：删除绑定里的 `lineAddress`，改为 `listenPort -> customer_group`；新增 `SIP_LISTEN_PORTS` 支持 mock 多 SIP 端口监听。
+- 修正 trace leg 语义：SIP tracer 记住同一 SIP Call-ID 的 INVITE 被叫号，后续 BYE/响应不再因 To/From 翻转误标成主叫号。
+- 修正 sipagent 业务事件：FLOW/BRIDGE 使用真实 callee 作为 leg，并将 `customer` 作为角色 detail。
+- 优化 trace 前端展示为梯形图，保留真实 SIP 报文展开。
+- 修正坐席外呼记录表分页：页码变化会立即触发通话记录重新查询。
+- 修正坐席管理页分页：`/agents/managed` 按当前页码和 pageSize 请求后端，不再只拉前 200 条做本地分页。
+- 验证：`go test ./internal/siptrace`、`go test ./...`、`npm run build` 通过；`npm run lint` 因本地缺少 `eslint` 可执行文件未运行成功。

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"hermes-mock/internal/config"
+	"hermes-mock/internal/entity"
 	"hermes-mock/internal/tracelog"
 )
 
@@ -114,9 +115,9 @@ type fakeBiz struct {
 	otpCalled bool
 }
 
-func (f *fakeBiz) CallCenterTask(orgCode, name string, numbers, agentGroups []string, ttsCode, ttsText string, proportion int, startDate, endDate string, dialTimePeriod []string, lineType string, autoStart bool) ([]byte, error) {
+func (f *fakeBiz) CallCenterTask(req entity.CallCenterTaskReq) ([]byte, error) {
 	f.ccCalled = true
-	f.inject(numbers)
+	f.inject(req.Numbers)
 	return []byte(`{"data":"TASK1"}`), nil
 }
 func (f *fakeBiz) CallBotTask(name string, taskType int, numbers []string, robot, script string) ([]byte, error) {

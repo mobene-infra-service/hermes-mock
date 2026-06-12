@@ -3,6 +3,7 @@ package model
 import (
 	"context"
 	"testing"
+	"time"
 
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -56,12 +57,12 @@ func TestBehaviorProfileUpsertIdempotent(t *testing.T) {
 func TestCallRecordSaveMergeAndList(t *testing.T) {
 	repo := newTestRepo(t)
 	ctx := context.Background()
-	r1 := entity.CallRecord{RecordID: "rec1", Scenario: "sip-inbound", CustomerNumber: "8613800000001", Status: entity.CallRecordStatusRinging}
+	r1 := entity.MockCall{RecordID: "rec1", Scenario: "sip-inbound", CustomerNumber: "8613800000001", Status: entity.CallRecordStatusRinging}
 	if err := repo.SaveCallRecord(ctx, &r1); err != nil {
 		t.Fatal(err)
 	}
 	// 同 record_id 再写：状态推进到 ANSWERED，customer 不丢
-	r2 := entity.CallRecord{RecordID: "rec1", Status: entity.CallRecordStatusAnswered}
+	r2 := entity.MockCall{RecordID: "rec1", Status: entity.CallRecordStatusAnswered}
 	if err := repo.SaveCallRecord(ctx, &r2); err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +77,7 @@ func TestCallRecordSaveMergeAndList(t *testing.T) {
 		t.Errorf("合并错: %+v", rows[0])
 	}
 	// 状态回退保护：再写 RINGING 不应把 ANSWERED 退回去
-	r3 := entity.CallRecord{RecordID: "rec1", Status: entity.CallRecordStatusRinging}
+	r3 := entity.MockCall{RecordID: "rec1", Status: entity.CallRecordStatusRinging}
 	_ = repo.SaveCallRecord(ctx, &r3)
 	rows, _, _ = repo.ListCallRecords(ctx, entity.CallRecordFilter{PageSize: 10})
 	if rows[0].Status != entity.CallRecordStatusAnswered {
@@ -84,11 +85,11 @@ func TestCallRecordSaveMergeAndList(t *testing.T) {
 	}
 }
 
-// 链路：会话 upsert + 事件装配。
+// 链路：单腿 upsert + 事件装配。
 func TestTraceSessionRoundTrip(t *testing.T) {
 	repo := newTestRepo(t)
 	ctx := context.Background()
-	if err := repo.SaveTraceSession(ctx, &entity.TraceSession{SessionID: "s1", Kind: "call", Title: "呼入"}); err != nil {
+	if err := repo.SaveTraceSession(ctx, &entity.TraceLeg{SessionID: "s1", CallUUID: "u1", LegRole: "customer", Kind: "call", Title: "呼入"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := repo.CreateTraceEvents(ctx, []entity.TraceEvent{
@@ -109,6 +110,39 @@ func TestTraceSessionRoundTrip(t *testing.T) {
 	}
 }
 
+// 多腿按 call_uuid 归并：同一通业务通话的多条单腿（不同 session_id、同 call_uuid）各带事件。
+func TestTraceLegsByCallUUID(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := context.Background()
+	if err := repo.SaveTraceSession(ctx, &entity.TraceLeg{SessionID: "legCust", CallUUID: "uuidX", LegRole: "customer", Kind: "call"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveTraceSession(ctx, &entity.TraceLeg{SessionID: "legAgent", CallUUID: "uuidX", LegRole: "agent", Kind: "call"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateTraceEvents(ctx, []entity.TraceEvent{
+		{SessionID: "legCust", Seq: 1, Method: "INVITE"},
+		{SessionID: "legAgent", Seq: 1, Method: "INVITE"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	legs, err := repo.ListTraceLegsByCallUUID(ctx, "uuidX")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(legs) != 2 {
+		t.Fatalf("同 call_uuid 应回 2 腿, got %d", len(legs))
+	}
+	for _, l := range legs {
+		if len(l.Events) != 1 {
+			t.Errorf("腿 %s 应带 1 事件, got %d", l.SessionID, len(l.Events))
+		}
+	}
+	if none, _ := repo.ListTraceLegsByCallUUID(ctx, "nope"); none != nil {
+		t.Error("无匹配 call_uuid 应返回 nil")
+	}
+}
+
 // 机构配置：org_code 唯一 upsert。
 func TestOrgConfigUpsert(t *testing.T) {
 	repo := newTestRepo(t)
@@ -122,5 +156,62 @@ func TestOrgConfigUpsert(t *testing.T) {
 	rows, _ := repo.ListOrgConfigs(ctx)
 	if len(rows) != 1 || rows[0].OrgName != "A2" {
 		t.Errorf("org upsert 应更新而非新增: %+v", rows)
+	}
+}
+
+// 观测数据 TTL 清理：早于 before 的呼叫记录/链路/事件被删，之后的保留；配置表不受影响。
+func TestPruneObservations(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	old := now.Add(-8 * 24 * time.Hour)
+	fresh := now.Add(-1 * time.Hour)
+
+	// 旧+新各一条呼叫记录
+	if err := repo.SaveCallRecord(ctx, &entity.MockCall{RecordID: "oldCall", Status: entity.CallRecordStatusEnded, StartedAt: old}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveCallRecord(ctx, &entity.MockCall{RecordID: "freshCall", Status: entity.CallRecordStatusEnded, StartedAt: fresh}); err != nil {
+		t.Fatal(err)
+	}
+	// 旧+新各一条单腿 + 各一条事件
+	if err := repo.SaveTraceSession(ctx, &entity.TraceLeg{SessionID: "oldLeg", StartedAt: old}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveTraceSession(ctx, &entity.TraceLeg{SessionID: "freshLeg", StartedAt: fresh}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateTraceEvents(ctx, []entity.TraceEvent{
+		{SessionID: "oldLeg", Seq: 1, TS: old, Method: "INVITE"},
+		{SessionID: "freshLeg", Seq: 1, TS: fresh, Method: "INVITE"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// 一条保留期配置（不应被删）
+	if err := repo.UpsertBehaviorProfile(ctx, &entity.BehaviorProfile{Code: "keep", Outcome: "ANSWER", AnswerRatio: 100}); err != nil {
+		t.Fatal(err)
+	}
+
+	before := now.Add(-7 * 24 * time.Hour)
+	n, err := repo.PruneObservations(ctx, before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 删除：oldCall + oldLeg + oldLeg 的事件 = 3 行
+	if n != 3 {
+		t.Errorf("应删 3 行（旧呼叫+旧腿+旧事件），got %d", n)
+	}
+	calls, _, _ := repo.ListCallRecords(ctx, entity.CallRecordFilter{PageSize: 10})
+	if len(calls) != 1 || calls[0].RecordID != "freshCall" {
+		t.Errorf("应只剩 freshCall: %+v", calls)
+	}
+	if old, _ := repo.GetTraceSession(ctx, "oldLeg"); old != nil {
+		t.Error("旧腿应被删")
+	}
+	if fr, _ := repo.GetTraceSession(ctx, "freshLeg"); fr == nil || len(fr.Events) != 1 {
+		t.Error("新腿及其事件应保留")
+	}
+	if profs, _ := repo.ListBehaviorProfiles(ctx); len(profs) != 1 {
+		t.Errorf("配置表不应被清理, got %d", len(profs))
 	}
 }

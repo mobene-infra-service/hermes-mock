@@ -1,11 +1,12 @@
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
-import { Alert, Button, Card, Col, Collapse, Descriptions, Input, InputNumber, Modal, Progress, Radio, Row, Select, Space, Switch, Tag, Timeline, Tooltip, Typography, message } from 'antd'
+import { Alert, Button, Card, Col, Collapse, Descriptions, Input, InputNumber, Modal, Progress, Radio, Row, Select, Space, Switch, Table, Tag, Timeline, Tooltip, Typography, message } from 'antd'
 import { CaretRightOutlined, PhoneOutlined, PoweroffOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import SipCall, { SipState } from '../sip'
 import SipController, { type CloseInfo } from '../sip/controller'
 import { markSipReady } from '../sip/request'
+import { setReadyAgents } from '../hooks/useReadyAgents'
 import ScenarioRecords from './scenario/ScenarioRecords'
-import { clusterResolve, getTraceSessions, listManagedAgents, listGroups, listOrgs, saveAgentCallRecord, type BehaviorProfile, type TraceEvent, type TraceSession, type ManagedAgent, type CustomerGroup } from '../api'
+import { clusterResolve, findTraceSession, listManagedAgents, listGroups, listOrgs, saveAgentCallRecord, type BehaviorProfile, type TraceEvent, type TraceSession, type ManagedAgent, type CustomerGroup } from '../api'
 
 const { Text, Paragraph } = Typography
 
@@ -88,12 +89,6 @@ function hdr(headers: { name: string; value: string }[] | undefined, name: strin
   return headers?.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value || ''
 }
 function sipUser(v?: string) { const m = (v || '').match(/sip:([^@>]+)/i); return m?.[1] || '' }
-// 只用全局唯一键（callId / CCMDL+callId）匹配 trace，不再用裸客户号子串（多坐席打同号会串卡）。
-function sessionMatchesCall(s: TraceSession, c: CurrentCall) {
-  if (!c.id && !c.sessionId) return false
-  const text = JSON.stringify(s)
-  return (!!c.id && text.includes(c.id)) || (!!c.sessionId && text.includes(c.sessionId))
-}
 function findDisplayCaller(s?: TraceSession) {
   const inv = s?.events?.find((e) => e.channel === 'SIP' && e.method === 'INVITE'); return sipUser(hdr(inv?.headers, 'From')) || undefined
 }
@@ -158,7 +153,8 @@ const SoftphoneCard = forwardRef<CardHandle, {
   const [rule, setRule] = useState<AnswerRule>(DEFAULT_RULE)
   const ctrlRef = useRef<SipController | null>(null)
   const callRef = useRef<SipCall | null>(null)
-  const sipReadyTimer = useRef<ReturnType<typeof setInterval> | null>(null)
+  const cardRootRef = useRef<HTMLDivElement>(null) // 卡片根 DOM：判可见性（常驻软电话切到别页 display:none 时 offsetParent 为 null）
+  const sipReadyTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const queueRef = useRef<{ list: string[]; idx: number; running: boolean }>({ list: [], idx: 0, running: false })
   const expectRef = useRef<Map<string, Expectation>>(new Map()) // 被叫号 → 期望行为档（取号时解析）
   const lineTypeRef = useRef('') // lineType 镜像（dialNext 定时器闭包里读最新值）
@@ -189,13 +185,15 @@ const SoftphoneCard = forwardRef<CardHandle, {
     if (talkTimerRef.current) { clearTimeout(talkTimerRef.current); talkTimerRef.current = null }
   }
   const clearSipReadyTimer = () => {
-    if (sipReadyTimer.current) { clearInterval(sipReadyTimer.current); sipReadyTimer.current = null }
+    if (sipReadyTimer.current) { clearTimeout(sipReadyTimer.current); sipReadyTimer.current = null }
   }
 
   const refreshTrace = async (call: CurrentCall) => {
+    const token = call.id || call.sessionId
+    if (!token) return
     try {
-      const ss = await getTraceSessions()
-      const hit = ss.find((s) => sessionMatchesCall(s, call))
+      // 服务端按 token（jssip callId）子串匹配，回完整单条（含 events）；不再每张卡每轮拉全量列表再前端 find。
+      const hit = (await findTraceSession(token))[0]
       if (hit) {
         const dc = findDisplayCaller(hit)
         setTrace(hit)
@@ -207,13 +205,15 @@ const SoftphoneCard = forwardRef<CardHandle, {
     if (!currentCall || currentCall.status === '待外呼') return
     const c = currentCall
     void refreshTrace(c)
-    // 终态（已结束/失败）：trace 已基本定型，只再补刷有限几次就停，避免对已结束通永久轮询空转
+    // 终态（已结束/失败）：trace 已基本定型，补刷几次即停。非终态：设上限（~40 次≈100s），不再 Infinity 永久空转。
     const terminal = c.status === '已结束' || c.status === '失败'
-    let left = terminal ? 3 : Infinity
+    let left = terminal ? 3 : 40
     const t = setInterval(() => {
+      // 常驻软电话切到别页时容器 display:none → offsetParent 为 null，跳过（不递减不轮询，回到本页继续）。
+      if (document.hidden || cardRootRef.current?.offsetParent === null) return
       if (left-- <= 0) { clearInterval(t); return }
       void refreshTrace(c)
-    }, 1500)
+    }, 2500)
     return () => clearInterval(t)
   }, [currentCall?.id, currentCall?.status])
 
@@ -228,7 +228,15 @@ const SoftphoneCard = forwardRef<CardHandle, {
     // 函数式更新：若 await 期间 REGISTER_FAILED 已置 'failed'，不要覆盖回 'ready'（闭包旧值会失效，故用 prev）
     setConnPhase((prev) => prev === 'failed' ? prev : 'ready')
     clearSipReadyTimer()
-    sipReadyTimer.current = setInterval(() => { markSipReady(num, password).then(setSipReady).catch(() => setSipReady(false)) }, 30000)
+    // 多坐席同时连接时固定 interval 会相位对齐、每 30s 同秒爆发 N 次保活请求；改用自调度 setTimeout +
+    // 随机首延迟(0–30s) 把各卡心跳在 30s 窗口内均匀错开。周期仍 30s（< call-center SIP onlineSipClient 的 45s TTL）。
+    const SIP_KEEPALIVE_MS = 30000
+    const keepalive = () => {
+      if (destroyedRef.current) return
+      markSipReady(num, password).then(setSipReady).catch(() => setSipReady(false))
+      sipReadyTimer.current = setTimeout(keepalive, SIP_KEEPALIVE_MS)
+    }
+    sipReadyTimer.current = setTimeout(keepalive, Math.floor(Math.random() * SIP_KEEPALIVE_MS))
     try { await callRef.current?.setIdle(); pushLog('已切在线/空闲') } catch { /* ignore */ }
   }
 
@@ -315,6 +323,7 @@ const SoftphoneCard = forwardRef<CardHandle, {
         setCurrentCall((c) => {
           if (!c) return c
           const ended: CurrentCall = { ...c, status: d?.answered ? '已结束' : '失败', endedAt: Date.now(), endCause: d?.cause, endCode: d?.code }
+          const durationMs = (ended.endedAt || Date.now()) - (ended.answeredAt || ended.startedAt)
           if (!ended.inbound) {
             if (ended.expect) {
               const a = assertCall(ended); ended.verdict = a.verdict; ended.verdictReason = a.reason
@@ -327,7 +336,7 @@ const SoftphoneCard = forwardRef<CardHandle, {
               expectDisabled: ended.expect?.disabled, answered: !!d?.answered, endCause: ended.endCause,
               verdict: ended.verdict, verdictReason: ended.verdictReason,
               traceId: ended.traceId, displayCaller: ended.displayCaller,
-              startedAtMs: ended.startedAt, durationMs: (ended.endedAt || Date.now()) - ended.startedAt,
+              startedAtMs: ended.startedAt, answeredAtMs: ended.answeredAt, durationMs,
             }).catch(() => { /* 记录失败不影响通话 */ })
           } else {
             // 被叫来电（群呼/转接进来的坐席腿）：回存「坐席接听」记录，供群呼 run 断言坐席侧是否接通。
@@ -335,7 +344,7 @@ const SoftphoneCard = forwardRef<CardHandle, {
               callId: ended.id, agentNumber: num, customer: ended.customer || ended.displayCaller,
               answered: !!d?.answered, endCause: ended.endCause, inbound: true,
               traceId: ended.traceId, displayCaller: ended.displayCaller,
-              startedAtMs: ended.startedAt, durationMs: (ended.endedAt || Date.now()) - ended.startedAt,
+              startedAtMs: ended.startedAt, answeredAtMs: ended.answeredAt, durationMs,
             }).catch(() => { /* ignore */ })
           }
           return ended
@@ -603,15 +612,21 @@ const SoftphoneCard = forwardRef<CardHandle, {
         )}
       </Col>
       <Col xs={24} md={12}>
-        {trace && (
-          <Timeline style={{ maxHeight: 180, overflow: 'auto' }} items={compactEvents(trace).map((e) => ({
-            color: e.channel === 'SIP' ? 'blue' : e.channel === 'BRIDGE' ? 'orange' : 'gray',
-            children: <div style={{ fontSize: 12 }}><Tag>{e.channel}</Tag>{traceDir[e.dir] || e.dir} {e.method} <Text type="secondary">{e.summary}</Text></div>,
-          }))} />
-        )}
-        <Paragraph style={{ margin: 0, maxHeight: 140, overflow: 'auto', fontSize: 11, fontFamily: 'monospace' }}>
-          {logs.length ? logs.map((l, i) => <div key={i}>{l}</div>) : <Text type="secondary">暂无事件</Text>}
-        </Paragraph>
+        <Collapse size="small" ghost items={[{
+          key: 'tracelog',
+          label: <Text type="secondary" style={{ fontSize: 12 }}>链路 / 日志</Text>,
+          children: (<>
+            {trace && (
+              <Timeline style={{ maxHeight: 180, overflow: 'auto' }} items={compactEvents(trace).map((e) => ({
+                color: e.channel === 'SIP' ? 'blue' : e.channel === 'BRIDGE' ? 'orange' : 'gray',
+                children: <div style={{ fontSize: 12 }}><Tag>{e.channel}</Tag>{traceDir[e.dir] || e.dir} {e.method} <Text type="secondary">{e.summary}</Text></div>,
+              }))} />
+            )}
+            <Paragraph style={{ margin: 0, maxHeight: 140, overflow: 'auto', fontSize: 11, fontFamily: 'monospace' }}>
+              {logs.length ? logs.map((l, i) => <div key={i}>{l}</div>) : <Text type="secondary">暂无事件</Text>}
+            </Paragraph>
+          </>),
+        }]} />
       </Col>
     </Row>
   )
@@ -627,11 +642,15 @@ const SoftphoneCard = forwardRef<CardHandle, {
 
   if (collapsed) {
     return (
-      <Card size="small" style={{ marginBottom: 8, ...(currentCall?.verdict === 'fail' ? { borderColor: '#ff4d4f' } : {}) }} styles={{ body: { display: 'none' } }} title={title} extra={headExtra} />
+      <div ref={cardRootRef}>
+        <Card size="small" style={{ ...(currentCall?.verdict === 'fail' ? { borderColor: '#ff4d4f' } : {}) }} styles={{ body: { display: 'none' } }} title={title} extra={headExtra} />
+      </div>
     )
   }
   return (
-    <Card size="small" style={{ marginBottom: 12, ...(currentCall?.verdict === 'fail' ? { borderColor: '#ff4d4f' } : {}) }} title={title} extra={headExtra}>{body}</Card>
+    <div ref={cardRootRef}>
+      <Card size="small" style={{ ...(currentCall?.verdict === 'fail' ? { borderColor: '#ff4d4f' } : {}) }} title={title} extra={headExtra}>{body}</Card>
+    </div>
   )
 })
 
@@ -642,7 +661,12 @@ export default function AgentSoftphone({ onSummary }: { onSummary?: (s: AgentSum
   const [active, setActive] = useState<{ agent: ManagedAgent; password: string }[]>([]) // 口令随卡片快照
   const [orgPwd, setOrgPwd] = useState('') // 当前机构「新坐席默认口令」（坐席接口未回带口令时兜底）
   const [loadingMeta, setLoadingMeta] = useState(false)
-  const [collapsed, setCollapsed] = useState(false)
+  const [collapsed, setCollapsed] = useState(true) // 卡片默认折叠为紧凑行（C）
+  const [helpOpen, setHelpOpen] = useState(false) // 顶部使用说明默认收起（A）
+  // 选择区筛选（搜索 + 技能组 + 状态）（B）
+  const [agentQuery, setAgentQuery] = useState('')
+  const [filterGroup, setFilterGroup] = useState<string | undefined>()
+  const [filterStatus, setFilterStatus] = useState<number | undefined>()
   // 批量并发派号
   const cardRefs = useRef<Map<string, CardHandle | null>>(new Map())
   const [dispatchGroup, setDispatchGroup] = useState<string | undefined>()
@@ -774,14 +798,30 @@ export default function AgentSoftphone({ onSummary }: { onSummary?: (s: AgentSum
   }, [snapshots, active.length])
   useEffect(() => { onSummary?.(summary) }, [summary]) // eslint-disable-line
 
-  const agentOptions = useMemo(() => agents.map((a) => {
-    const stN = typeof a.status === 'number' ? a.status : Number(a.status)
-    const stMeta = AGENT_STATUS[stN]
-    return {
-      value: a.number || '',
-      label: `${a.number}${a.agentName ? ' · ' + a.agentName : ''}${a.agentGroupCode ? ' · ' + a.agentGroupCode : ''}${stMeta ? ' · ' + stMeta.label : ''}`,
-    }
-  }), [agents])
+  // 广播「已就绪（sipReady）坐席号」给跨页 store——群呼页坐席分配下拉据此标记/排序（已就绪排前）。
+  useEffect(() => {
+    setReadyAgents(Object.entries(snapshots).filter(([, s]) => s.sipReady).map(([num]) => num))
+  }, [snapshots])
+
+  // 技能组筛选下拉选项（从当前坐席 agentGroupCode 去重）
+  const groupFilterOptions = useMemo(() => {
+    const s = new Set<string>()
+    agents.forEach((a) => { if (a.agentGroupCode) s.add(a.agentGroupCode) })
+    return Array.from(s).map((c) => ({ value: c, label: c }))
+  }, [agents])
+  // 选择区表格数据：按 搜索词 + 技能组 + 状态 过滤
+  const filteredAgents = useMemo(() => {
+    const q = agentQuery.trim().toLowerCase()
+    return agents.filter((a) => {
+      if (filterGroup && a.agentGroupCode !== filterGroup) return false
+      if (filterStatus != null) {
+        const stN = typeof a.status === 'number' ? a.status : Number(a.status)
+        if (stN !== filterStatus) return false
+      }
+      if (q && !`${a.number || ''} ${a.agentName || ''}`.toLowerCase().includes(q)) return false
+      return true
+    })
+  }, [agents, agentQuery, filterGroup, filterStatus])
   // 客户组取号被 count 截断时的提示（dispatchLimit 远大于组容量）
   const dispatchTruncated = useMemo(() => {
     if (!dispatchGroup) return 0
@@ -792,39 +832,67 @@ export default function AgentSoftphone({ onSummary }: { onSummary?: (s: AgentSum
 
   return (
     <div>
-      <Alert type="info" showIcon closable style={{ marginBottom: 12 }}
-        message="多坐席软电话（浏览器 jssip，每坐席一张卡片各自独立在线）"
-        description={<>勾选坐席→加入卡片→各卡独立连接(hermes-ws 登录 + 注册 FreeSWITCH 真话路)→各自外呼或用下方「批量并发派号」一组坐席同时拨一批客户。取号会显示该号命中的<b>客户行为档</b>，通话结束按预期 outcome 给出 ✓/✗ 断言。接听规则用于坐席被群呼转接来电时自动接/拒。
-          <br /><Text type="secondary">需允许浏览器麦克风权限；分机须已在 FreeSWITCH directory 配置。</Text></>} />
-      <Card size="small" style={{ marginBottom: 12, position: 'sticky', top: 0, zIndex: 10 }}>
-        <Space wrap>
-          <Select mode="multiple" style={{ minWidth: 320 }} placeholder="选择坐席（可多选）" value={picked} onChange={setPicked}
-            showSearch optionFilterProp="label" options={agentOptions} />
-          {agentsTotal > agents.length && <Tooltip title="坐席数超过 200，仅展示前 200，请用搜索精确匹配"><Tag color="warning">仅显示 {agents.length}/{agentsTotal}</Tag></Tooltip>}
-          <Button type="primary" onClick={addCards}>加入卡片</Button>
-          <Button onClick={loadMeta} loading={loadingMeta}>刷新坐席</Button>
-          {active.length > 0 && <>
+      {helpOpen ? (
+        <Alert type="info" showIcon style={{ marginBottom: 12 }}
+          message={<Space size={8}>多坐席软电话（浏览器 jssip，每坐席一张卡片各自独立在线）<Button type="link" size="small" style={{ padding: 0, height: 'auto' }} onClick={() => setHelpOpen(false)}>收起 ▾</Button></Space>}
+          description={<>勾选坐席→加入卡片→各卡独立连接(hermes-ws 登录 + 注册 FreeSWITCH 真话路)→各自外呼或用下方「批量并发派号」一组坐席同时拨一批客户。取号会显示该号命中的<b>客户行为档</b>，通话结束按预期 outcome 给出 ✓/✗ 断言。接听规则用于坐席被群呼转接来电时自动接/拒。
+            <br /><Text type="secondary">需允许浏览器麦克风权限；分机须已在 FreeSWITCH directory 配置。</Text></>} />
+      ) : (
+        <div style={{ marginBottom: 12 }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>多坐席软电话（浏览器 jssip，每坐席独立在线）</Text>
+          <Button type="link" size="small" style={{ padding: '0 4px', height: 'auto' }} onClick={() => setHelpOpen(true)}>使用说明 ▸</Button>
+        </div>
+      )}
+
+      {/* 选择区：搜索 + 技能组/状态筛选 + 表格多选（表头全选作用于当前筛选结果）；可折叠默认展开，加入后可收起省空间 */}
+      <Collapse size="small" defaultActiveKey={['pick']} style={{ marginBottom: 12 }}
+        expandIcon={({ isActive }) => <CaretRightOutlined rotate={isActive ? 90 : 0} />}
+        items={[{
+          key: 'pick',
+          label: <Space><Text strong>选择坐席加入</Text>{picked.length ? <Text type="secondary" style={{ fontSize: 12 }}>已选 {picked.length}</Text> : null}</Space>,
+          children: (<>
+            <Space wrap style={{ marginBottom: 8 }}>
+              <Input allowClear style={{ width: 200 }} placeholder="搜索坐席号 / 坐席名" value={agentQuery} onChange={(e) => setAgentQuery(e.target.value)} />
+              <Select allowClear style={{ width: 160 }} placeholder="技能组筛选" value={filterGroup} onChange={setFilterGroup} options={groupFilterOptions} />
+              <Select allowClear style={{ width: 140 }} placeholder="状态筛选" value={filterStatus} onChange={setFilterStatus}
+                options={Object.entries(AGENT_STATUS).map(([k, v]) => ({ value: Number(k), label: v.label }))} />
+              <Button type="primary" onClick={addCards} disabled={!picked.length}>加入卡片{picked.length ? `（${picked.length}）` : ''}</Button>
+              <Button onClick={loadMeta} loading={loadingMeta}>刷新坐席</Button>
+              {agentsTotal > agents.length && <Tooltip title="坐席数超过 200，仅展示前 200，请用搜索/筛选精确匹配"><Tag color="warning">仅显示 {agents.length}/{agentsTotal}</Tag></Tooltip>}
+            </Space>
+            <Table<ManagedAgent>
+              size="small" rowKey={(a) => a.number || ''} pagination={false} scroll={{ y: 220 }}
+              dataSource={filteredAgents}
+              rowSelection={{ selectedRowKeys: picked, onChange: (keys) => setPicked(keys as string[]) }}
+              columns={[
+                { title: '坐席号', dataIndex: 'number', width: 90 },
+                { title: '坐席名', dataIndex: 'agentName', width: 120, render: (v) => v || <Text type="secondary">-</Text> },
+                { title: '技能组', dataIndex: 'agentGroupCode', width: 130, render: (v) => v || <Text type="secondary">-</Text> },
+                { title: '状态', dataIndex: 'status', width: 110, render: (v) => { const n = typeof v === 'number' ? v : Number(v); const m = AGENT_STATUS[n]; return m ? <Tag color={m.color}>{m.label}</Tag> : <Text type="secondary">-</Text> } },
+              ]}
+            />
+          </>),
+        }]} />
+
+      {/* 批量操作 + 汇总（高频查看，吸顶常驻；仅在已有卡片时显示） */}
+      {active.length > 0 && (
+        <Card size="small" style={{ marginBottom: 12, position: 'sticky', top: 0, zIndex: 10 }}>
+          <Space size={6} wrap>
             <Button size="small" onClick={connectAll}>全部连接</Button>
             <Button size="small" onClick={disconnectAll}>全部断开</Button>
             <Button size="small" onClick={idleAll}>全部示闲</Button>
             <Switch size="small" checkedChildren="折叠" unCheckedChildren="展开" checked={collapsed} onChange={setCollapsed} />
-          </>}
-        </Space>
-        {active.length > 0 && (
-          <div style={{ marginTop: 8 }}>
-            <Space size={6} wrap>
-              <Text type="secondary" style={{ fontSize: 12 }}>汇总:</Text>
-              <Tag>卡片 {summary.total}</Tag>
-              <Tag color="green">WS在线 {summary.connected}</Tag>
-              <Tag color="green">已注册 {summary.registered}</Tag>
-              <Tooltip title="call-center 认为就绪（WS 在线 + SIP-ready）的坐席数。少于 WS在线数=有坐席 SIP-ready 失败，无法被群呼/派号选中">
-                <Tag color={summary.ready < summary.connected ? 'orange' : 'green'}>就绪 {summary.ready}</Tag>
-              </Tooltip>
-              <Tag color="blue">通话中 {summary.incall}</Tag>
-            </Space>
-          </div>
-        )}
-      </Card>
+            <Text type="secondary" style={{ fontSize: 12 }}>汇总:</Text>
+            <Tag>卡片 {summary.total}</Tag>
+            <Tag color="green">WS在线 {summary.connected}</Tag>
+            <Tag color="green">已注册 {summary.registered}</Tag>
+            <Tooltip title="call-center 认为就绪（WS 在线 + SIP-ready）的坐席数。少于 WS在线数=有坐席 SIP-ready 失败，无法被群呼/派号选中">
+              <Tag color={summary.ready < summary.connected ? 'orange' : 'green'}>就绪 {summary.ready}</Tag>
+            </Tooltip>
+            <Tag color="blue">通话中 {summary.incall}</Tag>
+          </Space>
+        </Card>
+      )}
 
       {/* 批量并发派号面板 */}
       {active.length > 0 && (
@@ -869,11 +937,17 @@ export default function AgentSoftphone({ onSummary }: { onSummary?: (s: AgentSum
       )}
 
       {active.length === 0
-        ? <Alert type="info" showIcon message="开始：① 上方多选坐席 → ② 加入卡片 → ③ 卡片内点「连接」（或顶部「全部连接」）→ ④ 外呼 / 批量并发派号。每个坐席一张卡片，各自独立在线。" />
-        : active.map((a) => (
-          <SoftphoneCard key={a.agent.number} ref={(h) => { cardRefs.current.set(a.agent.number || '', h) }}
-            agent={a.agent} password={a.password} groups={groups} collapsed={collapsed} onRemove={removeCard} onSnapshot={onSnapshot} />
-        ))}
+        ? <Alert type="info" showIcon message="开始：① 上方表格勾选坐席 → ② 加入卡片 → ③ 卡片内点「连接」（或顶部「全部连接」）→ ④ 外呼 / 批量并发派号。每个坐席一张卡片，各自独立在线。" />
+        : (
+          <Row gutter={[12, 12]}>
+            {active.map((a) => (
+              <Col key={a.agent.number} xs={24} {...(collapsed ? { sm: 12, lg: 8 } : {})}>
+                <SoftphoneCard ref={(h) => { cardRefs.current.set(a.agent.number || '', h) }}
+                  agent={a.agent} password={a.password} groups={groups} collapsed={collapsed} onRemove={removeCard} onSnapshot={onSnapshot} />
+              </Col>
+            ))}
+          </Row>
+        )}
 
       <ScenarioRecords scenario="agent" title="坐席外呼记录（外呼 + 被转接来电）" />
     </div>

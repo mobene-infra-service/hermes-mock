@@ -4,6 +4,7 @@ import {
 } from 'antd'
 import { CheckCircleTwoTone, PlusOutlined, ReloadOutlined, ApiOutlined } from '@ant-design/icons'
 import { listOrgs, upsertOrg, deleteOrg, pingOrg, setCurrentOrg, type OrgConfig } from '../api'
+import { resetSipWebrtcAddrCache } from '../sip/request'
 
 const { Text, Paragraph } = Typography
 
@@ -47,7 +48,7 @@ export default function OrgsPage() {
     } catch (e) { message.error(String(e)) }
   }
   const onSwitch = async (code: string) => {
-    try { await setCurrentOrg(code); message.success(`当前机构 → ${code}`); load() }
+    try { await setCurrentOrg(code); resetSipWebrtcAddrCache(); message.success(`当前机构 → ${code}`); load() }
     catch (e) { message.error(String(e)) }
   }
   const onPing = async (code: string) => {

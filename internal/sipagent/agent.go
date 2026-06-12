@@ -30,16 +30,21 @@ import (
 // Agent 是被测 Hermes 线路指向的可编程 SIP 被叫端（UAS）：接收 FreeSWITCH 的 INVITE，
 // 按客户集群解析出的行为应答/拒接/放音/挂断。只演客户被叫腿——不主动呼出、不桥接、不注册坐席。
 type Agent struct {
-	cfg     *config.Config
-	cluster *cluster.Store // 客户集群（号段组+个例+线路绑定+行为档），决定被叫行为
-	tracker *calltrace.Tracker
-	bus     *tracelog.Bus
-	ua      *sipgo.UserAgent
-	dg      *diago.Diago
+	cfg        *config.Config
+	listenPort int
+	cluster    *cluster.Store // 客户集群（号段组+个例+端口绑定+行为档），决定被叫行为
+	tracker    *calltrace.Tracker
+	bus        *tracelog.Bus
+	dg         *diago.Diago
 }
 
 // New 初始化入站 UAS（被叫端）：只监听一个端口接收 FreeSWITCH 发来的 INVITE。
 func New(cfg *config.Config, clu *cluster.Store, tracker *calltrace.Tracker, bus *tracelog.Bus) (*Agent, error) {
+	return NewOnPort(cfg, cfg.SIPListenPort, clu, tracker, bus)
+}
+
+// NewOnPort 初始化指定入口端口的入站 UAS。
+func NewOnPort(cfg *config.Config, listenPort int, clu *cluster.Store, tracker *calltrace.Tracker, bus *tracelog.Bus) (*Agent, error) {
 	ua, err := sipgo.NewUA(sipgo.WithUserAgent("hermes-mock"))
 	if err != nil {
 		return nil, err
@@ -48,33 +53,34 @@ func New(cfg *config.Config, clu *cluster.Store, tracker *calltrace.Tracker, bus
 		diago.WithTransport(diago.Transport{
 			Transport:    cfg.SIPTransport,
 			BindHost:     cfg.SIPListenIP,
-			BindPort:     cfg.SIPListenPort,
+			BindPort:     listenPort,
 			ExternalHost: cfg.ExternalIP,
 		}),
 		diago.WithMediaConfig(diago.MediaConfig{Codecs: codecList(cfg.Codecs)}),
 	)
 	return &Agent{
-		cfg: cfg, cluster: clu, tracker: tracker, bus: bus, ua: ua, dg: dg,
+		cfg: cfg, listenPort: listenPort, cluster: clu, tracker: tracker, bus: bus, dg: dg,
 	}, nil
 }
 
 // Run 启动 UAS，阻塞处理入站 INVITE。
 func (a *Agent) Run() error {
 	ctx := context.Background()
-	logrus.Infof("SIP agent serving %s:%d/%s", a.cfg.SIPListenIP, a.cfg.SIPListenPort, a.cfg.SIPTransport)
+	logrus.Infof("SIP agent serving %s:%d/%s", a.cfg.SIPListenIP, a.listenPort, a.cfg.SIPTransport)
 	return a.dg.Serve(ctx, func(in *diago.DialogServerSession) {
 		a.handleInbound(in)
 	})
 }
 
-// resolveRule 解析被叫的有效行为：用客户集群（号段组+个例+线路绑定+接通率）匹配，
+// resolveRule 解析被叫的有效行为：用客户集群（号段组+个例+端口绑定+接通率）匹配，
 // 命中即转成 behavior.Rule；未命中（或无集群）用内置默认行为兜底（应答+放音）。
-func (a *Agent) resolveRule(callee, line string) behavior.Rule {
+func (a *Agent) resolveRule(callee string) behavior.Rule {
 	if a.cluster != nil {
 		var res *cluster.Resolved
-		if line != "" {
-			res = a.cluster.ResolveByLine(line, callee)
-		} else {
+		if a.listenPort > 0 {
+			res = a.cluster.ResolveByPort(a.listenPort, callee)
+		}
+		if res == nil {
 			res = a.cluster.ResolveByNumber(callee)
 		}
 		if res != nil && res.Profile != nil {
@@ -136,35 +142,38 @@ func (a *Agent) handleInbound(in *diago.DialogServerSession) {
 	callee := dialogCallee(in)
 	caller := dialogCaller(in)
 	line := dialogLine(in)
-	rule := a.resolveRule(callee, line)
-	log := logrus.WithFields(logrus.Fields{"callee": callee, "caller": caller, "outcome": rule.Outcome})
+	rule := a.resolveRule(callee)
+	log := logrus.WithFields(logrus.Fields{"callee": callee, "caller": caller, "listenPort": a.listenPort, "line": line, "outcome": rule.Outcome})
 	log.Info("收到 INVITE")
-	id := a.tracker.Start(callee, caller, string(rule.Outcome))
 
-	// 通话链路观测：传输层 SIP tracer 已自动抓真实 INVITE/180/200/BYE。
-	// 聚合键与 tracer 一致：优先用 Hermes 业务 callUuid，否则退回 SIP Call-ID。
-	// 这里附加「mock 客户腿业务决策(FLOW)」，与真实报文同会话。
-	leg := "customer"
-	_, _, callID, bizUUID := sipReqInfo(in.InviteRequest)
+	// 聚合键：优先 Hermes 业务 callUuid，否则退回 SIP Call-ID。
+	// 既作 trace 会话聚合键（与传输层 tracer 一致），又作 call_record 主键（被叫腿记录与 trace 同 call_uuid）。
+	leg := callee
+	callID, bizUUID := inviteAggKeys(in.InviteRequest)
 	aggKey := bizUUID
 	if aggKey == "" {
 		aggKey = callID
 	}
+	id := a.tracker.Start(aggKey, callee, caller, string(rule.Outcome))
+
+	// 通话链路观测：传输层 SIP tracer 已自动抓真实 INVITE/180/200/BYE。
+	// 这里附加「mock 客户腿业务决策(FLOW)」，与真实报文同会话。
 	sess := a.bus.EnsureByCallID(aggKey, "call", "呼入 "+caller+" → "+callee+" ("+leg+")")
 	a.bus.Emit(sess, leg, tracelog.ChanFlow, tracelog.DirNA, "命中",
-		"被叫="+callee+" 主叫="+caller+" 规则="+string(rule.Outcome), map[string]string{"leg": leg})
+		"被叫="+callee+" 主叫="+caller+" 入口端口="+itoa(a.listenPort)+" 规则="+string(rule.Outcome),
+		map[string]string{"leg": leg, "role": "customer", "listenPort": itoa(a.listenPort), "line": line})
 
 	switch rule.Outcome {
 	case behavior.OutcomeReject, behavior.OutcomeBusy:
 		code := orDefault(rule.HangupCode, 486)
-		rejectCall(in, code, "Busy Here")
+		rejectCall(in, code, reasonForCode(code, "Busy Here"))
 		a.bus.Emit(sess, leg, tracelog.ChanFlow, tracelog.DirNA, "决策", "拒接(Busy Here) 码="+itoa(code), nil)
 		a.tracker.Rejected(id, code)
 		log.Infof("拒接 %d", code)
 		return
 	case behavior.OutcomeUnavailable:
 		code := orDefault(rule.HangupCode, 503)
-		rejectCall(in, code, "Service Unavailable")
+		rejectCall(in, code, reasonForCode(code, "Service Unavailable"))
 		a.bus.Emit(sess, leg, tracelog.ChanFlow, tracelog.DirNA, "决策", "不可用(Service Unavailable) 码="+itoa(code), nil)
 		a.tracker.Rejected(id, code)
 		log.Infof("不可用 %d", code)
@@ -172,9 +181,9 @@ func (a *Agent) handleInbound(in *diago.DialogServerSession) {
 	case behavior.OutcomeNoAnswer:
 		ringing(in)
 		a.bus.Emit(sess, leg, tracelog.ChanFlow, tracelog.DirNA, "决策", "振铃", nil)
-		sleepMs(rule.RingMs)
+		sleepMs(orDefault(rule.RingMs, a.cfg.DefaultRingMs))
 		code := orDefault(rule.HangupCode, 480)
-		rejectCall(in, code, "Temporarily Unavailable")
+		rejectCall(in, code, reasonForCode(code, "Temporarily Unavailable"))
 		a.bus.Emit(sess, leg, tracelog.ChanFlow, tracelog.DirNA, "决策", "振铃不接(Temporarily Unavailable) 码="+itoa(code), nil)
 		a.tracker.Rejected(id, code)
 		log.Info("振铃不接")
@@ -236,46 +245,56 @@ func (a *Agent) handleInbound(in *diago.DialogServerSession) {
 		a.tracker.Ended(id)
 		return
 	}
-	// 放预置音频（NO_RTP/单向只收/丢帧/乱序 故障：接听后不走普通放音）。
-	// 默认行为：持续循环放音（预置 WAV 或合成拨号音），让 FS 录音/坐席/监听**真能听到声音**
-	// 且媒体统计 tx>0。仅在媒体类故障/IVR/收发 DTMF 等占用 AudioWriter 时跳过。
+	// ---- 接听后的媒体动作 ----
+	// 写流来源**至多一个**：diago 的 AudioWriter 多次调用返回同一底层 writer，普通 Write 仅 RLock、
+	// 对并发写无保护，两个 goroutine 同时写会损坏 RTP。按优先级择一：媒体故障 > 发 DTMF > 常态放音。
+	// 读流（监听对端 DTMF / 只收不发）与写流相互独立，可并存（diago 支持同时持 reader+writer）。
 	streamStop := make(chan struct{})
 	streamingAudio := false
 	mediaFault := rule.Fault == behavior.FaultNoRTP || rule.Fault == behavior.FaultOneWayAudio ||
 		rule.Fault == behavior.FaultRtpLoss || rule.Fault == behavior.FaultRtpReorder
-	if !mediaFault && rule.DTMF == "" && !rule.ExpectDTMF {
+	switch {
+	case rule.Fault == behavior.FaultRtpLoss:
+		// RTP_LOSS：发媒体但按比例丢帧（媒体降质但不中断）。
+		log.Warn("故障注入 RTP_LOSS：按比例丢帧发送")
+		a.bus.Emit(sess, leg, tracelog.ChanFlow, tracelog.DirNA, "故障注入",
+			"RTP_LOSS：发媒体但丢 "+itoa(behavior.RtpLossPercentDefault)+"% 帧（丢包/抖动）", map[string]string{"fault": "RTP_LOSS"})
+		go a.lossySend(in, behavior.RtpLossPercentDefault, log)
+	case rule.Fault == behavior.FaultRtpReorder:
+		// RTP_REORDER：发媒体但小窗口内乱序（考验对端抖动缓冲）。
+		log.Warn("故障注入 RTP_REORDER：小窗口乱序发送")
+		a.bus.Emit(sess, leg, tracelog.ChanFlow, tracelog.DirNA, "故障注入",
+			"RTP_REORDER：发媒体但小窗口内乱序（乱序/重排）", map[string]string{"fault": "RTP_REORDER"})
+		go a.reorderSend(in, log)
+	case rule.Fault == behavior.FaultNoRTP:
+		// NO_RTP：接听后完全不发媒体（压媒体超时）——不起任何写 goroutine。
+		log.Warn("故障注入 NO_RTP：接听后不发 RTP")
+		a.bus.Emit(sess, leg, tracelog.ChanFlow, tracelog.DirNA, "故障注入",
+			"NO_RTP：接听后不发媒体（媒体超时）", map[string]string{"fault": "NO_RTP"})
+	case rule.Fault == behavior.FaultOneWayAudio:
+		// ONE_WAY_AUDIO：只收不发——写流留空，读流见下方 drainInbound。
+		log.Warn("故障注入 ONE_WAY_AUDIO：只收不发（不写媒体）")
+		a.bus.Emit(sess, leg, tracelog.ChanFlow, tracelog.DirNA, "故障注入",
+			"ONE_WAY_AUDIO：只收不发（单向音频）", map[string]string{"fault": "ONE_WAY_AUDIO"})
+	case rule.DTMF != "":
+		// 发送 DTMF（OTP 验证码 / IVR 选择）。占用写流，与持续放音互斥。
+		go a.sendDTMF(in, rule.DTMF, log)
+	case !rule.ExpectDTMF:
+		// 常态：持续放音，使 FS 录音/坐席/监听能听到声音且 tx>0。
 		streamingAudio = true
 		go a.streamAudio(in, rule.Playback, streamStop, log)
 		a.bus.Emit(sess, leg, tracelog.ChanBridge, tracelog.DirNA, "放音",
 			"持续发送音频（"+audioSource(rule.Playback, a.cfg.DefaultPlayback)+"），对端可听", nil)
 	}
-	// RTP_LOSS 故障：发媒体但按比例丢帧（模拟丢包/抖动，媒体降质但不中断）。
-	if rule.Fault == behavior.FaultRtpLoss {
-		log.Warn("故障注入 RTP_LOSS：按比例丢帧发送")
-		a.bus.Emit(sess, leg, tracelog.ChanFlow, tracelog.DirNA, "故障注入",
-			"RTP_LOSS：发媒体但丢 "+itoa(behavior.RtpLossPercentDefault)+"% 帧（丢包/抖动）", map[string]string{"fault": "RTP_LOSS"})
-		go a.lossySend(in, behavior.RtpLossPercentDefault, log)
+	// 同时配了媒体故障又配了 DTMF：写流唯一，DTMF 被忽略（避免双写损坏 RTP）。
+	if rule.DTMF != "" && mediaFault {
+		log.Warnf("媒体故障 %s 占用写流，本通忽略发送 DTMF=%q（避免双写）", rule.Fault, rule.DTMF)
 	}
-	// RTP_REORDER 故障：发媒体但小窗口内乱序（模拟乱序/重排，考验对端抖动缓冲）。
-	if rule.Fault == behavior.FaultRtpReorder {
-		log.Warn("故障注入 RTP_REORDER：小窗口乱序发送")
-		a.bus.Emit(sess, leg, tracelog.ChanFlow, tracelog.DirNA, "故障注入",
-			"RTP_REORDER：发媒体但小窗口内乱序（乱序/重排）", map[string]string{"fault": "RTP_REORDER"})
-		go a.reorderSend(in, log)
-	}
-	// 单向音频故障：只收不发（读对端 RTP 但不写媒体）——媒体统计应显示 tx=0。
+	// 读流：与上面的写流独立、可并存。
 	if rule.Fault == behavior.FaultOneWayAudio {
-		log.Warn("故障注入 ONE_WAY_AUDIO：只收不发（不写媒体）")
-		a.bus.Emit(sess, leg, tracelog.ChanFlow, tracelog.DirNA, "故障注入",
-			"ONE_WAY_AUDIO：只收不发（单向音频）", map[string]string{"fault": "ONE_WAY_AUDIO"})
-		go a.drainInbound(in, log) // 持续读对端 RTP 以产生 rx 统计，但本侧不发
-	}
-	// 接听后发送 DTMF（覆盖 OTP 验证码按键 / IVR 选择）
-	if rule.DTMF != "" {
-		go a.sendDTMF(in, rule.DTMF, log)
-	}
-	// 接听后监听对端按键（IVR 交互观测：听放音→对端按键）。与发 DTMF 互斥（共用 AudioReader/Writer）。
-	if rule.ExpectDTMF && rule.DTMF == "" && rule.Fault != behavior.FaultOneWayAudio {
+		go a.drainInbound(in, log) // 只读对端 RTP 产生 rx 统计，本侧不发
+	} else if rule.ExpectDTMF && rule.DTMF == "" {
+		// 监听对端按键（IVR 交互观测：放音→对端按键）。
 		go a.recvDTMF(in, sess, leg, time.Duration(orDefault(rule.TalkMs, a.cfg.DefaultTalkMs))*time.Millisecond, log)
 	}
 
@@ -409,17 +428,18 @@ func (a *Agent) audioFrames(file string) [][]byte {
 		file = a.cfg.DefaultPlayback
 	}
 	if file != "" {
-		if frames := loadPCMUFrames(filepath.Join(a.cfg.AudioDir, file)); len(frames) > 0 {
+		if frames := cachedPCMUFrames(filepath.Join(a.cfg.AudioDir, file)); len(frames) > 0 {
 			return frames
 		}
 	}
-	return dialToneFrames() // 回退：合成可听拨号音（350+440Hz），保证一定有声音
+	return cachedDialToneFrames() // 回退：合成可听拨号音（350+440Hz），保证一定有声音
 }
 
 func (a *Agent) sendDTMF(in *diago.DialogServerSession, digits string, log *logrus.Entry) {
 	// diago 的 RTP DTMF 直接写 packetWriter，但需要 RTP 在流动。这里用静音帧
 	// 驱动 RTP 时钟（PCMU 静音 = 0xFF），DTMFWriter 链式拦截：WriteDTMF 时会
 	// 锁住静音写入并注入 RFC4733 telephone-event。与 PlaybackCreate 二选一。
+	// 静音 goroutine 的 aw.Write 与本函数的 WriteDTMF 并发安全：diago RTPDtmfWriter.mu 已序列化二者。
 	dtmfW := &diago.DTMFWriter{}
 	aw, err := in.AudioWriter(diago.WithAudioWriterDTMF(dtmfW))
 	if err != nil {
@@ -570,6 +590,10 @@ func (a *Agent) recvDTMF(in *diago.DialogServerSession, sess, leg string, dur ti
 	}
 }
 
+// ivrListenMaxDur 是 IVR 单个 DTMF 监听 goroutine 的存活上限（覆盖整个 IVR 窗口）；
+// 实际多在通话挂断/AudioReader 出错时提前结束。
+const ivrListenMaxDur = 5 * time.Minute
+
 // runIVR 执行脚本化 IVR 对话：从首步开始，每步「放提示音 → 等对端按键 → 按 branch 跳转」，
 // 直到 HANGUP / 无下一步 / 步数上限。每步的放音、收键、跳转都记入链路（可观测多轮交互）。
 // 真实媒体（放 WAV）+ RFC4733 收键，不做语义 ASR。
@@ -578,6 +602,11 @@ func (a *Agent) runIVR(in *diago.DialogServerSession, sess, leg string, steps []
 	for _, s := range steps {
 		byID[s.ID] = s
 	}
+	// 只取一次 AudioReader+DTMFReader：diago 每次 AudioReader(WithAudioReaderDTMF) 都会新建拦截器
+	// 并覆盖上一个，逐步重复获取会泄漏/失效。这里取一次、用单个 Listen 持续收键，各步只按本步
+	// 超时从通道取键（type-ahead：放音期间按下的键会缓冲，下一步消费）。
+	digits := a.ivrDTMFChannel(in, ivrListenMaxDur, log)
+
 	cur := steps[0]
 	for i := 0; i < 20; i++ { // 步数上限，防脚本环
 		a.bus.Emit(sess, leg, tracelog.ChanBridge, tracelog.DirOut, "IVR放音",
@@ -591,7 +620,7 @@ func (a *Agent) runIVR(in *diago.DialogServerSession, sess, leg string, steps []
 		}
 		// 等对端按键
 		wait := time.Duration(orDefault(cur.WaitMs, 5000)) * time.Millisecond
-		key := a.listenOneDTMF(in, wait, log)
+		key := waitDTMF(digits, wait)
 		next, hangupNow := nextIVRStep(cur, key)
 		if key != "" {
 			a.bus.Emit(sess, leg, tracelog.ChanBridge, tracelog.DirIn, "IVR按键",
@@ -633,25 +662,31 @@ func nextIVRStep(step behavior.IVRStep, key string) (next string, hangup bool) {
 	return step.OnNoKey, false
 }
 
-// listenOneDTMF 监听一次对端按键，返回首个按键（超时返回空）。
-func (a *Agent) listenOneDTMF(in *diago.DialogServerSession, wait time.Duration, log *logrus.Entry) string {
+// ivrDTMFChannel 取一次 AudioReader+DTMFReader，起单个 Listen goroutine 把收到的按键投递到
+// 带缓冲通道，供各 IVR 步按本步超时取键。reader 取失败返回 nil 通道（waitDTMF 一律走超时）。
+func (a *Agent) ivrDTMFChannel(in *diago.DialogServerSession, dur time.Duration, log *logrus.Entry) <-chan string {
 	dtmfR := &diago.DTMFReader{}
 	if _, err := in.AudioReader(diago.WithAudioReaderDTMF(dtmfR)); err != nil {
 		log.Errorf("ivr dtmf reader: %v", err)
-		return ""
+		return nil // nil 通道：waitDTMF 永远走超时分支，IVR 仍按 OnNoKey 推进
 	}
-	got := make(chan string, 1)
+	digits := make(chan string, 16)
 	go func() {
 		_ = dtmfR.Listen(func(d rune) error {
 			select {
-			case got <- string(d):
-			default:
+			case digits <- string(d):
+			default: // 缓冲满则丢最新键，绝不阻塞 Listen
 			}
 			return nil
-		}, wait)
+		}, dur)
 	}()
+	return digits
+}
+
+// waitDTMF 在 wait 内等一个按键，超时返回空。digits 为 nil 时永远超时（读 nil 通道阻塞）。
+func waitDTMF(digits <-chan string, wait time.Duration) string {
 	select {
-	case k := <-got:
+	case k := <-digits:
 		return k
 	case <-time.After(wait):
 		return ""
@@ -682,32 +717,49 @@ func boolStr(b bool) string {
 	return "false"
 }
 
+// reasonForCode 给 SIP 失败码配标准 reason 短语；未知码用 fallback（保持调用处默认语义）。
+// 解决「自定义 HangupCode 时 reason 文案与码不符」（如 603 仍写 "Busy Here"）。
+func reasonForCode(code int, fallback string) string {
+	switch code {
+	case 408:
+		return "Request Timeout"
+	case 480:
+		return "Temporarily Unavailable"
+	case 486:
+		return "Busy Here"
+	case 488:
+		return "Not Acceptable Here"
+	case 503:
+		return "Service Unavailable"
+	case 600:
+		return "Busy Everywhere"
+	case 603:
+		return "Decline"
+	}
+	return fallback
+}
+
 // ===========================================================================
 // diago 适配薄封装：集中所有 diago 调用，按实际 diago 版本在此处统一校准。
 // ===========================================================================
 
-// sipReqInfo 从真实 SIP 请求提取：所有头（含 Hermes 注入的 X- 业务头）、原始报文、Call-ID。
-// 这是「真实 SIP 报文观测」的核心——区别于手写摘要。req 为 nil 时返回空。
-func sipReqInfo(req *sip.Request) (headers []tracelog.HeaderKV, raw, callID, bizUUID string) {
+// inviteAggKeys 从入站 INVITE 取会话聚合所需的两个键：SIP Call-ID 与 Hermes 业务 callUuid。
+// bizUUID 用与传输层 tracer 相同的 tracelog.BizUUIDFromHeaders 提取（同名集合 + 同优先级），
+// 保证两条观测路径算出同一聚合键、同一通话不分裂。原始报文由 siptrace 在传输层另抓，这里不构建，
+// 省去热路径上 req.String() 的无谓开销。req 为 nil 返回空。
+func inviteAggKeys(req *sip.Request) (callID, bizUUID string) {
 	if req == nil {
-		return nil, "", "", ""
+		return "", ""
 	}
-	for _, h := range req.Headers() {
-		name := h.Name()
-		val := h.Value()
-		headers = append(headers, tracelog.HeaderKV{Name: name, Value: val})
-		if bizUUID == "" {
-			switch strings.ToLower(name) {
-			case "x-call-uuid", "x-callid", "x-jcallid", "x-call-id", "x-session-id", "x-session_id":
-				bizUUID = val
-			}
-		}
+	hdrs := req.Headers()
+	kv := make([]tracelog.HeaderKV, 0, len(hdrs))
+	for _, h := range hdrs {
+		kv = append(kv, tracelog.HeaderKV{Name: h.Name(), Value: h.Value()})
 	}
-	raw = req.String()
 	if cid := req.CallID(); cid != nil {
 		callID = cid.Value()
 	}
-	return headers, raw, callID, bizUUID
+	return callID, tracelog.BizUUIDFromHeaders(kv)
 }
 
 // dialogCallee 取被叫号码。对照 diago v0.28.0
@@ -779,8 +831,8 @@ func rtpLoss(firstSeq, lastSeq uint16, received uint64) (lost, lossPercent int) 
 }
 
 // dialogLine 推断线路标识：从 INVITE 的 X-Line-Name 业务头取（FS 经 sip_h_x-line-name 注入，
-// 对照 Hermes CommonConstant.CALL_X_LINE_NAME）。取不到回退空（走号码/默认匹配）。
-// 有了它，cluster 的「线路→客户组绑定」(ResolveByLine) 才能真正生效。
+// 对照 Hermes CommonConstant.CALL_X_LINE_NAME）。它现在只用于观测/兼容预览；
+// SIP 热路径按 mock 入口端口匹配客户组。
 func dialogLine(in *diago.DialogServerSession) string {
 	if in == nil || in.InviteRequest == nil {
 		return ""

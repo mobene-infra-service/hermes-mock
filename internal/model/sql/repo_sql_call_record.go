@@ -12,28 +12,22 @@ import (
 	"hermes-mock/internal/entity"
 )
 
-// 通话记录：mock 事实表。SaveCallRecord 按 trace_id（优先）/record_id upsert，
-// 并把已有行与新行做字段级合并（首值优先 + 状态只进不退）——逻辑原样保留自 cluster/call_record.go。
+// 通话记录：mock 事实表 mock_call。SaveCallRecord 按 record_id upsert，
+// 并把已有行与新行做字段级合并（首值优先 + 状态只进不退）。
+// 被叫腿的 record_id = call_uuid（sipagent 传入），同一通话 INVITE 重传幂等合并到一行。
 
-func (r *GormRepository) SaveCallRecord(ctx context.Context, row *entity.CallRecord) error {
+func (r *GormRepository) SaveCallRecord(ctx context.Context, row *entity.MockCall) error {
 	normalizeCallRecord(row)
 	if row.RecordID == "" {
 		return errors.New("record_id 必填")
 	}
 	db := r.db.WithContext(ctx)
 	var id int64
-	if row.TraceID != "" {
-		if err := db.Table(row.TableName()).Where("trace_id = ?", row.TraceID).Select("id").Limit(1).Scan(&id).Error; err != nil {
-			return err
-		}
-	}
-	if id == 0 {
-		if err := db.Table(row.TableName()).Where("record_id = ?", row.RecordID).Select("id").Limit(1).Scan(&id).Error; err != nil {
-			return err
-		}
+	if err := db.Table(row.TableName()).Where("record_id = ?", row.RecordID).Select("id").Limit(1).Scan(&id).Error; err != nil {
+		return err
 	}
 	if id != 0 {
-		var existing entity.CallRecord
+		var existing entity.MockCall
 		if err := db.First(&existing, id).Error; err == nil {
 			*row = mergeCallRecord(existing, *row)
 		}
@@ -43,7 +37,7 @@ func (r *GormRepository) SaveCallRecord(ctx context.Context, row *entity.CallRec
 	return db.Create(row).Error
 }
 
-func (r *GormRepository) ListCallRecords(ctx context.Context, f entity.CallRecordFilter) ([]entity.CallRecord, *entity.Meta, error) {
+func (r *GormRepository) ListCallRecords(ctx context.Context, f entity.CallRecordFilter) ([]entity.MockCall, *entity.Meta, error) {
 	page := f.Page
 	if page <= 0 {
 		page = 1
@@ -55,7 +49,7 @@ func (r *GormRepository) ListCallRecords(ctx context.Context, f entity.CallRecor
 	if pageSize > 200 {
 		pageSize = 200
 	}
-	q := r.db.WithContext(ctx).Model(&entity.CallRecord{})
+	q := r.db.WithContext(ctx).Model(&entity.MockCall{})
 	q = like(q, "scenario", f.Scenario)
 	q = like(q, "status", f.Status)
 	q = like(q, "org_code", f.OrgCode)
@@ -84,13 +78,13 @@ func (r *GormRepository) ListCallRecords(ctx context.Context, f entity.CallRecor
 	if err := q.Count(&total).Error; err != nil {
 		return nil, nil, err
 	}
-	var rows []entity.CallRecord
+	var rows []entity.MockCall
 	err := q.Order("started_at DESC").Order("id DESC").
 		Limit(pageSize).Offset((page - 1) * pageSize).Find(&rows).Error
 	return rows, r.calculatePagination(total, page, pageSize), err
 }
 
-func normalizeCallRecord(r *entity.CallRecord) {
+func normalizeCallRecord(r *entity.MockCall) {
 	r.RecordID = strings.TrimSpace(r.RecordID)
 	r.Scenario = strings.TrimSpace(r.Scenario)
 	if r.Scenario == "" {
@@ -132,7 +126,7 @@ func like(q *gorm.DB, col, val string) *gorm.DB {
 	return q.Where(col+" LIKE ?", "%"+val+"%")
 }
 
-func mergeCallRecord(existing, next entity.CallRecord) entity.CallRecord {
+func mergeCallRecord(existing, next entity.MockCall) entity.MockCall {
 	out := next
 	out.ID = existing.ID
 	if out.RecordID == "" {
@@ -157,14 +151,11 @@ func mergeCallRecord(existing, next entity.CallRecord) entity.CallRecord {
 	out.LineName = firstValue(out.LineName, existing.LineName)
 	out.Direction = firstValue(out.Direction, existing.Direction)
 	out.CallType = firstValue(out.CallType, existing.CallType)
+	out.ExpectOutcome = firstValue(out.ExpectOutcome, existing.ExpectOutcome)
 	out.Result = firstValue(out.Result, existing.Result)
 	out.TraceID = firstValue(out.TraceID, existing.TraceID)
 	out.CallUUID = firstValue(out.CallUUID, existing.CallUUID)
-	out.SIPCallID = firstValue(out.SIPCallID, existing.SIPCallID)
 	out.LastSummary = firstValue(out.LastSummary, existing.LastSummary)
-	out.SignalSummary = firstValue(out.SignalSummary, existing.SignalSummary)
-	out.MediaSummary = firstValue(out.MediaSummary, existing.MediaSummary)
-	out.CallbackSummary = firstValue(out.CallbackSummary, existing.CallbackSummary)
 	if statusRank(out.Status) < statusRank(existing.Status) {
 		out.Status = existing.Status
 	}

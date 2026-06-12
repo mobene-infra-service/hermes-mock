@@ -56,7 +56,21 @@ export interface SipAddr {
 }
 
 // getSipWebrtcAddr 取 FreeSWITCH 的 WebRTC 接入地址（host/port/ssl），jssip 据此连 ws(s) 注册。
-export const getSipWebrtcAddr = (agent: string) => callCenter<SipAddr>(agent, '/agent/webrtc/addr', 'GET')
+// 该地址是机构级固定值（FS 的 wss 边缘接入点，与坐席无关）。多坐席同页批量上线时用 single-flight
+// 共享同一次请求/结果，避免每坐席各拉一次 /agent/webrtc/addr。失败不缓存（后续坐席可重试）；
+// 机构切换经 resetSipWebrtcAddrCache 失效（不同机构可能指向不同 FS）。
+let webrtcAddrInflight: Promise<HermesResp<SipAddr>> | null = null
+
+export function getSipWebrtcAddr(agent: string): Promise<HermesResp<SipAddr>> {
+  if (!webrtcAddrInflight) {
+    webrtcAddrInflight = callCenter<SipAddr>(agent, '/agent/webrtc/addr', 'GET')
+      .catch((e) => { webrtcAddrInflight = null; throw e })
+  }
+  return webrtcAddrInflight
+}
+
+// resetSipWebrtcAddrCache 清掉共享的 WebRTC 地址缓存（机构切换时调，下次重新拉当前机构的地址）。
+export function resetSipWebrtcAddrCache() { webrtcAddrInflight = null }
 
 // switchStatus 切某坐席工作状态（AgentStatusEnum code：2在线/5呼叫中/6小休/7忙/9自动外呼）。
 export const switchStatus = (agent: string, action: number) => callCenter(agent, '/agent/status/switch', 'POST', { action })

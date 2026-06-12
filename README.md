@@ -18,7 +18,7 @@
               │ REST
  ┌────────────▼──────────────── hermes-mock（Go 单二进制）──────────────────┐
  │ api:      Gin HTTP，服务前端 + 客户配置 / 业务测试触发 / 链路观测 REST       │
- │ cluster:  客户集群（号段组 + 个例 + 行为档 + 客户组↔线路绑定），持久化 hermes_mock │
+ │ cluster:  客户集群（号段组 + 个例 + 行为档 + 入口端口↔客户组绑定），持久化 hermes_mock │
  │ sipagent(diago): 被叫 UAS——接 FS 的 INVITE，按客户行为应答/放音/DTMF/挂断/故障   │
  │ orchestrator: 经 Hermes OpenAPI 让 Hermes 业务侧发起外呼（call-center/bot/OTP） │
  │ siptrace+tracelog: 传输层抓真实 SIP 报文，按 Call-ID 聚合成链路时间线（落库）     │
@@ -38,7 +38,7 @@
 |---|---|
 | **总览** | 通话统计 + 活跃通话 + 近期链路会话 |
 | **机构** | Hermes OpenAPI 接入凭据（网关/直连），一键切当前测试机构。mock 与 Hermes 只走 OpenAPI，绝不直连业务库 |
-| **客户配置** | 核心：行为档 / 客户组（号段批量） / 客户个例 / 客户组↔线路绑定 的 CRUD + 一键上下线 + 解析预览 |
+| **客户配置** | 核心：行为档 / 客户组（号段批量） / 客户个例 / 入口端口↔客户组绑定 的 CRUD + 一键上下线 + 解析预览 |
 | **坐席** | 坐席状态 / 上线；与前端 jssip 软电话配合（坐席外呼） |
 | **重点通话场景** | 由 Hermes 业务侧发起、mock 扮客户被叫：call-center 群呼 / call-bot 任务 / OTP / 呼叫记录 + **坐席外呼（前端 jssip）**，另含 line-call 底层 SIP 冒烟 |
 | **通话链路** | 会话列表 + 事件时间线（可展开真实 SIP 报文 + 业务头），多腿按 callUuid 合并 |
@@ -70,7 +70,7 @@ DDL：`deploy/ddl/hermes_mock.sql`（建 `hermes_mock` 库及各表）。
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `HTTP_PORT` | 8080 | 配置后台 / API 端口（容器镜像内 ENV 定为 80） |
-| `SIP_LISTEN_IP` / `SIP_LISTEN_PORT` | 0.0.0.0 / 5060 | 被叫 SIP 监听（FS 把 INVITE 发到这里） |
+| `SIP_LISTEN_IP` / `SIP_LISTEN_PORT` / `SIP_LISTEN_PORTS` | 0.0.0.0 / 5060 / 空 | 被叫 SIP 监听；多端口用 `SIP_LISTEN_PORTS=5060,5061`，为空时兼容单端口 `SIP_LISTEN_PORT` |
 | `SIP_TRANSPORT` / `CODECS` | udp / PCMU,PCMA | SIP 传输 / SDP 编解码 |
 | `EXTERNAL_IP` | 自动 | 对 FS 暴露的可达 IP（写入 SDP/Contact；K8s 用 Downward API 注 podIP） |
 | `RTP_PORT_START` / `RTP_PORT_END` | 20000 / 21000 | RTP 端口段 |
@@ -82,7 +82,7 @@ DDL：`deploy/ddl/hermes_mock.sql`（建 `hermes_mock` 库及各表）。
 
 ## 与 FreeSWITCH / Hermes 对接（硬前提）
 
-1. **Hermes basic 线路**：在被测 Hermes 配置 `t_line`/`t_line_phone`，确保线路 `address` 指向本 mock；mock 仅在自己库维护「客户组↔线路」绑定，**不直写 Hermes 业务表**。
+1. **Hermes basic 线路**：在被测 Hermes 配置 `t_line`/`t_line_phone`，确保线路 `address` 指向本 mock 的具体端口（如 `mockIP:5060`/`mockIP:5061`）；mock 仅在自己库维护「入口端口↔客户组」绑定，**不直写 Hermes 业务表**。
 2. **FreeSWITCH**：保证 SIP/RTP 与 mock 网络互通、编解码 PCMU/PCMA 对齐（外呼目标 = `sofia/external/{callee}@{t_line.address=mock}`）。
 3. 业务侧（call-center/call-bot/otp/fs-esl-proxy）**零代码改动**。
 4. 坐席场景：群呼/手动外呼接通后转坐席，由**真实 Hermes 工作台坐席**承担（mock 不模拟坐席）。

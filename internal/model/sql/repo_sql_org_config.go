@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	"hermes-mock/internal/entity"
 )
@@ -17,20 +17,24 @@ func (r *GormRepository) ListOrgConfigs(ctx context.Context) ([]entity.OrgConfig
 	return rows, err
 }
 
-// UpsertOrgConfig 按 org_code 唯一 upsert。
+// UpsertOrgConfig 按 org_code 唯一 upsert（ON CONFLICT，消除先查后写竞态）。
 func (r *GormRepository) UpsertOrgConfig(ctx context.Context, c *entity.OrgConfig) error {
 	c.GmtModified = time.Now()
 	db := r.db.WithContext(ctx)
-	var existing entity.OrgConfig
-	err := db.Where("org_code = ?", c.OrgCode).First(&existing).Error
-	if err == gorm.ErrRecordNotFound {
-		return db.Create(c).Error
-	}
-	if err != nil {
+	if err := db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "org_code"}},
+		UpdateAll: true,
+	}).Create(c).Error; err != nil {
 		return err
 	}
-	c.ID = existing.ID
-	return db.Model(&entity.OrgConfig{}).Where("id = ?", existing.ID).Save(c).Error
+	if c.ID == 0 {
+		var id int64
+		if err := db.Table(c.TableName()).Where("org_code = ?", c.OrgCode).Select("id").Limit(1).Scan(&id).Error; err != nil {
+			return err
+		}
+		c.ID = id
+	}
+	return nil
 }
 
 func (r *GormRepository) DeleteOrgConfig(ctx context.Context, orgCode string) error {

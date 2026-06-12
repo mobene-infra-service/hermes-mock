@@ -10,11 +10,11 @@
               │ REST / 前端 jssip 软电话（坐席外呼）
  ┌────────────▼──────────────── hermes-mock（Go 单二进制）──────────────────┐
  │ api:           Gin HTTP，服务前端 + 客户配置 / 业务测试触发 / 链路观测 REST       │
- │ cluster:       客户集群（行为档+客户组+个例+线路绑定）持久化 hermes_mock 库       │
+ │ cluster:       客户集群（行为档+客户组+个例+端口绑定）持久化 hermes_mock 库       │
  │ sipagent(diago): 被叫 UAS——接 FS 的 INVITE，按客户行为应答/放音/DTMF/挂断/故障   │
  │ orchestrator:  经 Hermes OpenAPI 让业务侧发起外呼（call-center/call-bot/otp）   │
  │ siptrace+tracelog: 传输层抓真实 SIP 报文，聚合成链路时间线（周期落库）            │
- │ calltrace/callbacks: 每通被叫 / Hermes 回调 落库（mock_call_record/mock_callback）│
+ │ calltrace/callbacks: 每通被叫 / Hermes 回调 落库（mock_call/mock_callback）│
  │ agents/wsagent: 坐席状态表 + hermes-ws 上线（坐席场景；详见 STATUS 开放问题）     │
  └────────────────────────▲───────────────────────────────────────────────┘
               真实 SIP/RTP │（Hermes 线路 t_line.address 指向 mock）
@@ -48,13 +48,13 @@ docs/                    本套文档
 | 包 | 职责 |
 |---|---|
 | `config` | 环境变量集中声明与解析（HTTP / SIP-RTP / DB；业务接入配置一律在「机构」页，不走 env） |
-| `entity` | **持久化对象（PO）+ 共享 DTO**：10 个 GORM 实体（行为档/客户组/个例/线路绑定/呼叫记录/测试运行/链路会话/链路事件/回调/机构配置）+ Meta/Resolved/过滤器。依赖图叶子 |
+| `entity` | **持久化对象（PO）+ 共享 DTO**：10 个 GORM 实体（行为档/客户组/个例/端口绑定/MockCall 呼叫记录/测试运行/TraceLeg 单腿链路/链路事件/回调/机构配置）+ Meta/Resolved/过滤器。依赖图叶子。gorm tag 为 schema 权威 |
 | `model` | **Repository 接口唯一定义处** + 工厂（DBType=mysql/sqlite，openGormDB 统一连接池，启动 AutoMigrate 全实体）；`model/sql` 子包按表分文件实现（GormRepository） |
 | `cluster` | **客户集群领域服务**：四类配置的内存缓存 + `ResolveByNumber/ResolveByLine`（SIP 来话热路径，只读缓存不查库）+ `TakeNumbers` 取号游标；写穿透 Repository |
 | `orgcfg` | 机构 OpenAPI 接入配置缓存 + 当前机构选择（gateway 走网关 X-OpenApi-Key / direct 注入 ORG 头）；写穿透 Repository |
 | `sipagent` | **diago 被叫 UAS**：接 FS 的 INVITE，按 cluster 解析的行为应答/拒接/振铃/放音/DTMF/IVR/挂断/故障（只演客户被叫腿） |
-| `calltrace` | 被叫腿通话生命周期跟踪 → 经 Repository 落 `mock_call_record` |
-| `tracelog` | 通话链路事件总线（SIP/媒体/WS 统一时间线）；内存环 + `traceFlushLoop` 周期经 Repository 落 `mock_trace_*` |
+| `calltrace` | 被叫腿通话生命周期跟踪 → 按 call_uuid 主键经 Repository 落 `mock_call`（INVITE 重传幂等合并一行） |
+| `tracelog` | 通话链路事件总线（SIP/媒体/WS 统一时间线）；内存环 + `traceFlushLoop` 周期经 Repository 落 `mock_trace_leg/event`（写入严格单腿，多腿读时按 call_uuid 归并） |
 | `siptrace` | sipgo 传输层 tracer：捕获**所有收发的原始 SIP 报文**（含 X- 业务头），按 Call-ID 聚合进 tracelog（须在建 SIP agent 前 Install） |
 | `orchestrator` | 经 Hermes 业务 REST/OpenAPI 触发 call-bot/otp/call-center 任务 + 坐席操作 |
 | `callbacks` | 接收 Hermes 回调（webhook）→ 经 Repository 落 `mock_callback` |
@@ -67,7 +67,7 @@ docs/                    本套文档
 **支撑包**（未在 main 直接接线，被上面的包引用）：
 `behavior`（被叫行为类型 Outcome/Fault/IVR/Rule）、
 `hermesopenapi`（Hermes OpenAPI 客户端，被 orchestrator/orgcfg 用）、
-`bootstrap`（启动播种线路绑定/默认数据）、
+`bootstrap`（启动播种端口绑定/默认数据）、
 `preflight`（场景就绪自检）。
 
 ## 四、一通呼叫的数据流
@@ -75,10 +75,11 @@ docs/                    本套文档
 **被叫（核心路径）**：
 ```
 FS ──INVITE──▶ siptrace 抓原始报文 ──▶ sipagent.handleInbound
-   └─ cluster 解析：按 line_address / line_name(X-Line-Name 规范化) 命中 mock_line_binding
+   └─ cluster 解析：按 INVITE 到达的 mock SIP listen_port 命中 mock_line_binding
         → customer_group → 若被叫号有 customer_override 用个例行为，否则用组 behavior_code
    └─ 按 outcome 应答/拒接/放音/DTMF/IVR/挂断/故障
-   └─ calltrace 写 mock_call_record；tracelog 记事件 ──▶ traceFlushLoop 周期落 mock_trace_session/event
+   └─ calltrace 按 call_uuid 主键写 mock_call（被叫腿，INVITE 重传幂等合并）；
+      tracelog 记事件 ──▶ traceFlushLoop 周期落 mock_trace_leg/event（单腿，不反推业务语义）
 ```
 
 **发起（Hermes 业务侧）**：
@@ -107,7 +108,7 @@ FS ──INVITE──▶ siptrace 抓原始报文 ──▶ sipagent.handleInbou
 |---|---|---|
 | `/overview` | OverviewPage | 总览：通话统计 + 活跃通话 + 近期链路 |
 | `/orgs` | OrgsPage | 机构 OpenAPI 接入凭据，一键切当前测试机构 |
-| `/cluster` | ClusterPage | **核心**：行为档 / 客户组 / 个例 / 线路绑定 CRUD |
+| `/cluster` | ClusterPage | **核心**：行为档 / 客户组 / 个例 / 端口绑定 CRUD |
 | `/agents` | AgentsPage | 坐席台账 CRUD（查/建/改/删/启停账号；纯管理，无 SIP 状态/上线） |
 | **通话测试场景**（二级菜单，原 CallScenariosPage 已拆分为独立页面） | | |
 | `/agent-call` | （App 常驻层 AgentSoftphone） | 坐席外呼：多坐席浏览器 jssip 软电话（选坐席→卡片→连接/外呼/接听规则/通话控制） |
@@ -117,12 +118,18 @@ FS ──INVITE──▶ siptrace 抓原始报文 ──▶ sipagent.handleInbou
 | `/trace` | CallTracePage | 通话链路：会话列表 + 事件时间线（可展开原始 SIP） |
 | `/callbacks` | CallbacksPage | Hermes 回调（webhook）接收与查询 |
 
-> 业务测试场景页共享公共模块：`components/scenario/utils.tsx`（ScenarioSummary/CallBoard/RunSteps/JSONBlock/ReadyLabel + 工具）、`components/scenario/ScenarioHeader.tsx`、`hooks/useScenarioMeta.ts`（机构/客户组/技能组/TTS/线路/preflight 加载 + 派生选项 + 播种）。坐席软电话：`components/AgentSoftphone.tsx` + `sip/{index,controller,request}.ts`（多实例 jssip）。
+> 业务测试场景页共享公共模块：`components/scenario/utils.tsx`（ScenarioSummary/CallBoard/RunSteps/JSONBlock/ReadyLabel + 工具）、`components/scenario/ScenarioHeader.tsx`、`hooks/useScenarioMeta.ts`（机构/客户组/技能组/TTS/端口绑定/preflight 加载 + 派生选项 + 播种）。坐席软电话：`components/AgentSoftphone.tsx` + `sip/{index,controller,request}.ts`（多实例 jssip）。
 
-## 七、持久化（hermes_mock 库，11 张 mock_* 表）
+## 七、持久化（hermes_mock 库，10 张 mock_* 表）
 
-DDL：`deploy/ddl/hermes_mock.sql`。
+DDL：`deploy/ddl/hermes_mock.sql`（实体 gorm tag 为 schema 权威，DDL 为生成快照）。
 
-`mock_behavior_profile` · `mock_customer_group` · `mock_customer_override` · `mock_line_binding`
-· `mock_test_case` · `mock_test_run` · `mock_trace_session` · `mock_trace_event`
-· `mock_call_record` · `mock_org_config` · `mock_callback`
+**配置域**：`mock_behavior_profile` · `mock_customer_group` · `mock_customer_override`（复合唯一 `group_code+number`）· `mock_line_binding`（`listen_port→组`）· `mock_org_config`
+
+**记录域**（`call_uuid` 为聚合锚）：
+- `mock_call`（**聚合根**，一通电话 1 行）：发起面(scenario/source/org/task/run/customer/agent/line/expect_outcome) + 结果面(status/result/hangup/时间/duration)。被叫腿 `record_id == call_uuid`（INVITE 重传幂等合并）。
+- `mock_trace_leg`（**写入侧严格单腿**：`session_id`=单腿键 + `call_uuid` 关联 + `leg_role`/`line`）；「一通含多腿」由 api 读时按 `call_uuid` 归并（纯展示装配，不写回、不跨腿聚合）。
+- `mock_trace_event`（单腿时间线 + 原始 SIP 报文）
+- `mock_callback`（Hermes webhook，按 `call_uuid` 关联）· `mock_test_run`（测试运行历史）
+
+观测域（call/trace/callback）按 `OBSERVE_TTL_DAYS`（默认 7）周期清理防膨胀；配置域不清理。

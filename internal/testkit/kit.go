@@ -17,6 +17,7 @@ import (
 
 	"hermes-mock/internal/cluster"
 	"hermes-mock/internal/config"
+	"hermes-mock/internal/entity"
 	"hermes-mock/internal/hermesprobe"
 	"hermes-mock/internal/model"
 	"hermes-mock/internal/orgcfg"
@@ -75,7 +76,7 @@ type Kit struct {
 	bus    *tracelog.Bus
 	clu    *cluster.Store   // 客户集群配置缓存（取号/解析；可为 nil）
 	repo   model.Repository // 测试运行/呼叫记录落库（可为 nil=仅内存）
-	orgs   *orgcfg.Store    // 当前机构接入配置（fs-esl 地址等；可为 nil=未注入）
+	orgs   *orgcfg.Store    // 当前机构接入配置（OpenAPI 服务地址/hermes-ws；可为 nil=未注入）
 	orch   BizCaller        // 业务编排器（群呼/自动外呼任务触发；可为 nil）
 	http   *http.Client
 
@@ -86,7 +87,7 @@ type Kit struct {
 // BizCaller 是 testkit 触发 Hermes 业务任务所需的最小接口（由 orchestrator 实现）。
 // 用接口解耦，避免 testkit 硬依赖 orchestrator 的全部类型。
 type BizCaller interface {
-	CallCenterTask(orgCode, name string, numbers, agentGroups []string, ttsCode, ttsText string, proportion int, startDate, endDate string, dialTimePeriod []string, lineType string, autoStart bool) ([]byte, error)
+	CallCenterTask(req entity.CallCenterTaskReq) ([]byte, error)
 	CallBotTask(name string, taskType int, numbers []string, robot, script string) ([]byte, error)
 	AutoCall(templateCode string, numbers []string) ([]byte, error)
 	OTP(to, templateCode string, params map[string]string) ([]byte, error)
@@ -96,7 +97,7 @@ func New(cfg *config.Config, prober *hermesprobe.Prober, bus *tracelog.Bus, clu 
 	return &Kit{cfg: cfg, prober: prober, bus: bus, clu: clu, http: &http.Client{Timeout: 8 * time.Second}}
 }
 
-// SetRepo 注入持久化（main 启动时设置；落 mock_test_run / mock_call_record）。
+// SetRepo 注入持久化（main 启动时设置；落 mock_test_run / mock_call）。
 func (k *Kit) SetRepo(repo model.Repository) { k.repo = repo }
 
 // SetOrgs 注入机构配置（main 启动时设置）。
@@ -300,26 +301,87 @@ func firstStr(values ...string) string {
 	return ""
 }
 
+// parseTaskCode 从 Hermes createAndImport 响应里尽力提取任务 code（兼容 data 为字符串 / 对象.code/.taskCode /
+// 顶层 code/taskCode）。testkit 不依赖 orchestrator（BizCaller 接口解耦），故本地复刻提取逻辑。
+func parseTaskCode(raw []byte) string {
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil {
+		var s string
+		if json.Unmarshal(raw, &s) == nil {
+			return s
+		}
+		return ""
+	}
+	switch d := m["data"].(type) {
+	case string:
+		return d
+	case map[string]any:
+		if c, ok := d["code"].(string); ok && c != "" {
+			return c
+		}
+		if c, ok := d["taskCode"].(string); ok && c != "" {
+			return c
+		}
+	}
+	if c, ok := m["code"].(string); ok && c != "" {
+		return c
+	}
+	if c, ok := m["taskCode"].(string); ok && c != "" {
+		return c
+	}
+	return ""
+}
+
 // CallCenterTaskParams call-center 群呼任务用例：建任务+导入客户号+启动，断言客户腿进 mock；
 // 如指定 ObserveAgent，则断言该坐席工作台 WS 收到来电/调度通知。
 type CallCenterTaskParams struct {
-	OrgCode        string   `json:"orgCode"`
-	Name           string   `json:"name"`
-	CustomerGroup  string   `json:"customerGroup"`
-	CustomerLimit  int      `json:"customerLimit"`
-	Numbers        []string `json:"numbers"`      // 客户号（→mock 客户线路）
-	AgentGroups    []string `json:"agentGroups"`  // 转接坐席组（真实 Hermes 技能组）
-	ObserveAgent   string   `json:"observeAgent"` // 期望收到工作台 WS 通知的坐席号（空则只断客户腿）
-	TTSCode        string   `json:"ttsCode"`
-	TTSText        string   `json:"ttsText"`
-	Proportion     int      `json:"proportion"`
-	StartDate      string   `json:"startDate"`
-	EndDate        string   `json:"endDate"`
-	DialTimePeriod []string `json:"dialTimePeriod"`
+	OrgCode       string   `json:"orgCode"`
+	Name          string   `json:"name"`
+	CustomerGroup string   `json:"customerGroup"`
+	CustomerLimit int      `json:"customerLimit"`
+	Numbers       []string `json:"numbers"`      // 客户号（→mock 客户线路）
+	AgentGroups   []string `json:"agentGroups"`  // 转接坐席组（真实 Hermes 技能组；与 AgentNumbers 二选一，仅取 1 个）
+	AgentNumbers  []string `json:"agentNumbers"` // 指定坐席号（与 AgentGroups 二选一）
+	ObserveAgent  string   `json:"observeAgent"` // 期望收到工作台 WS 通知的坐席号（空则只断客户腿）
+	TTSCode       string   `json:"ttsCode"`
+	TTSText       string   `json:"ttsText"`
+	// 模式策略组合（对照 Hermes）：ModeStrategy=1→Proportion；=2→LossRate+HistoricalConnectionRate。
+	ModeStrategy             int      `json:"modeStrategy"`
+	Proportion               int      `json:"proportion"`
+	LossRate                 int      `json:"lossRate"`
+	HistoricalConnectionRate int      `json:"historicalConnectionRate"`
+	SortMethod               int      `json:"sortMethod"`     // 1=优先首呼 2=优先重呼
+	IsPriorityTask           bool     `json:"isPriorityTask"` // 优先任务
+	IsVmHangup               bool     `json:"isVmHangup"`     // 语音信箱即挂
+	MaxRedialTimes           int      `json:"maxRedialTimes"`
+	RedialInterval           int      `json:"redialInterval"`
+	BestRingDuration         int      `json:"bestRingDuration"`
+	AgentMaxRingDuration     int      `json:"agentMaxRingDuration"`
+	AssignDelaySeconds       int      `json:"assignDelaySeconds"`
+	TransferType             string   `json:"transferType"`
+	Description              string   `json:"description"`
+	StartDate                string   `json:"startDate"`
+	EndDate                  string   `json:"endDate"`
+	DialTimePeriod           []string `json:"dialTimePeriod"`
 	// LineType 线路类型（Hermes 7cbb285：任务期间仅用该 type 线路选号；空=默认 base）。
-	LineType  string `json:"lineType"`
-	AutoStart *bool  `json:"autoStart"`
-	WaitSec   int    `json:"waitSec"` // 观测腿的最长秒（默认 90，预测式拨号按 Quartz 分钟级调度）
+	LineType string `json:"lineType"`
+	WaitSec  int    `json:"waitSec"` // 观测腿的最长秒（默认 90，预测式拨号按 Quartz 分钟级调度）
+}
+
+// toReq 把测试用例参数装配成 Hermes 群呼请求（号码已在调用前 resolve 好）。
+func (p CallCenterTaskParams) toReq() entity.CallCenterTaskReq {
+	return entity.CallCenterTaskReq{
+		OrgCode: p.OrgCode, Name: p.Name, Numbers: p.Numbers,
+		AgentGroupCodes: p.AgentGroups, AgentNumbers: p.AgentNumbers,
+		TTSCode: p.TTSCode, TTSText: p.TTSText,
+		ModeStrategy: p.ModeStrategy, Proportion: p.Proportion,
+		LossRate: p.LossRate, HistoricalConnectionRate: p.HistoricalConnectionRate,
+		SortMethod: p.SortMethod, IsPriorityTask: p.IsPriorityTask, IsVmHangup: p.IsVmHangup,
+		MaxRedialTimes: p.MaxRedialTimes, RedialInterval: p.RedialInterval,
+		BestRingDuration: p.BestRingDuration, AgentMaxRingDuration: p.AgentMaxRingDuration,
+		AssignDelaySeconds: p.AssignDelaySeconds, TransferType: p.TransferType, Description: p.Description,
+		StartDate: p.StartDate, EndDate: p.EndDate, DialTimePeriod: p.DialTimePeriod, LineType: p.LineType,
+	}
 }
 
 // RunCallCenterTaskObserved 触发 call-center 群呼任务并观测链路：
@@ -340,10 +402,6 @@ func (k *Kit) RunCallCenterTaskObserved(p CallCenterTaskParams) Run {
 		r.Steps = append(r.Steps, Step{Name: "校验", OK: false, Detail: "未提供客户号码"})
 		return k.finish(r, start)
 	}
-	autoStart := true
-	if p.AutoStart != nil {
-		autoStart = *p.AutoStart
-	}
 	sess := k.bus.OpenSession("test", "群呼任务 "+p.Name)
 	r.TraceID = sess
 	r.Artifacts["numbers"] = len(p.Numbers)
@@ -355,13 +413,17 @@ func (k *Kit) RunCallCenterTaskObserved(p CallCenterTaskParams) Run {
 	// Step 1: 经业务接口建任务并启动
 	k.bus.Emit(sess, "", tracelog.ChanFlow, tracelog.DirOut, "群呼任务",
 		fmt.Sprintf("建群呼任务 %s 并启动：%d 客户号→坐席组 %v", p.Name, len(p.Numbers), p.AgentGroups), nil)
-	out, err := k.orch.CallCenterTask(p.OrgCode, p.Name, p.Numbers, p.AgentGroups, p.TTSCode, p.TTSText, p.Proportion, p.StartDate, p.EndDate, p.DialTimePeriod, p.LineType, autoStart)
+	out, err := k.orch.CallCenterTask(p.toReq())
 	if err != nil {
-		r.Steps = append(r.Steps, Step{Name: "创建并启动群呼任务", OK: false, Detail: err.Error() + " " + clip(string(out), 200)})
+		r.Steps = append(r.Steps, Step{Name: "创建群呼任务", OK: false, Detail: err.Error() + " " + clip(string(out), 200)})
 		r.Calls = k.callViewsForCustomers(start, p.Numbers, "callcenter-task", p.ObserveAgent, strings.Join(p.AgentGroups, ","))
 		return k.finish(r, start)
 	}
-	r.Steps = append(r.Steps, Step{Name: "创建并启动群呼任务", OK: true, Detail: "Hermes 已受理：" + clip(string(out), 160)})
+	// 提取 Hermes 任务 code，暴露给前端做暂停/恢复/取消（createAndImport 后即自动拨号，无需 start）。
+	if code := parseTaskCode(out); code != "" {
+		r.Artifacts["taskCode"] = code
+	}
+	r.Steps = append(r.Steps, Step{Name: "创建群呼任务（即自动拨号）", OK: true, Detail: "Hermes 已受理：" + clip(string(out), 160)})
 
 	// Step 2: 断言客户腿接通（任一导入号被预测式拨到 mock 且 INVITE 200 OK）
 	if hit, ev := k.waitAnyLegInviteOK(start, p.Numbers, time.Duration(p.WaitSec)*time.Second); !ev.Answered {
@@ -563,7 +625,11 @@ func (k *Kit) RunRetrySwitchLine(p RetrySwitchLineParams) Run {
 	// Step 1: 群呼该号（预测式拨号驱动首呼；首呼落拒接线 → call-center 5s 窗重试换线）
 	k.bus.Emit(sess, "", tracelog.ChanFlow, tracelog.DirOut, "换线重试",
 		fmt.Sprintf("建群呼任务 %s（被叫 %s，lineType=%s）以触发失败重试换线", p.Name, number, orStr(p.LineType, "默认")), nil)
-	out, err := k.orch.CallCenterTask(p.OrgCode, p.Name, []string{number}, p.AgentGroups, p.TTSCode, p.TTSText, 1, "", "", nil, p.LineType, true)
+	out, err := k.orch.CallCenterTask(entity.CallCenterTaskReq{
+		OrgCode: p.OrgCode, Name: p.Name, Numbers: []string{number},
+		AgentGroupCodes: p.AgentGroups, TTSCode: p.TTSCode, TTSText: p.TTSText,
+		ModeStrategy: 1, Proportion: 1, LineType: p.LineType,
+	})
 	if err != nil {
 		r.Steps = append(r.Steps, Step{Name: "创建并启动群呼任务", OK: false, Detail: err.Error() + " " + clip(string(out), 200)})
 		return k.finish(r, start)

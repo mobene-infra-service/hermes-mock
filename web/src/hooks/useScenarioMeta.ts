@@ -11,7 +11,7 @@ export interface PreflightSet {
   otp?: PreflightReport
 }
 
-// useScenarioMeta：业务测试场景页共享的元数据（机构/客户组/技能组/TTS/线路绑定/preflight）+ 派生选项 + 播种。
+// useScenarioMeta：业务测试场景页共享的元数据（机构/客户组/技能组/TTS/端口绑定/preflight）+ 派生选项 + 播种。
 // 每个场景页独立调用（数据量小、跨页重新挂载会自动 reload）。
 export function useScenarioMeta() {
   const [pf, setPf] = useState<PreflightSet | null>(null)
@@ -45,8 +45,12 @@ export function useScenarioMeta() {
   }, [reload])
 
   const customerOptions = customers.map((g) => ({ value: g.code, label: `${g.code}（${g.count || 0} 客户）` }))
-  const hermesSkillOptions = hermesAgentGroups.map((g) => ({ value: g.code, label: `${g.code}（${g.count} 坐席）` }))
-  const ttsOptions = ttsList.map((t) => ({ value: t.ttsCode, label: `${t.ttsCode}${t.name ? ' · ' + t.name : ''}` }))
+  const hermesSkillOptions = hermesAgentGroups.map((g) => ({
+    value: g.code,
+    label: g.name ? `${g.name}（${g.code}·${g.count} 坐席）` : `${g.code}（${g.count} 坐席）`,
+  }))
+  // TTS 选项：名称优先展示（ttsCode 是 32 位 hash，难辨认），code 保留供搜索/提交。
+  const ttsOptions = ttsList.map((t) => ({ value: t.ttsCode, label: t.name || t.ttsCode, code: t.ttsCode }))
 
   return {
     pf, currentOrg, customers, hermesAgentGroups, ttsList, bindings,

@@ -1,6 +1,10 @@
 package config
 
 import (
+	"fmt"
+	"strconv"
+	"strings"
+
 	"github.com/caarlos0/env/v10"
 )
 
@@ -12,9 +16,10 @@ type Config struct {
 
 	// ---- SIP agent（diago，被叫 UAS）----
 	// FS 把 INVITE 发到这里；mock 作被叫按客户集群行为应答。
-	SIPListenIP   string `env:"SIP_LISTEN_IP" envDefault:"0.0.0.0"`
-	SIPListenPort int    `env:"SIP_LISTEN_PORT" envDefault:"5060"`
-	SIPTransport  string `env:"SIP_TRANSPORT" envDefault:"udp"` // udp/tcp/tls
+	SIPListenIP    string `env:"SIP_LISTEN_IP" envDefault:"0.0.0.0"`
+	SIPListenPort  int    `env:"SIP_LISTEN_PORT" envDefault:"5060"`
+	SIPListenPorts string `env:"SIP_LISTEN_PORTS" envDefault:""`
+	SIPTransport   string `env:"SIP_TRANSPORT" envDefault:"udp"` // udp/tcp/tls
 	// 提供给 SDP 协商的音频编解码列表（逗号分隔，按优先级）：PCMU,PCMA,opus。
 	Codecs string `env:"CODECS" envDefault:"PCMU,PCMA"`
 	// agent 对 FreeSWITCH 暴露的可达 IP（写入 SDP / Contact）。为空时尝试自动探测。
@@ -48,6 +53,10 @@ type Config struct {
 	DBName string `env:"DBName" envDefault:"hermes_mock"`
 	DBPath string `env:"DBPath" envDefault:"datas/hermes-mock.db"`
 
+	// 观测数据（呼叫记录 / 链路 / 回调）保留天数：后台周期清理早于此的行，防长期膨胀。
+	// <=0 表示不清理（永久保留）。
+	ObserveTTLDays int `env:"OBSERVE_TTL_DAYS" envDefault:"7"`
+
 	// ---- 日志 ----
 	LogLevel string `env:"LOG_LEVEL" envDefault:"info"`
 	Mode     string `env:"MODE" envDefault:"DEV"` // DEV / TEST / PROD
@@ -60,4 +69,33 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	return c, nil
+}
+
+// ListenPorts 返回 mock 需要监听的 SIP 端口。
+// SIP_LISTEN_PORTS 非空时使用逗号分隔多端口；否则兼容旧的 SIP_LISTEN_PORT。
+func (c *Config) ListenPorts() ([]int, error) {
+	if strings.TrimSpace(c.SIPListenPorts) == "" {
+		return []int{c.SIPListenPort}, nil
+	}
+	seen := map[int]bool{}
+	var ports []int
+	for _, raw := range strings.Split(c.SIPListenPorts, ",") {
+		s := strings.TrimSpace(raw)
+		if s == "" {
+			continue
+		}
+		port, err := strconv.Atoi(s)
+		if err != nil || port <= 0 || port > 65535 {
+			return nil, fmt.Errorf("invalid SIP_LISTEN_PORTS port %q", raw)
+		}
+		if seen[port] {
+			continue
+		}
+		seen[port] = true
+		ports = append(ports, port)
+	}
+	if len(ports) == 0 {
+		return nil, fmt.Errorf("SIP_LISTEN_PORTS is empty")
+	}
+	return ports, nil
 }

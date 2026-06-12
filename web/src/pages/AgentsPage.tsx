@@ -23,20 +23,22 @@ export default function AgentsPage() {
   const [loading, setLoading] = useState(false)
   const [loadErr, setLoadErr] = useState('') // 加载失败原因（如未配机构），页内引导而非弹错
   const [q, setQ] = useState<{ number?: string; agentName?: string; agentGroupCode?: string }>({})
+  const [agentPage, setAgentPage] = useState(1)
+  const [agentPageSize, setAgentPageSize] = useState(20)
   const [open, setOpen] = useState(false)
   const [editing, setEditing] = useState<ManagedAgent | null>(null)
   const [org, setOrg] = useState<OrgConfig | null>(null) // 当前机构配置（表单默认值/占位联动）
   const [form] = Form.useForm()
 
-  const loadAgents = async () => {
+  const loadAgents = async (page = agentPage, pageSize = agentPageSize) => {
     setLoading(true)
     try {
-      const r = await listManagedAgents({ pageNum: 1, pageSize: 200, ...q })
+      const r = await listManagedAgents({ pageNum: page, pageSize, ...q })
       setAgents(r.agents || []); setTotal(r.total || 0); setLoadErr('')
     } catch (e) { setLoadErr(e instanceof Error ? e.message : String(e)) } finally { setLoading(false) }
   }
   useEffect(() => {
-    loadAgents()
+    void loadAgents(1, agentPageSize)
     listOrgs().then((r) => setOrg(r.orgs.find((o) => o.orgCode === r.current) || null)).catch(() => {})
   }, []) // eslint-disable-line
 
@@ -73,6 +75,11 @@ export default function AgentsPage() {
     try { await setManagedAgentEnabled([r.agentCode || ''], enabled); message.success(enabled ? '账号已启用' : '账号已停用'); loadAgents() } catch (e) { message.error(String(e)) }
   }
 
+  const queryAgents = () => {
+    setAgentPage(1)
+    void loadAgents(1, agentPageSize)
+  }
+
   return (
     <div className="page-container">
       <Alert type="info" showIcon style={{ marginBottom: 16 }}
@@ -89,16 +96,25 @@ export default function AgentsPage() {
           <Input placeholder="坐席号" style={{ width: 120 }} allowClear value={q.number} onChange={(e) => setQ({ ...q, number: e.target.value })} />
           <Input placeholder="坐席名" style={{ width: 120 }} allowClear value={q.agentName} onChange={(e) => setQ({ ...q, agentName: e.target.value })} />
           <Input placeholder="技能组" style={{ width: 120 }} allowClear value={q.agentGroupCode} onChange={(e) => setQ({ ...q, agentGroupCode: e.target.value })} />
-          <Button type="primary" onClick={loadAgents}>查询</Button>
+          <Button type="primary" onClick={queryAgents}>查询</Button>
           <Button onClick={onNew}>新增坐席</Button>
-          <Button icon={<ReloadOutlined />} onClick={loadAgents}>刷新</Button>
+          <Button icon={<ReloadOutlined />} onClick={() => loadAgents()}>刷新</Button>
           <Text type="secondary">共 {total}</Text>
         </Space>
       </Card>
 
       <Table<ManagedAgent>
         rowKey={(r) => r.number || r.agentCode || ''}
-        size="small" loading={loading} dataSource={agents} pagination={{ pageSize: 20, showSizeChanger: true }} scroll={{ x: 800 }}
+        size="small" loading={loading} dataSource={agents}
+        pagination={{ current: agentPage, pageSize: agentPageSize, total, showSizeChanger: true }}
+        onChange={(p) => {
+          const nextPage = p.current || 1
+          const nextPageSize = p.pageSize || agentPageSize
+          setAgentPage(nextPage)
+          setAgentPageSize(nextPageSize)
+          void loadAgents(nextPage, nextPageSize)
+        }}
+        scroll={{ x: 800 }}
         columns={[
           { title: '坐席号', dataIndex: 'number', width: 100, fixed: 'left' },
           { title: '坐席名', dataIndex: 'agentName', width: 140 },

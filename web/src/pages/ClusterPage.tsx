@@ -14,7 +14,7 @@ const { Text } = Typography
 
 
 // 通用「列表 + 新增/编辑弹窗 + 删除」工厂
-function useCrud<T extends object>(load: () => Promise<T[]>, save: (v: T) => Promise<T>, del?: (key: string) => Promise<void>) {
+function useCrud<T extends object, K extends string | number = string>(load: () => Promise<T[]>, save: (v: T) => Promise<T>, del?: (key: K) => Promise<void>) {
   const [data, setData] = useState<T[]>([])
   const [open, setOpen] = useState(false)
   const [form] = Form.useForm<T>()
@@ -30,7 +30,7 @@ function useCrud<T extends object>(load: () => Promise<T[]>, save: (v: T) => Pro
     try { await save(v); message.success('已保存'); setOpen(false); refresh() }
     catch (e) { message.error(String(e)) }
   }
-  const onDelete = async (key: string) => {
+  const onDelete = async (key: K) => {
     if (!del) return
     try { await del(key); message.success('已删除'); refresh() }
     catch (e) { message.error(String(e)) }
@@ -238,7 +238,7 @@ function GroupsTab() {
 }
 
 function BindingsTab() {
-  const c = useCrud<LineBinding>(listBindings, upsertBinding, deleteBinding)
+  const c = useCrud<LineBinding, number>(listBindings, upsertBinding, deleteBinding)
   const [groups, setGroups] = useState<CustomerGroup[]>([])
   const refreshGroups = () => listGroups().then(setGroups).catch(() => {})
   useEffect(() => { refreshGroups() }, [])
@@ -253,24 +253,26 @@ function BindingsTab() {
   return (
     <>
       <Alert type="info" style={{ marginBottom: 12 }} showIcon
-        message="线路绑定 = 把「Hermes 线路(t_line.address→mock)」对应到「客户组」。该线路来的呼叫按组行为应答。" />
+        message="入口端口绑定 = 把「mock SIP 监听端口」对应到「客户组」。Hermes 侧线路指向 mockIP:端口；该端口来的呼叫就按对应客户组应答。" />
       <Space style={{ marginBottom: 12 }}>
         <Button type="primary" onClick={onNew}>新增绑定</Button>
         <Button onClick={c.refresh}>刷新</Button>
       </Space>
-      <Table rowKey="lineCode" size="small" dataSource={c.data} pagination={false}
+      <Table rowKey="listenPort" size="small" dataSource={c.data} pagination={false}
         columns={[
-          { title: '线路 code', dataIndex: 'lineCode' },
-          { title: '线路地址', dataIndex: 'lineAddress' },
+          { title: 'SIP 端口', dataIndex: 'listenPort' },
+          { title: '线路名', dataIndex: 'lineName', render: (v: string) => v || <Text type="secondary">-</Text> },
           { title: '客户组', dataIndex: 'groupCode', render: (v: string) => <Tag>{v}</Tag> },
           { title: '启用', dataIndex: 'enabled', render: (v: number) => <Tag color={v ? 'green' : 'default'}>{v ? '是' : '否'}</Tag> },
-          { title: '操作', render: rowActions<LineBinding>(onEdit, (r) => c.onDelete(r.lineCode || ''), (r) => `删除线路绑定 ${r.lineCode}？`) },
+          { title: '操作', render: rowActions<LineBinding>(onEdit, (r) => c.onDelete(r.listenPort), (r) => `删除端口绑定 ${r.listenPort}？`) },
         ]} />
-      <Modal title="线路绑定" open={c.open} onOk={c.onSave} onCancel={() => c.setOpen(false)} destroyOnHidden forceRender>
+      <Modal title="入口端口绑定" open={c.open} onOk={c.onSave} onCancel={() => c.setOpen(false)} destroyOnHidden forceRender>
         <Form form={c.form} layout="vertical">
           <Form.Item name="id" hidden><Input /></Form.Item>
-          <Form.Item name="lineCode" label="线路 code"><Input placeholder="line_mock" /></Form.Item>
-          <Form.Item name="lineAddress" label="线路地址（=mock 监听地址）"><Input placeholder="192.168.107.9:5060" /></Form.Item>
+          <Form.Item name="listenPort" label="SIP 入口端口" rules={[{ required: true }]}>
+            <InputNumber min={1} max={65535} precision={0} style={{ width: '100%' }} placeholder="5060" />
+          </Form.Item>
+          <Form.Item name="lineName" label="线路名（可选）"><Input placeholder="line-base-a" /></Form.Item>
           <Form.Item name="groupCode" label="客户组" rules={[{ required: true }]}>
             <Select showSearch options={groups.map((g) => ({ value: g.code, label: g.code }))} />
           </Form.Item>
@@ -331,19 +333,19 @@ function OverridesTab() {
 
 function ResolvePreview() {
   const [number, setNumber] = useState('')
-  const [line, setLine] = useState('')
+  const [listenPort, setListenPort] = useState<number | null>(null)
   const [res, setRes] = useState<string>('')
   const onResolve = async () => {
     try {
-      const r = await clusterResolve(number, line || undefined)
+      const r = await clusterResolve(number, listenPort || undefined)
       setRes(JSON.stringify(r, null, 2))
     } catch (e) { setRes(String(e)) }
   }
   return (
-    <Card size="small" title="解析预览（给被叫号 + 可选线路，看命中哪个组/行为）" style={{ marginBottom: 16 }}>
+    <Card size="small" title="解析预览（给被叫号 + 可选入口端口，看命中哪个组/行为）" style={{ marginBottom: 16 }}>
       <Space>
         <Input placeholder="被叫号 如 86138000005" value={number} onChange={(e) => setNumber(e.target.value)} style={{ width: 220 }} />
-        <Input placeholder="线路 code/address（可选）" value={line} onChange={(e) => setLine(e.target.value)} style={{ width: 220 }} />
+        <InputNumber min={1} max={65535} precision={0} placeholder="入口端口（可选）" value={listenPort} onChange={(v) => setListenPort(v)} style={{ width: 180 }} />
         <Button type="primary" onClick={onResolve}>解析</Button>
       </Space>
       {res && <pre style={{ marginTop: 12, fontSize: 12, background: '#f6f8fa', padding: 10, borderRadius: 4 }}>{res}</pre>}
@@ -361,7 +363,7 @@ export default function ClusterPage() {
           items={[
             { key: 'groups', label: '客户组', children: <GroupsTab /> },
             { key: 'overrides', label: '客户个例', children: <OverridesTab /> },
-            { key: 'bindings', label: '线路绑定', children: <BindingsTab /> },
+            { key: 'bindings', label: '端口绑定', children: <BindingsTab /> },
             { key: 'profiles', label: '行为档', children: <ProfilesTab /> },
           ]}
         />

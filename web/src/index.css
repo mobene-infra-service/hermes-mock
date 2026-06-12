@@ -28,6 +28,214 @@ body {
   padding: var(--padding-page);
 }
 
+.trace-aggregate-strip {
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  background: #fff7e6;
+  border: 1px solid #ffd591;
+  border-radius: 6px;
+}
+
+.trace-ladder-wrap {
+  width: 100%;
+  overflow-x: auto;
+  border: 1px solid #edf0f5;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.trace-ladder-grid {
+  min-width: 720px;
+}
+
+.trace-ladder-header,
+.trace-ladder-row {
+  display: grid;
+  position: relative;
+}
+
+.trace-ladder-header {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  min-height: 48px;
+  background: #fafafa;
+  border-bottom: 1px solid #edf0f5;
+}
+
+.trace-ladder-time-head,
+.trace-ladder-time {
+  border-right: 1px solid #edf0f5;
+  color: #8c8c8c;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.trace-ladder-time-head {
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  font-weight: 600;
+}
+
+.trace-ladder-time {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  padding: 12px 8px;
+  background: #fff;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.trace-ladder-party {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 48px;
+  padding: 8px 10px;
+  border-left: 1px solid #edf0f5;
+  text-align: center;
+}
+
+.trace-ladder-party-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 50%;
+  background: var(--party-color);
+}
+
+.trace-ladder-party-name {
+  min-width: 0;
+  color: #262626;
+  font-size: 12px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.trace-ladder-row {
+  min-height: 64px;
+  border-bottom: 1px solid #f5f5f5;
+}
+
+.trace-ladder-row:last-child {
+  border-bottom: 0;
+}
+
+.trace-ladder-lane {
+  position: relative;
+  min-height: 64px;
+  border-left: 1px solid #f4f6fa;
+}
+
+.trace-ladder-lane::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  border-left: 1px dashed #d9d9d9;
+}
+
+.trace-ladder-signal {
+  position: relative;
+  z-index: 2;
+  grid-row: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  padding: 8px 18px;
+}
+
+.trace-ladder-arrow-line {
+  position: absolute;
+  top: 50%;
+  left: 18px;
+  right: 18px;
+  height: 2px;
+  background: currentColor;
+  transform: translateY(-50%);
+}
+
+.trace-ladder-arrow-line::after {
+  content: '';
+  position: absolute;
+  top: -4px;
+  right: -1px;
+  width: 0;
+  height: 0;
+  border-top: 5px solid transparent;
+  border-bottom: 5px solid transparent;
+  border-left: 8px solid currentColor;
+}
+
+.trace-ladder-signal.is-reverse .trace-ladder-arrow-line::after {
+  right: auto;
+  left: -1px;
+  border-left: 0;
+  border-right: 8px solid currentColor;
+}
+
+.trace-ladder-message {
+  position: relative;
+  max-width: min(440px, calc(100% - 20px));
+  padding: 6px 10px;
+  border: 1px solid #d9e6ff;
+  border-radius: 6px;
+  background: #fff;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
+  color: rgba(0, 0, 0, 0.88);
+}
+
+.trace-ladder-message-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.trace-ladder-summary {
+  margin-top: 2px;
+  color: #595959;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.trace-ladder-note {
+  z-index: 2;
+  grid-row: 1;
+  align-self: center;
+  margin: 10px 14px;
+  padding: 8px 10px;
+  border-left: 3px solid #bfbfbf;
+  border-radius: 6px;
+  background: #fafafa;
+}
+
+.trace-ladder-details {
+  z-index: 2;
+  grid-row: 2;
+  padding: 0 12px 8px;
+}
+
+.trace-ladder-details .ant-collapse {
+  background: transparent;
+}
+
+.trace-raw-message {
+  max-height: 280px;
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  border-radius: 4px;
+  background: #0b1021;
+  color: #d6e0ff;
+  font-size: 11px;
+  white-space: pre-wrap;
+}
+
 /* 移动端适配 */
 @media (max-width: 768px) {
   .page-container {
@@ -40,5 +248,17 @@ body {
 
   .ant-card-body {
     padding: 16px;
+  }
+
+  .trace-ladder-grid {
+    min-width: 680px;
+  }
+
+  .trace-ladder-time {
+    font-size: 11px;
+  }
+
+  .trace-ladder-message {
+    max-width: min(360px, calc(100% - 16px));
   }
 }

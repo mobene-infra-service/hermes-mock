@@ -1,13 +1,12 @@
-import { useEffect, useState } from 'react'
-import { Card, Table, Tag, Timeline, Empty, Typography, Row, Col, Badge, Collapse, Segmented, Space } from 'antd'
-import { getTraceSessions, type TraceSession, type TraceEvent } from '../api'
+import { useEffect, useMemo, useState, type CSSProperties } from 'react'
+import { Badge, Card, Col, Collapse, Empty, Row, Segmented, Space, Table, Tag, Typography } from 'antd'
+import { getTraceSessions, getTraceSession, type TraceEvent, type TraceSession } from '../api'
 
 const { Text, Paragraph } = Typography
 
 const chanColor: Record<string, string> = {
   SIP: 'blue', WS: 'cyan', MEDIA: 'green', BRIDGE: 'orange', FLOW: 'default',
 }
-const dirArrow: Record<string, string> = { IN: '◀', OUT: '▶', '-': '·' }
 const kindText: Record<string, string> = {
   'inbound-leg': '入站腿', outbound: '呼出', test: '测试',
   call: '通话', 'sip-call': 'SIP通话',
@@ -17,9 +16,11 @@ function sipUser(v?: string) {
   const m = (v || '').match(/sip:([^@>]+)/i)
   return m?.[1] || ''
 }
+
 function header(headers: { name: string; value: string }[] | undefined, name: string) {
   return headers?.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value || ''
 }
+
 function callRole(s?: TraceSession) {
   const inv = s?.events?.find((e) => e.channel === 'SIP' && e.method === 'INVITE')
   const customer = sipUser(header(inv?.headers, 'To'))
@@ -28,6 +29,7 @@ function callRole(s?: TraceSession) {
   const jCallId = header(inv?.headers, 'X-JCallId')
   return { customer, displayCaller, sessionId, jCallId }
 }
+
 function traceTitle(s?: TraceSession) {
   if (!s) return '通话链路'
   const r = callRole(s)
@@ -37,14 +39,37 @@ function traceTitle(s?: TraceSession) {
   return `通话链路 · ${s.title}`
 }
 
-// 腿配色：客户腿/其它各一色，便于在「一通业务通话」里区分多腿。
 const legPalette = ['#1677ff', '#fa8c16', '#52c41a', '#722ed1', '#eb2f96', '#13c2c2']
-function legColor(leg: string, legs: string[]): string {
-  const i = legs.indexOf(leg)
-  return i >= 0 ? legPalette[i % legPalette.length] : '#8c8c8c'
+const MOCK_PARTY = '__mock__'
+
+interface Party {
+  id: string
+  label: string
+  color: string
 }
+
+function shortID(v?: string) {
+  if (!v) return ''
+  return v.length > 16 ? `${v.slice(0, 12)}...` : v
+}
+
+function isSipResponse(method: string) {
+  return /^\d{3}$/.test(method)
+}
+
+function partyLabel(id: string, role?: { customer?: string; displayCaller?: string }) {
+  if (id === MOCK_PARTY) return 'mock UAS'
+  if (role?.customer && id === role.customer) return `客户被叫 ${id}`
+  if (role?.displayCaller && id === role.displayCaller) return `外显主叫 ${id}`
+  if (/^agent:\d+/.test(id)) return id.replace('agent:', '坐席 ')
+  if (/^\d/.test(id)) return `参与方 ${id}`
+  if (id === 'customer') return 'mock客户腿'
+  if (id === 'uac') return '主叫(UAC)'
+  return id || '未知'
+}
+
 function legLabel(leg: string, role?: { customer?: string; displayCaller?: string }): string {
-  if (!leg) return '—'
+  if (!leg) return '-'
   if (role?.customer && leg === role.customer) return '客户被叫 ' + leg
   if (role?.displayCaller && leg === role.displayCaller) return '线路外显 ' + leg
   if (/^agent:\d+/.test(leg)) return leg.replace('agent:', '坐席 ')
@@ -54,7 +79,65 @@ function legLabel(leg: string, role?: { customer?: string; displayCaller?: strin
   return leg
 }
 
-// SIP 头里属于 Hermes 业务的（高亮展示）
+function normalizeParty(id?: string, role?: { customer?: string }) {
+  const v = (id || '').trim()
+  if (!v) return ''
+  if (v === 'customer' && role?.customer) return role.customer
+  return v
+}
+
+function eventParty(e: TraceEvent, role?: { customer?: string }) {
+  return normalizeParty(e.leg, role)
+}
+
+function sipEndpoints(e: TraceEvent, role?: { customer?: string }) {
+  if (e.channel !== 'SIP') return null
+  const from = normalizeParty(sipUser(header(e.headers, 'From')), role)
+  const to = normalizeParty(sipUser(header(e.headers, 'To')), role)
+  if (from && to) {
+    return isSipResponse(e.method) ? { from: to, to: from } : { from, to }
+  }
+  const p = eventParty(e, role)
+  if (!p) return null
+  return e.dir === 'OUT' ? { from: MOCK_PARTY, to: p } : { from: p, to: MOCK_PARTY }
+}
+
+function buildParties(events: TraceEvent[], legs: string[], role?: { customer?: string; displayCaller?: string }): Party[] {
+  const ids: string[] = []
+  const add = (id?: string) => {
+    const p = normalizeParty(id, role)
+    if (p && !ids.includes(p)) ids.push(p)
+  }
+
+  add(role?.displayCaller)
+  add(role?.customer)
+  events.forEach((e) => {
+    const endpoints = sipEndpoints(e, role)
+    add(endpoints?.from)
+    add(endpoints?.to)
+  })
+  legs.forEach(add)
+  events.forEach((e) => add(eventParty(e, role)))
+
+  if (ids.length === 0) {
+    ids.push(MOCK_PARTY)
+  }
+  if (ids.length === 1 && events.some((e) => e.channel === 'SIP')) {
+    ids.unshift(MOCK_PARTY)
+  }
+
+  return ids.map((id, i) => ({ id, label: partyLabel(id, role), color: legPalette[i % legPalette.length] }))
+}
+
+function sipCallIDs(s?: TraceSession) {
+  const ids = new Set<string>()
+  s?.events?.forEach((e) => {
+    const v = header(e.headers, 'Call-ID')
+    if (v) ids.add(v)
+  })
+  return Array.from(ids)
+}
+
 function isBizHeader(name: string): boolean {
   const n = name.toLowerCase()
   return n.startsWith('x-') || n.includes('call') || n.includes('session') || n.includes('origination')
@@ -72,7 +155,6 @@ function headerRole(name: string, value: string) {
 }
 
 function HeaderTable({ headers }: { headers: { name: string; value: string }[] }) {
-  // 业务头排前面
   const sorted = [...headers].sort((a, b) => Number(isBizHeader(b.name)) - Number(isBizHeader(a.name)))
   return (
     <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
@@ -93,63 +175,168 @@ function HeaderTable({ headers }: { headers: { name: string; value: string }[] }
   )
 }
 
-function eventNode(e: TraceEvent, legs: string[], role?: { customer?: string; displayCaller?: string }) {
+function DetailTable({ detail }: { detail: Record<string, string> }) {
+  return (
+    <table style={{ width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
+      <tbody>
+        {Object.entries(detail).map(([k, v]) => (
+          <tr key={k}>
+            <td style={{ padding: '2px 8px', color: '#888', whiteSpace: 'nowrap', verticalAlign: 'top' }}>{k}</td>
+            <td style={{ padding: '2px 8px', wordBreak: 'break-all', fontFamily: 'monospace' }}>{v}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+function EventDetails({ e }: { e: TraceEvent }) {
   const hasReal = (e.headers && e.headers.length > 0) || e.raw
-  const lc = legColor(e.leg, legs)
-  return {
-    color: chanColor[e.channel] || 'gray',
-    label: (
-      <Text type="secondary" style={{ fontSize: 12 }}>
-        {new Date(e.ts).toLocaleTimeString()}.{String(new Date(e.ts).getMilliseconds()).padStart(3, '0')}
-      </Text>
-    ),
-    children: (
-      <div style={{ borderLeft: e.leg ? `3px solid ${lc}` : undefined, paddingLeft: e.leg ? 8 : 0 }}>
-        <Tag color={chanColor[e.channel]} style={{ marginRight: 6 }}>{e.channel}</Tag>
-        <Text strong style={{ marginRight: 6 }}>{dirArrow[e.dir]} {e.method}</Text>
-        {e.leg && <Tag color={lc} style={{ color: '#fff', border: 'none' }}>{legLabel(e.leg, role)}</Tag>}
-        <div style={{ fontSize: 13, color: '#555', marginTop: 2 }}>{e.summary}</div>
-        {hasReal && (
-          <Collapse
-            ghost
-            size="small"
-            style={{ marginTop: 4 }}
-            items={[{
-              key: 'r',
-              label: <Text type="secondary" style={{ fontSize: 12 }}>展开真实 SIP 报文（{e.headers?.length || 0} 个头{e.callId ? ` · Call-ID ${e.callId.slice(0, 16)}…` : ''}）</Text>,
-              children: (
-                <div>
-                  {e.headers && e.headers.length > 0 && <HeaderTable headers={e.headers} />}
-                  {e.raw && (
-                    <Paragraph style={{ marginTop: 8, marginBottom: 0 }}>
-                      <pre style={{ fontSize: 11, background: '#0b1021', color: '#d6e0ff', padding: 10, borderRadius: 4, maxHeight: 280, overflow: 'auto', whiteSpace: 'pre-wrap' }}>{e.raw}</pre>
-                    </Paragraph>
-                  )}
-                </div>
-              ),
-            }]}
-          />
-        )}
-        {!hasReal && e.detail && Object.keys(e.detail).length > 0 && (
-          <div style={{ fontSize: 11, color: '#999' }}>
-            {Object.entries(e.detail).map(([k, v]) => `${k}=${v}`).join('  ')}
+  const hasDetail = e.detail && Object.keys(e.detail).length > 0
+  if (!hasReal && !hasDetail) return null
+
+  return (
+    <Collapse
+      ghost
+      size="small"
+      items={[{
+        key: 'r',
+        label: (
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            {hasReal ? `展开真实 SIP 报文（${e.headers?.length || 0} 个头${header(e.headers, 'Call-ID') ? ` · Call-ID ${shortID(header(e.headers, 'Call-ID'))}` : ''}）` : '展开事件明细'}
+          </Text>
+        ),
+        children: (
+          <div>
+            {hasDetail && <DetailTable detail={e.detail || {}} />}
+            {e.headers && e.headers.length > 0 && <HeaderTable headers={e.headers} />}
+            {e.raw && (
+              <Paragraph style={{ marginTop: 8, marginBottom: 0 }}>
+                <pre className="trace-raw-message">{e.raw}</pre>
+              </Paragraph>
+            )}
           </div>
-        )}
+        ),
+      }]}
+    />
+  )
+}
+
+function formatEventTime(ts: string) {
+  const d = new Date(ts)
+  return `${d.toLocaleTimeString()}.${String(d.getMilliseconds()).padStart(3, '0')}`
+}
+
+function gridColumns(parties: Party[]) {
+  return `96px repeat(${Math.max(parties.length, 1)}, minmax(150px, 1fr))`
+}
+
+function LadderLanes({ parties }: { parties: Party[] }) {
+  return (
+    <>
+      {parties.map((p, i) => (
+        <div
+          key={p.id}
+          className="trace-ladder-lane"
+          style={{ gridColumn: i + 2, gridRow: '1 / span 2', ['--party-color' as string]: p.color } as CSSProperties}
+        />
+      ))}
+    </>
+  )
+}
+
+function EventNote({ e, parties, role }: { e: TraceEvent; parties: Party[]; role: { customer?: string; displayCaller?: string } }) {
+  return (
+    <div className="trace-ladder-row" style={{ gridTemplateColumns: gridColumns(parties) }}>
+      <div className="trace-ladder-time">{formatEventTime(e.ts)}</div>
+      <LadderLanes parties={parties} />
+      <div className="trace-ladder-note" style={{ gridColumn: '2 / -1' }}>
+        <div className="trace-ladder-message-main">
+          <Tag color={chanColor[e.channel]}>{e.channel}</Tag>
+          <Text strong>{e.method}</Text>
+          {e.leg && <Tag color="default">{legLabel(e.leg, role)}</Tag>}
+        </div>
+        <div className="trace-ladder-summary">{e.summary}</div>
       </div>
-    ),
+      <div className="trace-ladder-details" style={{ gridColumn: '2 / -1' }}>
+        <EventDetails e={e} />
+      </div>
+    </div>
+  )
+}
+
+function LadderEventRow({ e, parties, role }: { e: TraceEvent; parties: Party[]; role: { customer?: string; displayCaller?: string } }) {
+  const endpoints = sipEndpoints(e, role)
+  const fromIndex = endpoints ? parties.findIndex((p) => p.id === endpoints.from) : -1
+  const toIndex = endpoints ? parties.findIndex((p) => p.id === endpoints.to) : -1
+
+  if (!endpoints || fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) {
+    return <EventNote e={e} parties={parties} role={role} />
   }
+
+  const start = Math.min(fromIndex, toIndex) + 2
+  const end = Math.max(fromIndex, toIndex) + 3
+  const forward = fromIndex < toIndex
+  const color = legPalette[Math.min(fromIndex, toIndex) % legPalette.length]
+
+  return (
+    <div className="trace-ladder-row" style={{ gridTemplateColumns: gridColumns(parties) }}>
+      <div className="trace-ladder-time">{formatEventTime(e.ts)}</div>
+      <LadderLanes parties={parties} />
+      <div
+        className={`trace-ladder-signal ${forward ? 'is-forward' : 'is-reverse'}`}
+        style={{ gridColumn: `${start} / ${end}`, color }}
+      >
+        <span className="trace-ladder-arrow-line" />
+        <div className="trace-ladder-message">
+          <div className="trace-ladder-message-main">
+            <Tag color={chanColor[e.channel]}>{e.channel}</Tag>
+            <Text strong>{e.method}</Text>
+            {header(e.headers, 'Call-ID') && <Tag color="default">Call-ID {shortID(header(e.headers, 'Call-ID'))}</Tag>}
+          </div>
+          <div className="trace-ladder-summary">{e.summary}</div>
+        </div>
+      </div>
+      <div className="trace-ladder-details" style={{ gridColumn: '2 / -1' }}>
+        <EventDetails e={e} />
+      </div>
+    </div>
+  )
+}
+
+function TraceLadder({ events, parties, role }: { events: TraceEvent[]; parties: Party[]; role: { customer?: string; displayCaller?: string } }) {
+  return (
+    <div className="trace-ladder-wrap">
+      <div className="trace-ladder-grid">
+        <div className="trace-ladder-header" style={{ gridTemplateColumns: gridColumns(parties) }}>
+          <div className="trace-ladder-time-head">时间</div>
+          {parties.map((p) => (
+            <div key={p.id} className="trace-ladder-party" style={{ ['--party-color' as string]: p.color } as CSSProperties}>
+              <span className="trace-ladder-party-dot" />
+              <span className="trace-ladder-party-name">{p.label}</span>
+            </div>
+          ))}
+        </div>
+        {events.map((e) => (
+          <LadderEventRow key={e.seq} e={e} parties={parties} role={role} />
+        ))}
+      </div>
+    </div>
+  )
 }
 
 export default function CallTracePage() {
   const [sessions, setSessions] = useState<TraceSession[]>([])
   const [sel, setSel] = useState<string>('')
+  const [detail, setDetail] = useState<TraceSession | undefined>() // 选中会话的完整轨迹（含 events，单查）
   const [legFilter, setLegFilter] = useState<string>('全部')
 
+  // 列表只拉摘要（不含 events），轻量；标签页隐藏时跳过。
   const load = async () => {
+    if (document.hidden) return
     try {
       const ss = await getTraceSessions()
       setSessions(ss)
-      // 支持 ?session=<id> 直达，便于从外部调试链接打开指定链路。
       const want = new URLSearchParams(window.location.search).get('session')
       setSel((cur) => cur || want || (ss[0]?.id ?? ''))
     } catch {
@@ -158,22 +345,38 @@ export default function CallTracePage() {
   }
   useEffect(() => {
     load()
-    const t = setInterval(load, 2000)
+    const t = setInterval(load, 3000)
     return () => clearInterval(t)
   }, [])
 
-  const current = sessions.find((s) => s.id === sel)
-  const role = callRole(current)
-  const legs = current?.legs ?? []
-  const multiLeg = legs.length > 1
-  const shownEvents = (current?.events ?? []).filter(
+  // 选中会话 → 单查完整轨迹（含 events）。切换时先清空，避免梯形图闪上一通；进行中通话由轮询刷新。
+  useEffect(() => {
+    if (!sel) { setDetail(undefined); return }
+    setDetail(undefined)
+    let alive = true
+    const fetchDetail = async () => {
+      if (document.hidden) return
+      try { const d = await getTraceSession(sel); if (alive) setDetail(d) } catch { /* ignore */ }
+    }
+    void fetchDetail()
+    const t = setInterval(() => { void fetchDetail() }, 3000)
+    return () => { alive = false; clearInterval(t) }
+  }, [sel])
+
+  const current = sessions.find((s) => s.id === sel) // 列表摘要项（选中态/兜底标题）
+  const role = callRole(detail)
+  const legs = detail?.legs ?? current?.legs ?? []
+  const shownEvents = (detail?.events ?? []).filter(
     (e) => legFilter === '全部' || e.leg === legFilter || (legFilter === '无腿' && !e.leg),
   )
+  const parties = useMemo(() => buildParties(detail?.events ?? [], legs, role), [detail, legs, role.customer, role.displayCaller])
+  const sipIDs = useMemo(() => sipCallIDs(detail), [detail])
+  const multiLeg = legs.length > 1
 
   return (
     <div className="page-container">
-      <Row gutter={16}>
-        <Col span={9}>
+      <Row gutter={[16, 16]}>
+        <Col xs={24} xl={7}>
           <Card title="通话链路会话" size="small" styles={{ body: { padding: 0 } }}>
             <Table
               rowKey="id"
@@ -185,34 +388,34 @@ export default function CallTracePage() {
                 { title: '类型', dataIndex: 'kind', width: 70, render: (k: string) => <Tag>{kindText[k] || k}</Tag> },
                 { title: '会话', dataIndex: 'title', ellipsis: true },
                 { title: '腿', dataIndex: 'legs', width: 56, render: (l: string[]) => <Badge count={l?.length || 0} showZero color={l?.length > 1 ? '#fa8c16' : '#1677ff'} /> },
-                { title: '事件', width: 50, render: (_: unknown, r: TraceSession) => r.events?.length || 0 },
+                { title: '事件', width: 50, render: (_: unknown, r: TraceSession) => r.eventCount ?? 0 },
               ]}
             />
           </Card>
         </Col>
-        <Col span={15}>
+        <Col xs={24} xl={17}>
           <Card
-            title={current ? traceTitle(current) : '通话链路'}
+            title={detail ? traceTitle(detail) : current ? `通话链路 · ${current.title}` : '通话链路'}
             size="small"
-            extra={current && (
-              <Text type="secondary" style={{ fontSize: 12 }}>{current.events.length} 事件{current.callId ? ` · ${current.callId.slice(0, 12)}…` : ''}</Text>
+            extra={detail && (
+              <Text type="secondary" style={{ fontSize: 12 }}>{detail.events?.length ?? 0} 事件{detail.callId ? ` · ${shortID(detail.callId)}` : ''}</Text>
             )}
           >
-            {!current || current.events.length === 0 ? (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="选择左侧会话查看事件时间线（可展开真实 SIP 报文）" />
+            {!detail || (detail.events?.length ?? 0) === 0 ? (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="选择左侧会话查看事件梯形图（可展开真实 SIP 报文）" />
             ) : (
               <>
-                {multiLeg && (
-                  <div style={{ marginBottom: 12, padding: '8px 12px', background: '#fff7e6', border: '1px solid #ffd591', borderRadius: 6 }}>
-                    <Space wrap size={4}>
-                      <Tag color="orange">多腿合并</Tag>
-                      <Text type="secondary" style={{ fontSize: 12 }}>本通业务通话含 {legs.length} 条腿：</Text>
-                      {legs.map((l) => (
-                        <Tag key={l} color={legColor(l, legs)} style={{ color: '#fff', border: 'none' }}>{legLabel(l, role)}</Tag>
-                      ))}
-                    </Space>
-                  </div>
-                )}
+                <div className="trace-aggregate-strip">
+                  <Space wrap size={4}>
+                    <Tag color={multiLeg ? 'orange' : 'blue'}>业务会话聚合</Tag>
+                    {detail.callId && <Text type="secondary" style={{ fontSize: 12 }}>业务ID {shortID(detail.callId)}</Text>}
+                    <Text type="secondary" style={{ fontSize: 12 }}>SIP Call-ID {sipIDs.length || 0} 个</Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>逻辑标签 {legs.length} 个</Text>
+                    {parties.map((p) => (
+                      <Tag key={p.id} color={p.color} style={{ color: '#fff', border: 'none' }}>{p.label}</Tag>
+                    ))}
+                  </Space>
+                </div>
                 {legs.length > 0 && (
                   <Segmented
                     size="small"
@@ -222,7 +425,7 @@ export default function CallTracePage() {
                     options={['全部', ...legs.map((l) => ({ label: legLabel(l, role), value: l }))]}
                   />
                 )}
-                <Timeline mode="left" style={{ marginTop: 4 }} items={shownEvents.map((e) => eventNode(e, legs, role))} />
+                <TraceLadder events={shownEvents} parties={parties} role={role} />
               </>
             )}
           </Card>

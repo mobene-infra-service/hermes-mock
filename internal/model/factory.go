@@ -3,8 +3,11 @@ package model
 import (
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	"gorm.io/driver/mysql"
@@ -117,16 +120,78 @@ func (f *RepositoryFactory) openGormDB(dialector gorm.Dialector) (*gorm.DB, erro
 // migrateSchema AutoMigrate 全部实体。mock 是测试工具、库为独立 hermes_mock，
 // 启动时无条件迁移（不像业务系统区分 DEVM）——保证新列随版本自动到位。
 func (f *RepositoryFactory) migrateSchema(db *gorm.DB) error {
-	return db.AutoMigrate(
+	if err := db.AutoMigrate(
 		&entity.BehaviorProfile{},
 		&entity.CustomerGroup{},
 		&entity.CustomerOverride{},
 		&entity.LineBinding{},
-		&entity.CallRecord{},
+		&entity.MockCall{},
 		&entity.TestRun{},
-		&entity.TraceSession{},
+		&entity.TraceLeg{},
 		&entity.TraceEvent{},
 		&entity.Callback{},
 		&entity.OrgConfig{},
-	)
+	); err != nil {
+		return err
+	}
+	return f.migrateLineBindingPortSchema(db)
+}
+
+func (f *RepositoryFactory) migrateLineBindingPortSchema(db *gorm.DB) error {
+	m := db.Migrator()
+	if m.HasColumn(&entity.LineBinding{}, "line_address") && m.HasColumn(&entity.LineBinding{}, "listen_port") {
+		var rows []struct {
+			ID          int64
+			LineAddress string
+			ListenPort  int
+		}
+		if err := db.Table("mock_line_binding").
+			Select("id, line_address, listen_port").
+			Scan(&rows).Error; err != nil {
+			return err
+		}
+		for _, row := range rows {
+			if row.ListenPort != 0 {
+				continue
+			}
+			port := portFromAddress(row.LineAddress)
+			if port == 0 {
+				continue
+			}
+			if err := db.Table("mock_line_binding").Where("id = ?", row.ID).
+				Update("listen_port", port).Error; err != nil {
+				return err
+			}
+		}
+		if err := m.DropColumn(&entity.LineBinding{}, "line_address"); err != nil {
+			return err
+		}
+	}
+	if m.HasIndex(&entity.LineBinding{}, "uk_line") {
+		if err := m.DropIndex(&entity.LineBinding{}, "uk_line"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func portFromAddress(addr string) int {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return 0
+	}
+	if port, err := strconv.Atoi(addr); err == nil && port > 0 && port <= 65535 {
+		return port
+	}
+	if _, portText, err := net.SplitHostPort(addr); err == nil {
+		if port, err := strconv.Atoi(portText); err == nil && port > 0 && port <= 65535 {
+			return port
+		}
+	}
+	if i := strings.LastIndex(addr, ":"); i >= 0 && i+1 < len(addr) {
+		if port, err := strconv.Atoi(addr[i+1:]); err == nil && port > 0 && port <= 65535 {
+			return port
+		}
+	}
+	return 0
 }

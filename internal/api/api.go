@@ -28,6 +28,7 @@ import (
 	"hermes-mock/internal/hermesopenapi"
 	"hermes-mock/internal/hermesprobe"
 	"hermes-mock/internal/model"
+	"hermes-mock/internal/orchestrator"
 	"hermes-mock/internal/orgcfg"
 	"hermes-mock/internal/preflight"
 	"hermes-mock/internal/testkit"
@@ -48,11 +49,12 @@ type Deps struct {
 	CB      *callbacks.Store
 	Agents  *agents.Registry
 	Ws      *wsagent.Client
+	Orch    *orchestrator.Orchestrator
 }
 
 // Register 注册 REST 路由。
-func Register(r *gin.Engine, cfg *config.Config, repo model.Repository, clu *cluster.Store, tracker *calltrace.Tracker, prober *hermesprobe.Prober, kit *testkit.Kit, bus *tracelog.Bus, orgs *orgcfg.Store, cb *callbacks.Store, reg *agents.Registry, ws *wsagent.Client) {
-	d := &Deps{Cfg: cfg, Repo: repo, Cluster: clu, Tracker: tracker, Prober: prober, Kit: kit, Bus: bus, Orgs: orgs, CB: cb, Agents: reg, Ws: ws}
+func Register(r *gin.Engine, cfg *config.Config, repo model.Repository, clu *cluster.Store, tracker *calltrace.Tracker, prober *hermesprobe.Prober, kit *testkit.Kit, bus *tracelog.Bus, orgs *orgcfg.Store, cb *callbacks.Store, reg *agents.Registry, ws *wsagent.Client, orch *orchestrator.Orchestrator) {
+	d := &Deps{Cfg: cfg, Repo: repo, Cluster: clu, Tracker: tracker, Prober: prober, Kit: kit, Bus: bus, Orgs: orgs, CB: cb, Agents: reg, Ws: ws, Orch: orch}
 	g := r.Group("/api")
 	g.GET("/health", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ok", "mode": cfg.Mode}) })
 
@@ -114,7 +116,13 @@ func Register(r *gin.Engine, cfg *config.Config, repo model.Repository, clu *clu
 	g.POST("/tests/bootstrap", d.bootstrap) // 一键播种最小可运行配置
 	g.GET("/tests/runs", d.testRuns)
 
-	// 客户集群（号段组 + 个例 + 线路绑定 + 行为档）—— 可编程被叫的配置中心
+	// 群呼任务生命周期管理（createAndImport 后即自动拨号；以下用于运行期暂停/恢复/取消）
+	g.POST("/tests/callcenter-task/:taskCode/pause", d.pauseCallCenterTask)
+	g.POST("/tests/callcenter-task/:taskCode/resume", d.resumeCallCenterTask)
+	g.POST("/tests/callcenter-task/:taskCode/cancel", d.cancelCallCenterTask)
+	g.GET("/tests/callcenter-task/:taskCode/status", d.callCenterTaskStatus)
+
+	// 客户集群（号段组 + 个例 + 端口绑定 + 行为档）—— 可编程被叫的配置中心
 	g.GET("/cluster/profiles", d.listProfiles)
 	g.POST("/cluster/profiles", d.upsertProfile)
 	g.GET("/cluster/groups", d.listGroups)
@@ -125,11 +133,11 @@ func Register(r *gin.Engine, cfg *config.Config, repo model.Repository, clu *clu
 	g.POST("/cluster/overrides", d.upsertOverride)
 	g.GET("/cluster/bindings", d.listBindings)
 	g.POST("/cluster/bindings", d.upsertBinding)
-	g.GET("/cluster/resolve", d.clusterResolve) // 解析预览：给被叫号(+线路)看命中哪个组/行为
+	g.GET("/cluster/resolve", d.clusterResolve) // 解析预览：给被叫号(+入口端口)看命中哪个组/行为
 	g.DELETE("/cluster/profiles/:code", d.deleteProfile)
 	g.DELETE("/cluster/groups/:code", d.deleteGroup)
 	g.DELETE("/cluster/overrides/:number", d.deleteOverride)
-	g.DELETE("/cluster/bindings/:lineCode", d.deleteBinding)
+	g.DELETE("/cluster/bindings/:listenPort", d.deleteBinding)
 
 	// 浏览器→Hermes 反向代理：让 mock 前端里的 jssip 坐席软电话同源调到 call-center / hermes-ws
 	//（免 CORS、免自签证书）；直连模式下注入网关本会注入的身份头。
@@ -227,7 +235,12 @@ func (d *Deps) deleteOverride(c *gin.Context) {
 	clusterDelete(c, d.Cluster.DeleteOverride(c.Param("number")))
 }
 func (d *Deps) deleteBinding(c *gin.Context) {
-	clusterDelete(c, d.Cluster.DeleteBinding(c.Param("lineCode")))
+	port, err := strconv.Atoi(c.Param("listenPort"))
+	if err != nil {
+		clusterDelete(c, err)
+		return
+	}
+	clusterDelete(c, d.Cluster.DeleteBinding(port))
 }
 
 func clusterDelete(c *gin.Context, err error) {
@@ -241,8 +254,16 @@ func clusterDelete(c *gin.Context, err error) {
 func (d *Deps) clusterResolve(c *gin.Context) {
 	number := c.Query("number")
 	line := c.Query("line")
+	listenPort := c.Query("listenPort")
 	var res *cluster.Resolved
-	if line != "" {
+	if listenPort != "" {
+		port, err := strconv.Atoi(listenPort)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		res = d.Cluster.ResolveByPort(port, number)
+	} else if line != "" {
 		res = d.Cluster.ResolveByLine(line, number)
 	} else {
 		res = d.Cluster.ResolveByNumber(number)
@@ -264,7 +285,41 @@ func clusterReply(c *gin.Context, out any, err error) {
 
 func (d *Deps) hermesHealth(c *gin.Context) { c.JSON(http.StatusOK, d.Prober.Health()) }
 
+// traceSessionSummary 是会话列表的轻量摘要（不含 events）。列表轮询只需这些字段，
+// 避免每次把每条 event 的原始 SIP 报文（数百 KB）也序列化下发。events 走 /trace/sessions/:id 单查。
+type traceSessionSummary struct {
+	ID         string    `json:"id"`
+	Title      string    `json:"title"`
+	Kind       string    `json:"kind"`
+	CallID     string    `json:"callId"`
+	StartedAt  time.Time `json:"startedAt"`
+	UpdatedAt  time.Time `json:"updatedAt"`
+	Legs       []string  `json:"legs"`
+	EventCount int       `json:"eventCount"`
+}
+
+func toTraceSummary(s *tracelog.Session) traceSessionSummary {
+	return traceSessionSummary{
+		ID: s.ID, Title: s.Title, Kind: s.Kind, CallID: s.CallID,
+		StartedAt: s.StartedAt, UpdatedAt: s.UpdatedAt, Legs: s.Legs, EventCount: len(s.Events),
+	}
+}
+
 func (d *Deps) traceSessions(c *gin.Context) {
+	// ?match=<token>：服务端复刻前端 sessionMatchesCall 的子串语义（坐席软电话用 jssip callId 找自己那条
+	// trace），回匹配到的完整 session（含 events）。仅扫内存——进行中的通话必在内存，且匹配键多藏在 event 里——
+	// 不合并 DB，免去列表全量序列化的开销。
+	if match := c.Query("match"); match != "" {
+		hits := make([]*tracelog.Session, 0, 1)
+		for _, s := range d.Bus.Sessions() {
+			if b, err := json.Marshal(s); err == nil && strings.Contains(string(b), match) {
+				hits = append(hits, s)
+			}
+		}
+		c.JSON(http.StatusOK, hits)
+		return
+	}
+	// 无 match：返回摘要列表（不含 events）。内存优先 + DB 补充已落库的旧会话，最后压成摘要。
 	sessions := d.Bus.Sessions()
 	if d.Repo != nil {
 		rows, err := d.Repo.ListTraceSessions(c.Request.Context(), 100)
@@ -282,7 +337,11 @@ func (d *Deps) traceSessions(c *gin.Context) {
 			}
 		}
 	}
-	c.JSON(http.StatusOK, sessions)
+	out := make([]traceSessionSummary, 0, len(sessions))
+	for _, s := range sessions {
+		out = append(out, toTraceSummary(s))
+	}
+	c.JSON(http.StatusOK, out)
 }
 
 func (d *Deps) traceSession(c *gin.Context) {
@@ -310,6 +369,10 @@ func (d *Deps) hermesOverview(c *gin.Context) {
 	if len(sessions) > 12 {
 		sessions = sessions[:12]
 	}
+	summaries := make([]traceSessionSummary, 0, len(sessions))
+	for _, s := range sessions {
+		summaries = append(summaries, toTraceSummary(s))
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"mock": gin.H{
 			"agents": d.Agents.List(),
@@ -320,7 +383,7 @@ func (d *Deps) hermesOverview(c *gin.Context) {
 			"health": d.Prober.Health(),
 		},
 		"trace": gin.H{
-			"sessions": sessions,
+			"sessions": summaries,
 		},
 	})
 }
@@ -538,7 +601,7 @@ func agentStatusCode(name string) int {
 }
 
 // preflight 业务测试场景就绪自检：采集运行态快照，对每类场景给出可操作诊断。
-// 服务地址/fs-esl 全部取自当前机构配置（机构页维护）。
+// 服务地址全部取自当前机构配置（机构页维护）。
 func (d *Deps) preflight(c *gin.Context) {
 	var callCenterURL, callBotURL, otpURL string
 	if cred, ok := d.Orgs.CurrentCred(); ok {
@@ -569,7 +632,7 @@ func (d *Deps) preflight(c *gin.Context) {
 	})
 }
 
-// bootstrap 一键播种最小可运行配置（行为档+客户组+线路绑定，可选 mock 线路），
+// bootstrap 一键播种最小可运行配置（行为档+客户组+端口绑定），
 // 让业务测试场景由「未就绪」变「就绪」，新用户零配置即可跑通。
 func (d *Deps) bootstrap(c *gin.Context) {
 	var p bootstrap.Params
@@ -737,27 +800,40 @@ func (d *Deps) openapiTts(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"tts": tts})
 }
 
-// openapiAgentGroups 从机构坐席聚合出技能组（群呼指定接听坐席组，表单联动）。
+// openapiAgentGroups 机构技能组（群呼指定接听坐席组，表单联动）。
+// 优先用 basic 的坐席组接口（带真名 + 坐席数）；不可用时降级为从机构坐席聚合（仅 code+count，无真名）。
 func (d *Deps) openapiAgentGroups(c *gin.Context) {
 	cred, ok := d.orgCred("")
 	if !ok {
 		c.JSON(http.StatusOK, gin.H{"groups": []any{}, "error": "机构未配置"})
 		return
 	}
-	ags, _, err := hermesopenapi.New(cred).ListAgents(c.Request.Context(), 1, 500)
+	cli := hermesopenapi.New(cred)
+	type grp struct {
+		Code  string `json:"code"`
+		Name  string `json:"name,omitempty"`
+		Count int64  `json:"count"`
+	}
+	// 优先：basic 坐席组接口（带真名）
+	if ags, err := cli.ListAgentGroups(c.Request.Context(), cred.OrgCode); err == nil && len(ags) > 0 {
+		out := make([]grp, 0, len(ags))
+		for _, g := range ags {
+			out = append(out, grp{Code: g.Code, Name: g.Name, Count: g.Count})
+		}
+		c.JSON(http.StatusOK, gin.H{"groups": out})
+		return
+	}
+	// 降级：从机构坐席聚合（无真名）
+	agents, _, err := cli.ListAgents(c.Request.Context(), 1, 500)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"groups": []any{}, "error": err.Error()})
 		return
 	}
-	seen := map[string]int{}
-	for _, a := range ags {
+	seen := map[string]int64{}
+	for _, a := range agents {
 		if a.AgentGroupCode != "" {
 			seen[a.AgentGroupCode]++
 		}
-	}
-	type grp struct {
-		Code  string `json:"code"`
-		Count int    `json:"count"`
 	}
 	groups := make([]grp, 0, len(seen))
 	for code, n := range seen {
@@ -851,6 +927,7 @@ func (d *Deps) saveCallRecord(c *gin.Context) {
 		TraceID       string `json:"traceId"`
 		DisplayCaller string `json:"displayCaller"`
 		StartedAtMs   int64  `json:"startedAtMs"`
+		AnsweredAtMs  int64  `json:"answeredAtMs"`
 		DurationMs    int64  `json:"durationMs"`
 	}
 	if err := c.ShouldBindJSON(&in); err != nil {
@@ -865,6 +942,11 @@ func (d *Deps) saveCallRecord(c *gin.Context) {
 	if in.StartedAtMs > 0 {
 		started = time.UnixMilli(in.StartedAtMs)
 	}
+	var answeredAt *time.Time
+	if in.AnsweredAtMs > 0 {
+		t := time.UnixMilli(in.AnsweredAtMs)
+		answeredAt = &t
+	}
 	status := cluster.CallRecordStatusEnded
 	if !in.Answered {
 		status = cluster.CallRecordStatusFailed
@@ -876,7 +958,11 @@ func (d *Deps) saveCallRecord(c *gin.Context) {
 	})
 	var endedAt *time.Time
 	if in.DurationMs > 0 {
-		t := started.Add(time.Duration(in.DurationMs) * time.Millisecond)
+		endBase := started
+		if answeredAt != nil {
+			endBase = *answeredAt
+		}
+		t := endBase.Add(time.Duration(in.DurationMs) * time.Millisecond)
 		endedAt = &t
 	}
 	// 区分坐席外呼 / 被叫来电（群呼转接进坐席腿）
@@ -892,6 +978,15 @@ func (d *Deps) saveCallRecord(c *gin.Context) {
 			summary = "坐席 " + in.AgentNumber + " 未接转接来电（" + in.EndCause + "）"
 		}
 	}
+	// call_uuid 取 Hermes 业务 sessionId（与被叫腿 / trace 关联锚一致）。BizType 5 位前缀语义见 Hermes
+	// BizType.kt：坐席手动外呼=CCMDL、呼入=CCINC、群呼=CCTSK……
+	//   - 坐席外呼：in.CallID 是前端 jssip 生成的裸 v7 uuid，需补 CCMDL 前缀
+	//     （前端注 x-session-id: CCMDL{uuid}，后端 extractValidCallUuid 剥前缀取 uuid 后 bridge 回 mock 被叫腿仍是 CCMDL{uuid}）。
+	//   - 坐席接来电：in.CallID 直接取自 INVITE 的 x-session-id 头，已含正确前缀（CCINC/CCTSK…），不能再叠 CCMDL。
+	callUUID := in.CallID
+	if !in.Inbound {
+		callUUID = "CCMDL" + in.CallID
+	}
 	row := cluster.CallRecordRow{
 		RecordID:       recPrefix + in.CallID,
 		Scenario:       scenario,
@@ -902,8 +997,9 @@ func (d *Deps) saveCallRecord(c *gin.Context) {
 		CallType:       callType,
 		Status:         status,
 		Result:         summary,
-		CallUUID:       "CCMDL" + in.CallID,
+		CallUUID:       callUUID,
 		StartedAt:      started,
+		AnsweredAt:     answeredAt,
 		EndedAt:        endedAt,
 		DurationMs:     in.DurationMs,
 		LastEventAt:    time.Now(),
@@ -960,6 +1056,32 @@ func parseTimeQuery(s string) (time.Time, bool) {
 }
 
 func (d *Deps) testRuns(c *gin.Context) { c.JSON(http.StatusOK, d.Kit.Recent()) }
+
+// ---- 群呼任务生命周期管理（暂停/恢复/取消/查状态）----
+// taskCode 来自 runCallCenterTask 创建响应（Hermes data.code）。
+
+func (d *Deps) taskAction(c *gin.Context, fn func(string) ([]byte, error)) {
+	if d.Orch == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "业务编排器未注入"})
+		return
+	}
+	taskCode := c.Param("taskCode")
+	if taskCode == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "taskCode 必填"})
+		return
+	}
+	out, err := fn(taskCode)
+	if err != nil {
+		c.JSON(http.StatusBadGateway, gin.H{"error": err.Error(), "raw": json.RawMessage(out)})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "taskCode": taskCode, "data": json.RawMessage(out)})
+}
+
+func (d *Deps) pauseCallCenterTask(c *gin.Context)  { d.taskAction(c, d.Orch.PauseCallCenterTask) }
+func (d *Deps) resumeCallCenterTask(c *gin.Context) { d.taskAction(c, d.Orch.ResumeCallCenterTask) }
+func (d *Deps) cancelCallCenterTask(c *gin.Context) { d.taskAction(c, d.Orch.CancelCallCenterTask) }
+func (d *Deps) callCenterTaskStatus(c *gin.Context) { d.taskAction(c, d.Orch.CallCenterTaskStatus) }
 
 func (d *Deps) listCalls(c *gin.Context)       { c.JSON(http.StatusOK, d.Tracker.Recent()) }
 func (d *Deps) listActiveCalls(c *gin.Context) { c.JSON(http.StatusOK, d.Tracker.Active()) }
@@ -1121,7 +1243,13 @@ func proxyHTTP(c *gin.Context, targetBase, newPath string, orgs *orgcfg.Store) {
 	agent := c.GetHeader("X-Agent-Number")
 	org := orgs.Current()
 	targetPath := joinProxyPath(u.Path, newPath)
-	logrus.Infof("Hermes 反代: %s %s → %s://%s%s (agent=%s org=%s)", c.Request.Method, c.Request.URL.Path, u.Scheme, u.Host, targetPath, agent, org)
+	// 坐席 SIP 保活心跳是「30s × N 坐席」的高频固定流量、成功时无诊断价值，降到 Debug 避免刷屏；
+	// 失败不受影响——仍由下方 ModifyResponse（≥400 Warn）/ ErrorHandler（连接错 Error）上报，藏不住。
+	logf := logrus.Infof
+	if strings.Contains(c.Request.URL.Path, "/public/auth/sip") {
+		logf = logrus.Debugf
+	}
+	logf("Hermes 反代: %s %s → %s://%s%s (agent=%s org=%s)", c.Request.Method, c.Request.URL.Path, u.Scheme, u.Host, targetPath, agent, org)
 	proxy := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
 			req.URL.Scheme = u.Scheme
@@ -1236,8 +1364,9 @@ func normalizeProxyTarget(target string) string {
 	return "https://" + target
 }
 
-// traceSessionFromEntity 把落库的链路会话+事件装配回 tracelog.Session（前端 trace 页模型）。
-func traceSessionFromEntity(row *entity.TraceSession) *tracelog.Session {
+// traceSessionFromEntity 把落库的单腿链路（mock_trace_leg）+事件装配回 tracelog.Session（前端 trace 页模型）。
+// 单腿：Legs 从事件的 leg 去重收集（前端梯形图主要据 events 的 SIP From/To 重建，legs 仅辅助）。
+func traceSessionFromEntity(row *entity.TraceLeg) *tracelog.Session {
 	if row == nil {
 		return nil
 	}
@@ -1248,8 +1377,8 @@ func traceSessionFromEntity(row *entity.TraceSession) *tracelog.Session {
 		CallID:    row.CallUUID,
 		StartedAt: row.StartedAt,
 		UpdatedAt: row.UpdatedAt,
-		Legs:      splitCSV(row.Legs),
 	}
+	legSeen := map[string]bool{}
 	for _, er := range row.Events {
 		var headers []tracelog.HeaderKV
 		if strings.TrimSpace(er.HeadersJSON) != "" {
@@ -1261,21 +1390,10 @@ func traceSessionFromEntity(row *entity.TraceSession) *tracelog.Session {
 			Method: er.Method, Summary: er.Summary, Headers: headers,
 			Raw: er.RawMessage, CallID: row.CallUUID,
 		})
-	}
-	return s
-}
-
-func splitCSV(s string) []string {
-	if strings.TrimSpace(s) == "" {
-		return nil
-	}
-	parts := strings.Split(s, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			out = append(out, p)
+		if er.Leg != "" && !legSeen[er.Leg] {
+			legSeen[er.Leg] = true
+			s.Legs = append(s.Legs, er.Leg)
 		}
 	}
-	return out
+	return s
 }

@@ -5,6 +5,7 @@ package model
 
 import (
 	"context"
+	"time"
 
 	"hermes-mock/internal/entity"
 )
@@ -14,7 +15,7 @@ type Repository interface {
 	// DB 返回底层连接（*gorm.DB），仅供 seed/迁移等基础设施代码使用。
 	DB() interface{}
 
-	// ---- 客户集群配置（行为档/客户组/个例/线路绑定）----
+	// ---- 客户集群配置（行为档/客户组/个例/端口绑定）----
 	ListBehaviorProfiles(ctx context.Context) ([]entity.BehaviorProfile, error)
 	UpsertBehaviorProfile(ctx context.Context, p *entity.BehaviorProfile) error
 	DeleteBehaviorProfile(ctx context.Context, code string) error
@@ -29,21 +30,22 @@ type Repository interface {
 
 	ListLineBindings(ctx context.Context) ([]entity.LineBinding, error)
 	UpsertLineBinding(ctx context.Context, b *entity.LineBinding) error
-	DeleteLineBinding(ctx context.Context, lineCode string) error
+	DeleteLineBinding(ctx context.Context, listenPort int) error
 
-	// ---- 通话记录（mock 事实表；Save 按 trace_id/record_id upsert 并合并旧值）----
-	SaveCallRecord(ctx context.Context, row *entity.CallRecord) error
-	ListCallRecords(ctx context.Context, f entity.CallRecordFilter) ([]entity.CallRecord, *entity.Meta, error)
+	// ---- 通话记录（mock 事实表 mock_call；Save 按 record_id upsert 并合并旧值）----
+	SaveCallRecord(ctx context.Context, row *entity.MockCall) error
+	ListCallRecords(ctx context.Context, f entity.CallRecordFilter) ([]entity.MockCall, *entity.Meta, error)
 
 	// ---- 测试运行历史 ----
 	CreateTestRun(ctx context.Context, row *entity.TestRun) error
 	ListTestRuns(ctx context.Context, limit int) ([]entity.TestRun, error)
 
-	// ---- 通话链路（会话按 session_id upsert；事件批量追加）----
-	SaveTraceSession(ctx context.Context, row *entity.TraceSession) error
+	// ---- 通话链路（单腿 mock_trace_leg：按 session_id upsert；事件批量追加；读时按 call_uuid 归并多腿）----
+	SaveTraceSession(ctx context.Context, row *entity.TraceLeg) error
 	CreateTraceEvents(ctx context.Context, rows []entity.TraceEvent) error
-	ListTraceSessions(ctx context.Context, limit int) ([]entity.TraceSession, error)
-	GetTraceSession(ctx context.Context, sessionID string) (*entity.TraceSession, error)
+	ListTraceSessions(ctx context.Context, limit int) ([]entity.TraceLeg, error)
+	GetTraceSession(ctx context.Context, sessionID string) (*entity.TraceLeg, error)
+	ListTraceLegsByCallUUID(ctx context.Context, callUUID string) ([]entity.TraceLeg, error)
 
 	// ---- Hermes 回调 ----
 	CreateCallback(ctx context.Context, row *entity.Callback) error
@@ -53,4 +55,9 @@ type Repository interface {
 	ListOrgConfigs(ctx context.Context) ([]entity.OrgConfig, error)
 	UpsertOrgConfig(ctx context.Context, c *entity.OrgConfig) error
 	DeleteOrgConfig(ctx context.Context, orgCode string) error
+
+	// ---- 观测数据治理 ----
+	// PruneObservations 删除 started_at/ts 早于 before 的观测行（mock_call / mock_trace_leg / mock_trace_event / mock_callback），
+	// 防长期膨胀。返回各表删除行数之和。配置表不受影响。
+	PruneObservations(ctx context.Context, before time.Time) (int64, error)
 }

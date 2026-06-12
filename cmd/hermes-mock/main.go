@@ -62,7 +62,7 @@ func main() {
 	logrus.Infof("cluster: 已接 hermes_mock 库，载入 %d 行为档/%d 客户组/%d 线路绑定",
 		len(clu.ListProfiles()), len(clu.ListGroups()), len(clu.ListBindings()))
 	// 机构配置 + 当前机构选择。mock 与 Hermes 的全部接入配置
-	// （服务地址/OpenAPI 凭据/hermes-ws/fs-esl）都在「机构」页维护，不走环境变量；绝不直连 Hermes 业务库。
+	// （OpenAPI 服务地址/凭据/hermes-ws 工作台地址）都在「机构」页维护，不走环境变量；绝不直连 Hermes 业务库。
 	orgStore, err := orgcfg.New(repo)
 	if err != nil {
 		logrus.Fatalf("init org config store: %v", err)
@@ -74,7 +74,7 @@ func main() {
 	}
 
 	// 5. 观测与编排组件
-	// 通话跟踪（被叫腿生命周期落 mock_call_record）
+	// 通话跟踪（被叫腿生命周期落 mock_call）
 	tracker := calltrace.New(repo)
 	// 坐席状态表（工作台 WS 在线态 + SIP 注册态 + 工作状态）
 	registry := agents.New()
@@ -96,31 +96,40 @@ func main() {
 	// 坐席工作台客户端：让 mock 坐席经 hermes-ws 上线 + 切状态（地址/口令从当前机构配置动态取）。
 	wsCli := wsagent.New(registry, bus, orgStore)
 
-	// 6. 启动 SIP agent（diago）：接收 FreeSWITCH 的 INVITE，按客户集群行为应答（只演客户被叫腿）
-	agent, err := sipagent.New(cfg, clu, tracker, bus)
+	// 6. 启动 SIP agent（diago）：接收 FreeSWITCH 的 INVITE，按入口端口对应的客户集群行为应答（只演客户被叫腿）
+	sipPorts, err := cfg.ListenPorts()
 	if err != nil {
-		logrus.Fatalf("init sip agent: %v", err)
+		logrus.Fatalf("parse SIP listen ports: %v", err)
 	}
-	go func() {
-		if err := agent.Run(); err != nil {
-			logrus.Errorf("sip agent stopped: %v", err)
+	for _, port := range sipPorts {
+		agent, err := sipagent.NewOnPort(cfg, port, clu, tracker, bus)
+		if err != nil {
+			logrus.Fatalf("init sip agent on %d: %v", port, err)
 		}
-	}()
+		go func(port int, agent *sipagent.Agent) {
+			if err := agent.Run(); err != nil {
+				logrus.Errorf("sip agent on %d stopped: %v", port, err)
+			}
+		}(port, agent)
+	}
 
 	// 通话链路常态落库：定期把会话+事件刷到 mock_trace_*。
 	go traceFlushLoop(repo, bus)
+
+	// 观测数据治理：周期清理早于 TTL 的呼叫记录/链路/回调，防长期膨胀。
+	go pruneLoop(repo, cfg.ObserveTTLDays)
 
 	// 7. HTTP：配置后台 + REST + 前端
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
 	r.Use(gin.Recovery())
-	api.Register(r, cfg, repo, clu, tracker, prober, kit, bus, orgStore, cbStore, registry, wsCli)
+	api.Register(r, cfg, repo, clu, tracker, prober, kit, bus, orgStore, cbStore, registry, wsCli, orch)
 
 	distFS, _ := fs.Sub(webDist, "web/dist")
 	api.MountFrontend(r, distFS)
 
 	addr := fmt.Sprintf(":%d", cfg.HTTPPort)
-	logrus.Infof("hermes-mock HTTP on %s | SIP %s:%d/%s", addr, cfg.SIPListenIP, cfg.SIPListenPort, cfg.SIPTransport)
+	logrus.Infof("hermes-mock HTTP on %s | SIP %s:%v/%s", addr, cfg.SIPListenIP, sipPorts, cfg.SIPTransport)
 	if err := r.Run(addr); err != nil {
 		logrus.Fatal(err)
 	}
@@ -136,12 +145,11 @@ func traceFlushLoop(repo model.Repository, bus *tracelog.Bus) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			_ = repo.SaveTraceSession(ctx, &cluster.TraceSessionRow{
 				SessionID: s.ID, CallUUID: s.CallID, Kind: s.Kind, Title: s.Title,
-				Legs: strings.Join(s.Legs, ","), StartedAt: s.StartedAt, UpdatedAt: s.UpdatedAt,
+				LegRole: legRoleOf(s), Line: legLineOf(s),
+				StartedAt: s.StartedAt, UpdatedAt: s.UpdatedAt,
 			})
-			if s.Kind == "call" || s.Kind == "sip-call" || s.Kind == "callback" || s.Kind == "outbound" {
-				row := cluster.CallRecordFromTraceSession(s)
-				_ = repo.SaveCallRecord(ctx, &row)
-			}
+			// 注：被叫腿的 call_record 由 calltrace.Tracker 在 INVITE 时按 call_uuid 主键直接落库，
+			// 不再从 trace 会话反推（已删 CallRecordFromTraceSession）。这里只落 trace 会话/事件。
 			last := flushed[s.ID]
 			var rows []cluster.TraceEventRow
 			for _, e := range s.Events {
@@ -162,4 +170,59 @@ func traceFlushLoop(repo model.Repository, bus *tracelog.Bus) {
 			cancel()
 		}
 	}
+}
+
+// pruneLoop 周期清理早于 TTL 的观测数据（呼叫记录/链路/回调）。ttlDays<=0 表示不清理。
+func pruneLoop(repo model.Repository, ttlDays int) {
+	if ttlDays <= 0 {
+		logrus.Info("观测数据保留无上限（OBSERVE_TTL_DAYS<=0），跳过周期清理")
+		return
+	}
+	t := time.NewTicker(6 * time.Hour)
+	defer t.Stop()
+	prune := func() {
+		before := time.Now().Add(-time.Duration(ttlDays) * 24 * time.Hour)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		n, err := repo.PruneObservations(ctx, before)
+		if err != nil {
+			logrus.Warnf("观测数据清理失败: %v", err)
+			return
+		}
+		if n > 0 {
+			logrus.Infof("观测数据清理：删除 %d 行（早于 %s）", n, before.Format(time.RFC3339))
+		}
+	}
+	prune() // 启动即清一次
+	for range t.C {
+		prune()
+	}
+}
+
+// legRoleOf 推导单腿角色（customer/agent）：优先看事件 detail["role"]，否则按 leg 前缀 agent:。
+func legRoleOf(s *tracelog.Session) string {
+	for _, e := range s.Events {
+		if r := e.Detail["role"]; r != "" {
+			return r
+		}
+		if strings.HasPrefix(e.Leg, "agent:") {
+			return "agent"
+		}
+	}
+	for _, leg := range s.Legs {
+		if strings.HasPrefix(leg, "agent:") {
+			return "agent"
+		}
+	}
+	return "customer"
+}
+
+// legLineOf 取该腿涉及的线路名（事件 detail["line"]，观测用）。
+func legLineOf(s *tracelog.Session) string {
+	for _, e := range s.Events {
+		if l := e.Detail["line"]; l != "" {
+			return l
+		}
+	}
+	return ""
 }

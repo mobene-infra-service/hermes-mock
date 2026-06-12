@@ -26,9 +26,26 @@ export async function uploadAudio(file: File): Promise<{ name?: string }> {
   return r.json().catch(() => ({}))
 }
 
+// getTraceSessions 取会话**摘要**列表（不含 events，后端瘦身后只回 id/title/kind/callId/legs/eventCount）。
+// 列表轮询用它；要事件梯形图走 getTraceSession(id) 单查，坐席软电话找自己那条走 findTraceSession(token)。
 export async function getTraceSessions(): Promise<TraceSession[]> {
   const r = await fetch(`${base}/trace/sessions`)
   if (!r.ok) throw new Error(`traceSessions: ${r.status}`)
+  return r.json()
+}
+
+// getTraceSession 取单条会话的**完整**轨迹（含 events），供 CallTracePage 选中后渲染梯形图。
+export async function getTraceSession(id: string): Promise<TraceSession> {
+  const r = await fetch(`${base}/trace/sessions/${encodeURIComponent(id)}`)
+  if (!r.ok) throw new Error(`traceSession: ${r.status}`)
+  return r.json()
+}
+
+// findTraceSession 让服务端按 token 子串匹配（复刻旧 sessionMatchesCall），回匹配到的完整 session（含 events）。
+// 坐席软电话用 jssip callId 找「自己这通」对应的 trace，避免每张卡每轮拉全量列表再前端 find。
+export async function findTraceSession(token: string): Promise<TraceSession[]> {
+  const r = await fetch(`${base}/trace/sessions?match=${encodeURIComponent(token)}`)
+  if (!r.ok) throw new Error(`findTraceSession: ${r.status}`)
   return r.json()
 }
 
@@ -70,13 +87,33 @@ export async function bootstrapDemo(p?: { provisionLine?: boolean; customerCount
 
 
 export async function runCallCenterTask(p: {
-  orgCode: string; name: string; customerGroup?: string; customerLimit?: number; numbers?: string[]; agentGroups?: string[]; agentGroupCodes?: string[]
-  ttsCode?: string; ttsText?: string; observeAgent?: string; proportion?: number
-  startDate?: string; endDate?: string; dialTimePeriod?: string[]; lineType?: string; autoStart?: boolean; waitSec?: number
+  orgCode?: string; name: string; customerGroup?: string; customerLimit?: number; numbers?: string[]; agentGroups?: string[]; agentGroupCodes?: string[]; agentNumbers?: string[]
+  ttsCode?: string; ttsText?: string; observeAgent?: string
+  modeStrategy?: number; proportion?: number; lossRate?: number; historicalConnectionRate?: number
+  sortMethod?: number; isPriorityTask?: boolean; isVmHangup?: boolean
+  maxRedialTimes?: number; redialInterval?: number; bestRingDuration?: number; agentMaxRingDuration?: number
+  assignDelaySeconds?: number; transferType?: string; description?: string
+  startDate?: string; endDate?: string; dialTimePeriod?: string[]; lineType?: string; waitSec?: number
 }): Promise<TestRun> {
   const r = await fetch(`${base}/tests/callcenter-task`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(p),
   })
+  return r.json()
+}
+
+// 群呼任务生命周期管理（taskCode 来自 runCallCenterTask 结果的 artifacts.taskCode）。
+// createAndImport 后即自动拨号；以下用于运行期暂停/恢复/取消/查状态。
+export interface TaskActionResp { ok?: boolean; taskCode?: string; data?: unknown; error?: string }
+
+const callCenterTaskAction = async (taskCode: string, action: 'pause' | 'resume' | 'cancel'): Promise<TaskActionResp> => {
+  const r = await fetch(`${base}/tests/callcenter-task/${encodeURIComponent(taskCode)}/${action}`, { method: 'POST' })
+  return r.json()
+}
+export const pauseCallCenterTask = (taskCode: string) => callCenterTaskAction(taskCode, 'pause')
+export const resumeCallCenterTask = (taskCode: string) => callCenterTaskAction(taskCode, 'resume')
+export const cancelCallCenterTask = (taskCode: string) => callCenterTaskAction(taskCode, 'cancel')
+export const getCallCenterTaskStatus = async (taskCode: string): Promise<TaskActionResp> => {
+  const r = await fetch(`${base}/tests/callcenter-task/${encodeURIComponent(taskCode)}/status`)
   return r.json()
 }
 
@@ -162,9 +199,9 @@ const delJSON = async (path: string): Promise<void> => {
 export const deleteProfile = (code: string) => delJSON(`/cluster/profiles/${encodeURIComponent(code)}`)
 export const deleteGroup = (code: string) => delJSON(`/cluster/groups/${encodeURIComponent(code)}`)
 export const deleteOverride = (number: string) => delJSON(`/cluster/overrides/${encodeURIComponent(number)}`)
-export const deleteBinding = (lineCode: string) => delJSON(`/cluster/bindings/${encodeURIComponent(lineCode)}`)
-export async function clusterResolve(number: string, line?: string): Promise<{ matched: boolean; resolved?: { groupCode: string; profile: BehaviorProfile; disabled: boolean } }> {
-  const q = new URLSearchParams({ number, ...(line ? { line } : {}) })
+export const deleteBinding = (listenPort: number) => delJSON(`/cluster/bindings/${encodeURIComponent(String(listenPort))}`)
+export async function clusterResolve(number: string, listenPort?: number): Promise<{ matched: boolean; resolved?: { groupCode: string; profile: BehaviorProfile; disabled: boolean } }> {
+  const q = new URLSearchParams({ number, ...(listenPort ? { listenPort: String(listenPort) } : {}) })
   return getJSON(`/cluster/resolve?${q}`)
 }
 

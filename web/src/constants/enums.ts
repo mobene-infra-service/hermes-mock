@@ -31,3 +31,22 @@ export const LINE_TYPE_OPTIONS = [
   { value: 'pool' },
   { value: 'gsm' },
 ]
+
+// 群呼任务：模式策略（TaskModeStrategyEnum）。=1 比例 → 必填 proportion；=2 PID → 必填 lossRate + historicalConnectionRate。
+export const MODE_STRATEGY_OPTIONS = [
+  { value: 1, label: '比例（PROPORTION）' },
+  { value: 2, label: 'PID' },
+]
+
+// 群呼任务：排序方式（TaskSortMethodEnum）。
+export const SORT_METHOD_OPTIONS = [
+  { value: 1, label: '优先首呼' },
+  { value: 2, label: '优先重呼' },
+]
+
+// 群呼任务：转接类型（CallTaskTransferTypeEnum，可选）。
+export const TRANSFER_TYPE_OPTIONS = [
+  { value: '', label: '（默认）' },
+  { value: 'ai-only', label: 'AI Only' },
+  { value: 'human_only', label: 'Human Only' },
+]

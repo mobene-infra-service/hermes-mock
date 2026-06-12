@@ -14,6 +14,11 @@ import (
 	"hermes-mock/internal/tracelog"
 )
 
+// maxCID 是 cid2biz/cid2leg 的容量兜底上限：两个映射本身只在通话在飞期间需要，
+// 但若不回收会随 Call-ID 无限增长（批量压测下 OOM）。超限时按插入序淘汰最旧的
+// Call-ID——只会命中早已结束的通话（需先经过 maxCID 个更新的 Call-ID），不影响在飞聚合。
+const maxCID = 4096
+
 // Tracer 实现 sip.SIPTracer，把收发报文喂给 tracelog。
 type Tracer struct {
 	bus *tracelog.Bus
@@ -22,12 +27,38 @@ type Tracer struct {
 	// 这里记住同一 SIP 对话(Call-ID)首次见到的 bizUUID，让后续报文聚合到同一业务会话，
 	// 避免「200/ACK/BYE 因无业务头而另起一条 Call-ID 会话」的分裂（实测踩坑）。
 	cid2biz map[string]string
+	// callID → leg 映射：leg 表示 mock 侧这条 SIP dialog 的客户腿标识。
+	// INVITE 后的 BYE/200 等报文 To/From 会随方向变化，不能每条报文重新从 To 推断。
+	cid2leg map[string]string
+	// cidOrder 记录 callID 的插入顺序，供 maxCID 容量兜底淘汰（见上）。
+	cidOrder []string
+}
+
+// rememberCIDLocked 在写入 cid2biz/cid2leg 前登记该 callID 的插入序，并在超过 maxCID 时
+// 淘汰最旧的 Call-ID（从两个映射一并删除）。必须在持有 t.mu 时调用。
+func (t *Tracer) rememberCIDLocked(callID string) {
+	if callID == "" {
+		return
+	}
+	if _, ok := t.cid2biz[callID]; ok {
+		return // 已跟踪
+	}
+	if _, ok := t.cid2leg[callID]; ok {
+		return // 已跟踪
+	}
+	t.cidOrder = append(t.cidOrder, callID)
+	for len(t.cidOrder) > maxCID {
+		old := t.cidOrder[0]
+		t.cidOrder = t.cidOrder[1:]
+		delete(t.cid2biz, old)
+		delete(t.cid2leg, old)
+	}
 }
 
 // Install 注册 tracer 到 sipgo 并开启 SIPDebug（传输层据此调用 tracer）。
 func Install(bus *tracelog.Bus) {
 	sip.SIPDebug = true
-	sip.SIPDebugTracer(&Tracer{bus: bus, cid2biz: map[string]string{}})
+	sip.SIPDebugTracer(&Tracer{bus: bus, cid2biz: map[string]string{}, cid2leg: map[string]string{}})
 }
 
 // SIPTraceRead mock 收到的报文（IN）。
@@ -55,7 +86,7 @@ func (t *Tracer) handle(dir tracelog.Dir, transport, laddr, raddr string, msg []
 		title = title[:80]
 	}
 	sess := t.bus.EnsureByCallID(aggKey, "sip-call", title)
-	leg := legOf(p, dir)
+	leg := t.resolveLeg(p, dir)
 	summary := p.summary(dir, raddr)
 	// 端点方向：IN=对端(raddr)→本端(laddr)，OUT=本端(laddr)→对端(raddr)。供梯形图画箭头。
 	src, dst := laddr, raddr
@@ -72,7 +103,11 @@ func (t *Tracer) handle(dir tracelog.Dir, transport, laddr, raddr string, msg []
 func (t *Tracer) resolveAggKey(callID, bizUUID string) string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.cid2biz == nil {
+		t.cid2biz = map[string]string{}
+	}
 	if bizUUID != "" {
+		t.rememberCIDLocked(callID)
 		t.cid2biz[callID] = bizUUID
 		return bizUUID
 	}
@@ -80,6 +115,34 @@ func (t *Tracer) resolveAggKey(callID, bizUUID string) string {
 		return biz
 	}
 	return callID
+}
+
+// resolveLeg 返回同一 SIP Call-ID 的稳定客户腿标识。
+// 首包 INVITE 以方向推断出的 mock 侧 user 作为 leg；后续同 Call-ID 的响应/ACK/BYE 复用该值，
+// 避免 mock 主动 BYE 时 To 变成主叫号而把同一客户腿拆成两条 leg。
+func (t *Tracer) resolveLeg(p *parsed, dir tracelog.Dir) string {
+	leg := legOf(p, dir)
+	if p == nil || p.callID == "" {
+		return leg
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.cid2leg == nil {
+		t.cid2leg = map[string]string{}
+	}
+	if p.isRequest && strings.EqualFold(p.method, "INVITE") && leg != "" {
+		t.rememberCIDLocked(p.callID)
+		t.cid2leg[p.callID] = leg
+		return leg
+	}
+	if sticky, ok := t.cid2leg[p.callID]; ok && sticky != "" {
+		return sticky
+	}
+	if leg != "" {
+		t.rememberCIDLocked(p.callID)
+		t.cid2leg[p.callID] = leg
+	}
+	return leg
 }
 
 // parsed 解析后的 SIP 报文要点。
@@ -157,8 +220,7 @@ func parse(msg []byte) *parsed {
 		name := strings.TrimSpace(ln[:idx])
 		val := strings.TrimSpace(ln[idx+1:])
 		p.headers = append(p.headers, tracelog.HeaderKV{Name: name, Value: val})
-		lname := strings.ToLower(name)
-		switch lname {
+		switch strings.ToLower(name) {
 		case "call-id", "i":
 			if p.callID == "" {
 				p.callID = val
@@ -168,16 +230,10 @@ func parse(msg []byte) *parsed {
 		case "to", "t":
 			p.to = val
 		}
-		// Hermes 业务 callUuid：FS 经 sip_h_X- 注入的业务头（优先级 call-uuid > session-id）。
-		if p.bizUUID == "" {
-			switch lname {
-			case "x-call-uuid", "x-callid", "x-jcallid", "x-call-id":
-				p.bizUUID = val
-			case "x-session-id", "x-session_id":
-				p.bizUUID = val
-			}
-		}
 	}
+	// Hermes 业务 callUuid（多腿/多报文聚合键）：按优先级从已收集的头里提取，
+	// 与 sipagent 共用 tracelog.BizUUIDFromHeaders，保证两条观测路径取同一值。
+	p.bizUUID = tracelog.BizUUIDFromHeaders(p.headers)
 	return p
 }
 
@@ -186,9 +242,28 @@ func splitLines(s string) []string {
 	return strings.Split(s, "\n")
 }
 
-// legOf 从 From/To 推断腿标识（被叫=分机/客户号）。
+// legOf 从 From/To 推断 mock 侧腿标识（被叫=分机/客户号）。
 func legOf(p *parsed, dir tracelog.Dir) string {
-	user := userOf(p.to)
+	if p == nil {
+		return ""
+	}
+	var user string
+	if p.isRequest {
+		if dir == tracelog.DirOut {
+			user = userOf(p.from)
+		} else {
+			user = userOf(p.to)
+		}
+	} else {
+		if dir == tracelog.DirIn {
+			user = userOf(p.from)
+		} else {
+			user = userOf(p.to)
+		}
+	}
+	if user == "" {
+		user = userOf(p.to)
+	}
 	if user == "" {
 		user = userOf(p.from)
 	}

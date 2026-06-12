@@ -1,5 +1,5 @@
 // Package bootstrap 一键播种「业务测试」的最小可运行配置：
-// 行为档 + 客户组 + 线路绑定（不写 Hermes 业务库），快速准备客户腿与线路匹配。
+// 行为档 + 客户组 + 端口绑定（不写 Hermes 业务库），快速准备客户腿与入口端口匹配。
 // mock 只演客户被叫腿；坐席（如群呼/手动外呼场景需要）由真实 Hermes 坐席承担。
 package bootstrap
 
@@ -16,8 +16,8 @@ type Params struct {
 	CustomerPrefix string `json:"customerPrefix"` // 客户号前缀（默认 8613800）
 	CustomerStart  int64  `json:"customerStart"`  // 客户号起始（默认 100000）
 	CustomerCount  int    `json:"customerCount"`  // 客户数（默认 20）
+	ListenPort     int    `json:"listenPort"`     // mock SIP 入口端口（默认 5060）
 	LineName       string `json:"lineName"`       // 线路名（默认 demo-line）
-	LineAddress    string `json:"lineAddress"`    // 线路 address（=mock 可达地址，前端填写）
 }
 
 // Result 播种结果摘要。
@@ -25,11 +25,12 @@ type Result struct {
 	ProfileCode   string   `json:"profileCode"`
 	CustomerGroup string   `json:"customerGroup"`
 	LineCode      string   `json:"lineCode,omitempty"`
+	ListenPort    int      `json:"listenPort"`
 	LineBinding   string   `json:"lineBinding"`
 	Notes         []string `json:"notes"`
 }
 
-// withDefaults 填充默认值。LineAddress 由前端/调用方提供（=mock 线路监听地址，Hermes t_line.address）。
+// withDefaults 填充默认值。
 func (p Params) withDefaults() Params {
 	if p.OrgCode == "" {
 		p.OrgCode = "demo_org"
@@ -46,13 +47,16 @@ func (p Params) withDefaults() Params {
 	if p.CustomerCount == 0 {
 		p.CustomerCount = 20
 	}
+	if p.ListenPort == 0 {
+		p.ListenPort = 5060
+	}
 	if p.LineName == "" {
 		p.LineName = "demo-line"
 	}
 	return p
 }
 
-// Seed 播种最小可运行配置到 cluster（行为档 + 客户组 + 线路绑定）。
+// Seed 播种最小可运行配置到 cluster（行为档 + 客户组 + 端口绑定）。
 // 线路实体(t_line)须在 Hermes 侧配置，mock 不直写；这里只播种 mock 自己的绑定/集群配置。
 func Seed(clu *cluster.Store, in Params) (*Result, error) {
 	if clu == nil {
@@ -79,24 +83,18 @@ func Seed(clu *cluster.Store, in Params) (*Result, error) {
 	}
 	res.CustomerGroup = p.CustomerGroup
 
-	// 3. 线路绑定：客户组 ↔ 线路（按 line_name 规范化匹配 FS 注入的 X-Line-Name）
-	// lineAddress = mock 实际 SIP 可达地址（originate 的 gateway），否则 FS 的 INVITE 到不了 mock。
-	// 若库里已有该绑定但地址与目标不一致（历史脏数据，如指向不存在的地址），Upsert 会一并纠正。
+	// 3. 入口端口绑定：mock SIP 入口端口 ↔ 客户组。
+	// Hermes 线路 address 仍需在 Hermes 侧配置为 mockIP:listenPort；mock 自己只按入口端口路由客户组。
 	bindCode := "demo_bind"
-	for _, b := range clu.ListBindings() {
-		if b.LineCode == bindCode && b.LineAddress != "" && b.LineAddress != p.LineAddress {
-			res.Notes = append(res.Notes, fmt.Sprintf("已纠正线路绑定 %s 地址：%s → %s", bindCode, b.LineAddress, p.LineAddress))
-			break
-		}
-	}
 	if _, err := clu.UpsertBinding(cluster.LineBinding{
-		LineCode: bindCode, LineName: p.LineName, LineAddress: p.LineAddress,
+		ListenPort: p.ListenPort, LineCode: bindCode, LineName: p.LineName,
 		GroupCode: p.CustomerGroup, Enabled: 1,
 	}); err != nil {
-		return nil, fmt.Errorf("播种线路绑定: %w", err)
+		return nil, fmt.Errorf("播种入口端口绑定: %w", err)
 	}
 	res.LineBinding = bindCode
-	res.Notes = append(res.Notes, "线路实体需在 Hermes 侧配置(address→mock)；mock 已建客户组↔线路绑定 "+bindCode)
+	res.ListenPort = p.ListenPort
+	res.Notes = append(res.Notes, fmt.Sprintf("Hermes 线路 address 需配到 mockIP:%d；mock 已建端口↔客户组绑定 %s", p.ListenPort, bindCode))
 	res.Notes = append(res.Notes, fmt.Sprintf("客户组 %s 展开 %s%d..%d（%d 个）",
 		p.CustomerGroup, p.CustomerPrefix, p.CustomerStart, p.CustomerStart+int64(p.CustomerCount)-1, p.CustomerCount))
 	res.Notes = append(res.Notes, "坐席（如群呼/手动外呼场景需要）由真实 Hermes 坐席承担；mock 只演客户被叫腿")

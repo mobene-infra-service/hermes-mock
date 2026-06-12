@@ -6,9 +6,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
+	"hermes-mock/internal/entity"
 	"hermes-mock/internal/hermesopenapi"
 	"hermes-mock/internal/orgcfg"
 )
@@ -102,35 +102,14 @@ func (o *Orchestrator) RunOTP(s OTPScenario) ([]byte, error) {
 	return cli.SendOTP(ctx, s.To, s.TemplateCode, s.Params)
 }
 
-// CallCenterTaskScenario call-center 群呼任务。
-type CallCenterTaskScenario struct {
-	OrgCode         string   `json:"orgCode"`
-	Name            string   `json:"name"`
-	Numbers         []string `json:"numbers"`
-	AgentGroupCodes []string `json:"agentGroupCodes"`
-	TTSCode         string   `json:"ttsCode"`
-	TTSText         string   `json:"ttsText"`
-	ObserveAgent    string   `json:"observeAgent"`
-	Proportion      int      `json:"proportion"`
-	StartDate       string   `json:"startDate"`
-	EndDate         string   `json:"endDate"`
-	DialTimePeriod  []string `json:"dialTimePeriod"`
-	// LineType 线路类型（Hermes 2026-06 特性 7cbb285：任务期间仅用该 type 线路选号；
-	// 空 = 不传，Hermes 默认 base）。
-	LineType  string `json:"lineType"`
-	AutoStart bool   `json:"autoStart"`
-	WaitSec   int    `json:"waitSec"`
-}
+// CallCenterTaskScenario call-center 群呼任务（= entity.CallCenterTaskReq，含全部 Hermes 参数）。
+type CallCenterTaskScenario = entity.CallCenterTaskReq
 
-// RunCallCenterTask 经 OpenAPI 建并（可选）启动 call-center 群呼任务。
+// RunCallCenterTask 经 OpenAPI 建 call-center 群呼任务（createAndImport 即自动拨号，无需再 start）。
 func (o *Orchestrator) RunCallCenterTask(s CallCenterTaskScenario) ([]byte, error) {
 	cli, err := o.client()
 	if err != nil {
 		return nil, err
-	}
-	prop := s.Proportion
-	if prop == 0 {
-		prop = 1
 	}
 	period := s.DialTimePeriod
 	if len(period) == 0 {
@@ -144,48 +123,126 @@ func (o *Orchestrator) RunCallCenterTask(s CallCenterTaskScenario) ([]byte, erro
 	if endDate == "" {
 		endDate = time.Now().AddDate(0, 1, 0).Format("2006-01-02") // +1 个月
 	}
+	sortMethod := s.SortMethod
+	if sortMethod == 0 {
+		sortMethod = 1 // 1=优先首呼（TaskSortMethodEnum 必填）
+	}
+	bestRing := s.BestRingDuration
+	if bestRing == 0 {
+		bestRing = 40 // Hermes 默认 40s
+	}
 	ctx, cancel := o.ctx()
 	defer cancel()
 	body := map[string]any{
-		"name": s.Name, "modeStrategy": 1, "proportion": prop,
-		"ttsCode": s.TTSCode, "ttsText": s.TTSText, "ttsTextVariableMap": map[string]string{},
-		"sortMethod": 1, // 1=优先首呼（TaskSortMethodEnum 必填）
-		"startDate":  startDate, "endDate": endDate, "dialTimePeriod": period,
-		"isPriorityTask": false, "isVmHangup": false,
-		"agentNumbers":    []string{}, // 必填（可空集），坐席走 agentGroupCodes
-		"agentGroupCodes": s.AgentGroupCodes, "numbers": numberInfos(s.Numbers),
+		"name": s.Name, "ttsCode": s.TTSCode, "ttsText": s.TTSText, "ttsTextVariableMap": map[string]string{},
+		"sortMethod": sortMethod, "startDate": startDate, "endDate": endDate, "dialTimePeriod": period,
+		"isPriorityTask": s.IsPriorityTask, "isVmHangup": s.IsVmHangup,
+		"bestRingDuration": bestRing, "assignDelaySeconds": s.AssignDelaySeconds,
+		"numbers": numberInfos(s.Numbers),
+	}
+	// 模式策略组合（对照 Hermes CallTaskService.validateAddRequest）：
+	//   modeStrategy=1(比例) → 必填 proportion(1-10)；modeStrategy=2(PID) → 必填 lossRate(0-99)+historicalConnectionRate(1-100)。
+	mode := s.ModeStrategy
+	if mode == 0 {
+		mode = 1
+	}
+	body["modeStrategy"] = mode
+	if mode == 2 {
+		hist := s.HistoricalConnectionRate
+		if hist == 0 {
+			hist = 50 // PID 必填且 1-100，给个安全默认
+		}
+		body["lossRate"] = s.LossRate // 0 合法，无条件下发
+		body["historicalConnectionRate"] = hist
+	} else {
+		prop := s.Proportion
+		if prop == 0 {
+			prop = 1
+		}
+		body["proportion"] = prop
+	}
+	// 可选项：仅在有值时下发，缺省走 Hermes 默认。
+	if s.MaxRedialTimes > 0 {
+		body["maxRedialTimes"] = s.MaxRedialTimes
+	}
+	if s.RedialInterval > 0 {
+		body["redialInterval"] = s.RedialInterval
+	}
+	if s.AgentMaxRingDuration > 0 {
+		body["agentMaxRingDuration"] = s.AgentMaxRingDuration
+	}
+	if s.TransferType != "" {
+		body["transferType"] = s.TransferType
+	}
+	if s.Description != "" {
+		body["description"] = s.Description
+	}
+	// 坐席分配二选一（对照 Hermes AddCallTaskAndImportNumberReq）：
+	//   - agentNumbers：指定坐席号列表（@Size max 500）；
+	//   - agentGroupCodes：技能组（@Size(max=1,min=1) —— 只接受恰好 1 个，故取首个）。
+	// 同时给则以 agentNumbers 优先。orgCode 不进 body（Hermes 经凭据头 ORG_CODE 取机构）。
+	if len(s.AgentNumbers) > 0 {
+		body["agentNumbers"] = s.AgentNumbers
+	} else if len(s.AgentGroupCodes) > 0 {
+		body["agentGroupCodes"] = []string{s.AgentGroupCodes[0]}
 	}
 	if s.LineType != "" {
 		body["lineType"] = s.LineType // 7cbb285：任务期间仅用该 type 线路（含重试换线锁同 type）
 	}
-	out, err := cli.CreateCallCenterTask(ctx, body)
-	if err != nil || !s.AutoStart {
-		return out, err
+	// createAndImport 建任务后 Hermes 即异步拨号（NotifyDialJob），状态按日期判定为 IN_PROGRESS，
+	// **无需再调 status/start**——start 仅用于恢复 PAUSE 态任务（证据 Hermes CallTaskService.startTask）。
+	return cli.CreateCallCenterTask(ctx, body)
+}
+
+// PauseCallCenterTask 暂停群呼任务。
+func (o *Orchestrator) PauseCallCenterTask(taskCode string) ([]byte, error) {
+	cli, err := o.client()
+	if err != nil {
+		return nil, err
 	}
-	if code := extractTaskCode(out); code != "" {
-		startOut, startErr := cli.StartCallCenterTask(ctx, code)
-		if startErr != nil {
-			// createAndImport 在部分 call-center 版本里已经把任务推进运行/调度态；
-			// 此时再调 start 会返回 TASK_STATUS_ERROR，但任务已被受理。
-			if strings.Contains(startErr.Error(), "Task status is incorrect") {
-				return out, nil
-			}
-			return startOut, startErr
-		}
-		return startOut, nil
+	ctx, cancel := o.ctx()
+	defer cancel()
+	return cli.StopCallCenterTask(ctx, taskCode)
+}
+
+// ResumeCallCenterTask 恢复（启动）已暂停的群呼任务。
+func (o *Orchestrator) ResumeCallCenterTask(taskCode string) ([]byte, error) {
+	cli, err := o.client()
+	if err != nil {
+		return nil, err
 	}
-	return out, nil
+	ctx, cancel := o.ctx()
+	defer cancel()
+	return cli.StartCallCenterTask(ctx, taskCode)
+}
+
+// CancelCallCenterTask 取消群呼任务。
+func (o *Orchestrator) CancelCallCenterTask(taskCode string) ([]byte, error) {
+	cli, err := o.client()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := o.ctx()
+	defer cancel()
+	return cli.CancelCallCenterTask(ctx, taskCode)
+}
+
+// CallCenterTaskStatus 查群呼任务状态。
+func (o *Orchestrator) CallCenterTaskStatus(taskCode string) ([]byte, error) {
+	cli, err := o.client()
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := o.ctx()
+	defer cancel()
+	return cli.GetCallCenterTaskStatus(ctx, taskCode)
 }
 
 // ---- testkit.BizCaller 适配 ----
 
-// CallCenterTask 适配 BizCaller。
-func (o *Orchestrator) CallCenterTask(orgCode, name string, numbers, agentGroups []string, ttsCode, ttsText string, proportion int, startDate, endDate string, dialTimePeriod []string, lineType string, autoStart bool) ([]byte, error) {
-	return o.RunCallCenterTask(CallCenterTaskScenario{
-		OrgCode: orgCode, Name: name, Numbers: numbers, AgentGroupCodes: agentGroups,
-		TTSCode: ttsCode, TTSText: ttsText, Proportion: proportion, StartDate: startDate,
-		EndDate: endDate, DialTimePeriod: dialTimePeriod, LineType: lineType, AutoStart: autoStart,
-	})
+// CallCenterTask 适配 BizCaller（全参数经 entity.CallCenterTaskReq 透传）。
+func (o *Orchestrator) CallCenterTask(req entity.CallCenterTaskReq) ([]byte, error) {
+	return o.RunCallCenterTask(req)
 }
 
 // CallBotTask 适配 BizCaller。

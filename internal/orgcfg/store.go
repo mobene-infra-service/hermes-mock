@@ -1,5 +1,5 @@
 // Package orgcfg 维护「机构配置」：每个机构一套 OpenAPI 接入凭据（地址/密钥/模式）+
-// hermes-ws/fs-esl 等接入地址，持久化到 hermes_mock（独立库，不碰 Hermes 表），
+// hermes-ws 工作台地址，持久化到 hermes_mock（独立库，不碰 Hermes 表），
 // 并维护「当前测试机构」选择。这是 mock 与 Hermes 交互的入口配置——切机构即切这套凭据。
 // 本包是「内存缓存」领域服务：DB 读写经 model.Repository；实体定义在 internal/entity。
 package orgcfg

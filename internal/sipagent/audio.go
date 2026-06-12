@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"math"
 	"os"
+	"sync"
 )
 
 // 音频帧工具：把预置 WAV 转成 20ms@8kHz PCMU(μ-law) 帧，或合成可听拨号音帧。
@@ -12,6 +13,35 @@ import (
 const (
 	frameSamples = 160 // 20ms @ 8kHz
 )
+
+// frameCache 缓存解码后的 PCMU 帧（key=绝对路径 / dialToneKey → [][]byte）。
+// 帧解码后只读（仅被 aw.Write 读取，不改写），跨通话/goroutine 共享安全；批量压测下避免
+// 每通重读盘 + 逐样本 μ-law 解码。进程生命周期缓存——运行中修改 WAV 需重启才生效（mock 可接受）。
+var frameCache sync.Map
+
+// dialToneKey 是合成拨号音帧的固定缓存键（前缀 \x00 不与任何文件路径冲突）。
+const dialToneKey = "\x00dialtone"
+
+// cachedPCMUFrames 缓存版 loadPCMUFrames：同一路径只读盘 + 解码一次。
+// 解码失败（nil）也缓存，避免对坏/缺失文件反复读盘。
+func cachedPCMUFrames(path string) [][]byte {
+	if v, ok := frameCache.Load(path); ok {
+		return v.([][]byte)
+	}
+	frames := loadPCMUFrames(path)
+	frameCache.Store(path, frames)
+	return frames
+}
+
+// cachedDialToneFrames 缓存合成拨号音帧（确定性，只算一次）。
+func cachedDialToneFrames() [][]byte {
+	if v, ok := frameCache.Load(dialToneKey); ok {
+		return v.([][]byte)
+	}
+	frames := dialToneFrames()
+	frameCache.Store(dialToneKey, frames)
+	return frames
+}
 
 // loadPCMUFrames 读 WAV，转成一组 20ms PCMU 帧（循环播放用）。
 // 支持 8kHz：① μ-law(WAV fmt 7) 直接切帧；② 16-bit PCM mono（fmt 1）逐样本编码 μ-law。
