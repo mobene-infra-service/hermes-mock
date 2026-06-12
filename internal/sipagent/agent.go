@@ -72,20 +72,30 @@ func (a *Agent) Run() error {
 	})
 }
 
-// resolveRule 解析被叫的有效行为：用客户集群（号段组+个例+端口绑定+接通率）匹配，
-// 命中即转成 behavior.Rule；未命中（或无集群）用内置默认行为兜底（应答+放音）。
+// resolveRule 解析被叫的有效行为。优先级与可见性（便于排查「绑了端口却不生效」）：
+//  1. 入口端口有**启用绑定** → 绑定权威：只按绑定客户组(+组内/全局个例)解析，**不回退**按号串到别的组；
+//     绑定命中端口但组/行为档缺失 → 明确 WARN + 默认兜底（而非悄悄按号匹配别的组）。
+//  2. 端口无绑定 → 按号段/个例解析；命中即用。
+//  3. 都未命中 → 默认兜底（应答+放音），并 WARN 提示该端口未绑定/号未命中。
 func (a *Agent) resolveRule(callee string) behavior.Rule {
-	if a.cluster != nil {
-		var res *cluster.Resolved
-		if a.listenPort > 0 {
-			res = a.cluster.ResolveByPort(a.listenPort, callee)
-		}
-		if res == nil {
-			res = a.cluster.ResolveByNumber(callee)
-		}
+	if a.cluster == nil {
+		return a.defaultRule()
+	}
+	if a.listenPort > 0 && a.cluster.HasBinding(a.listenPort) {
+		res := a.cluster.ResolveByPort(a.listenPort, callee)
 		if res != nil && res.Profile != nil {
+			logrus.WithFields(logrus.Fields{"listenPort": a.listenPort, "callee": callee, "group": res.GroupCode, "outcome": res.Profile.Outcome, "source": "port-binding"}).Info("行为解析命中端口绑定")
 			return clusterToRule(res)
 		}
+		logrus.WithFields(logrus.Fields{"listenPort": a.listenPort, "callee": callee}).Warn("端口已绑定但客户组或行为档缺失，回退默认兜底（检查该组是否存在、组 behaviorCode 是否指向有效行为档）")
+		return a.defaultRule()
+	}
+	if res := a.cluster.ResolveByNumber(callee); res != nil && res.Profile != nil {
+		logrus.WithFields(logrus.Fields{"listenPort": a.listenPort, "callee": callee, "group": res.GroupCode, "outcome": res.Profile.Outcome, "source": "number"}).Info("行为解析按号命中客户组")
+		return clusterToRule(res)
+	}
+	if a.listenPort > 0 {
+		logrus.WithFields(logrus.Fields{"listenPort": a.listenPort, "callee": callee}).Warn("入口端口未绑定且号未命中任何客户组，回退默认兜底（确认该端口已在 cluster 页绑定客户组、且该端口在 SIP_LISTEN_PORTS 中）")
 	}
 	return a.defaultRule()
 }

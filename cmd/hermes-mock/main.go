@@ -112,6 +112,9 @@ func main() {
 			}
 		}(port, agent)
 	}
+	// 启动期对账：cluster 端口绑定 vs 实际 SIP 监听端口。提示「死绑定」（绑了 mock 没监听的端口→永不生效）
+	// 和「未绑定的监听口」（该口来话会回退按号/默认兜底），直击「在 cluster 页绑了端口却不按行为处理」。
+	warnBindingPortMismatch(clu, sipPorts)
 
 	// 通话链路常态落库：定期把会话+事件刷到 mock_trace_*。
 	go traceFlushLoop(repo, bus)
@@ -132,6 +135,31 @@ func main() {
 	logrus.Infof("hermes-mock HTTP on %s | SIP %s:%v/%s", addr, cfg.SIPListenIP, sipPorts, cfg.SIPTransport)
 	if err := r.Run(addr); err != nil {
 		logrus.Fatal(err)
+	}
+}
+
+// warnBindingPortMismatch 启动期对账：cluster 端口绑定 ↔ 实际 SIP 监听端口。
+//   - 死绑定：绑定的端口 mock 根本没监听 → 该绑定永不生效（来话进不到这个端口）。
+//   - 未绑定监听口：该端口有来话时会回退按号段/默认兜底，而非某条端口绑定的行为。
+//
+// 这是「在 cluster 页绑了端口却不按绑定行为处理」的头号原因，启动时直接点出来。
+func warnBindingPortMismatch(clu *cluster.Store, listenPorts []int) {
+	listening := make(map[int]bool, len(listenPorts))
+	for _, p := range listenPorts {
+		listening[p] = true
+	}
+	bound := make(map[int]bool)
+	for _, p := range clu.BoundPorts() {
+		bound[p] = true
+		if !listening[p] {
+			logrus.Warnf("⚠️ 端口绑定 %d 不在 SIP 监听端口 %v 中——该绑定不生效（mock 未监听此端口）。"+
+				"请把该端口加入 SIP_LISTEN_PORTS，或改绑到已监听的端口", p, listenPorts)
+		}
+	}
+	for _, p := range listenPorts {
+		if !bound[p] {
+			logrus.Infof("ℹ️ SIP 监听端口 %d 未配置 cluster 端口绑定——该端口来话将回退按号段/默认兜底（非端口绑定行为）", p)
+		}
 	}
 }
 

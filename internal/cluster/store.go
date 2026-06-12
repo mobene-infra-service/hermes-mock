@@ -257,6 +257,28 @@ func (s *Store) ListBindings() []LineBinding {
 	return values(s.bindings)
 }
 
+// HasBinding 报告某入口端口是否配置了**启用**的绑定。
+// 用于区分「该端口无绑定 → 回退按号解析」与「该端口已绑定 → 绑定权威」，避免端口绑定被号段静默覆盖。
+func (s *Store) HasBinding(listenPort int) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	b := s.bindings[listenPort]
+	return b != nil && b.Enabled != 0
+}
+
+// BoundPorts 返回所有**启用**绑定的入口端口（启动期与实际 SIP 监听端口比对，发现死绑定/未绑定监听口）。
+func (s *Store) BoundPorts() []int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]int, 0, len(s.bindings))
+	for port, b := range s.bindings {
+		if b != nil && b.Enabled != 0 {
+			out = append(out, port)
+		}
+	}
+	return out
+}
+
 func values[K comparable, T any](m map[K]*T) []T {
 	out := make([]T, 0, len(m))
 	for _, v := range m {

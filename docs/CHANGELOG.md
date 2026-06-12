@@ -5,6 +5,13 @@
 
 ## 2026-06-12
 
+- **修复「cluster 页绑了端口却不按绑定行为处理」+ 加诊断**（详见 [DECISIONS.md](DECISIONS.md) 2026-06-12）：
+  - 根因①**静默回退**：`sipagent.resolveRule` 端口解析返回 nil（绑定禁用/组不存在/行为档缺失）时静默 `ResolveByNumber`，可能命中**别的号段组**的行为，且无日志。根因②**死绑定**：`UpsertBinding` 不校验端口是否在实际 SIP 监听端口（`SIP_LISTEN_PORTS` 默认仅 5060）内，绑了非监听端口永不收到来话。
+  - **端口绑定权威化**：入口端口有启用绑定 → 只按绑定客户组(+个例)解析；组/行为档缺失则默认兜底 + WARN，不再串到别的组；端口无绑定才回退按号。
+  - **可见性**：`resolveRule` 每通记录解析来源（`port-binding`/`number`，未命中/缺失 WARN 带排查提示）；新增 `Store.HasBinding/BoundPorts`。
+  - **启动期对账**：`warnBindingPortMismatch` 比对绑定端口↔监听端口，警告死绑定 / 提示未绑定监听口。
+  - **解析预览诊断**：`/cluster/resolve` 返回 `source`+`note`（端口未绑定→回退按号 / 已绑定但组缺失 / 端口不在监听端口→死绑定），cluster 页预览直接可见。
+  - 验证：`go build`/`go vet`/`go test ./internal/{cluster,sipagent,api}` 全绿（新增 `TestHasBindingAndBoundPorts`）；`tsc` 通过。**端到端待本地栈**。
 - **群呼坐席分配下拉就绪标记 + TTS 名称展示加固 + 期望WS坐席说明**（群呼表单后续打磨）：
   - **坐席号下拉「就绪」标记 + 排序**：新增跨页轻量 store `hooks/useReadyAgents`（`useSyncExternalStore`），常驻单例 `AgentSoftphone` 把 `sipReady` 的坐席号广播出去；`GroupCallPage` 坐席分配下拉精简为「号码 · 姓名」、用 `optionRender` 加「就绪/未就绪」Tag、**已就绪默认排前**（就绪=坐席已在「坐席外呼」页软电话上线，才能被群呼转接接听）。
   - **TTS 名称展示加固**：对照 Hermes basic `TtsVoiceDTO`（`code`/`name`/`displayName`），后端 `ListTts` 名称候选补 `displayName`/`description`、lang 候选补 `locale`/`countryCode`；前端 TTS code 已由 AutoComplete 改 Select（下拉 + 选中态均显示 `code · 名称`）。

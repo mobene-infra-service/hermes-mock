@@ -256,23 +256,54 @@ func (d *Deps) clusterResolve(c *gin.Context) {
 	line := c.Query("line")
 	listenPort := c.Query("listenPort")
 	var res *cluster.Resolved
+	source := "number"
+	var note string
 	if listenPort != "" {
 		port, err := strconv.Atoi(listenPort)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		res = d.Cluster.ResolveByPort(port, number)
+		// 对齐 SIP 运行时语义：端口有启用绑定 → 绑定权威；端口无绑定 → 运行时会回退按号/默认（这里点明）。
+		if d.Cluster.HasBinding(port) {
+			source = "port-binding"
+			res = d.Cluster.ResolveByPort(port, number)
+			if res == nil || res.Profile == nil {
+				note = "端口已绑定但客户组/行为档缺失，运行时回退默认兜底（检查组是否存在、组 behaviorCode 是否有效）"
+			}
+		} else {
+			source = "number-fallback"
+			res = d.Cluster.ResolveByNumber(number)
+			note = "该端口未配置启用绑定，运行时按号段/默认兜底解析（非端口绑定行为）"
+		}
+		// 死绑定提示：端口不在实际 SIP 监听端口中 → 该端口根本收不到来话。
+		if ports, err := d.Cfg.ListenPorts(); err == nil {
+			listened := false
+			for _, p := range ports {
+				if p == port {
+					listened = true
+					break
+				}
+			}
+			if !listened {
+				ps := make([]string, len(ports))
+				for i, p := range ports {
+					ps[i] = strconv.Itoa(p)
+				}
+				note = strings.TrimSpace(note + "；⚠️ 端口 " + listenPort + " 不在 SIP 监听端口 [" + strings.Join(ps, ",") + "] 中，该端口绑定不生效（mock 未监听）")
+			}
+		}
 	} else if line != "" {
+		source = "line"
 		res = d.Cluster.ResolveByLine(line, number)
 	} else {
 		res = d.Cluster.ResolveByNumber(number)
 	}
 	if res == nil {
-		c.JSON(http.StatusOK, gin.H{"matched": false})
+		c.JSON(http.StatusOK, gin.H{"matched": false, "source": source, "note": note})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"matched": true, "resolved": res})
+	c.JSON(http.StatusOK, gin.H{"matched": true, "source": source, "note": note, "resolved": res})
 }
 
 func clusterReply(c *gin.Context, out any, err error) {

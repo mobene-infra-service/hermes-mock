@@ -7,6 +7,16 @@
 
 ---
 
+## 2026-06-12 · 端口绑定权威化：命中端口绑定不再回退按号匹配别的组
+- **背景**：排查「cluster 页绑了端口却不按绑定行为处理」。`sipagent.resolveRule` 旧逻辑 `res = ResolveByPort(port); if res == nil { res = ResolveByNumber(callee) }`——只要端口解析返回 nil（绑定禁用 / 绑定的组不存在 / 组 behaviorCode 指向缺失行为档），就**静默回退**按号段匹配，可能命中**另一个**号段覆盖该号的组、用上完全不同的行为；且全程**无任何日志**。叠加 `UpsertBinding` 只校验端口 1-65535、**不校验端口是否在实际 SIP 监听端口（`SIP_LISTEN_PORTS`，默认仅 5060）内**——绑了非监听端口即「死绑定」，永不收到来话。两者合力 → 用户感知「绑定不生效/只生效一部分」。
+- **决策**：
+  1. **端口绑定权威**：入口端口有**启用**绑定时，只按该绑定客户组(+组内/全局个例)解析；命中端口但组/行为档缺失 → **默认兜底 + WARN**，不再静默串到别的组（对齐 STATUS「listenPort→customer_group 决定行为」的本意）。端口**无**绑定才回退按号段/个例。
+  2. **可见性**：`resolveRule` 每通记录解析来源（`port-binding`/`number` Info；未命中/缺失 WARN，提示具体排查点）。新增 `Store.HasBinding/BoundPorts`。
+  3. **启动期对账**：`warnBindingPortMismatch` 比对绑定端口 ↔ 实际监听端口，警告死绑定（绑了没监听的口）、提示未绑定监听口（走号段/默认兜底）。
+  4. **解析预览诊断**：`/cluster/resolve` 返回 `source`+`note`，点明「端口未绑定→运行时回退按号/默认」「端口已绑定但组缺失」「端口不在监听端口→死绑定」，cluster 页预览直接可见。
+- **影响**：`sipagent/agent.go`（resolveRule）、`cluster/store.go`（HasBinding/BoundPorts）、`cmd/main.go`（启动对账）、`api/api.go`（clusterResolve 诊断）、`web/src/api.ts`（类型）。语义变更：以前「绑定的组行为档缺失」会串到别的组，现在改为默认兜底——更可预期，但依赖「绑定+号段双命中」旧巧合行为的用例需复核。
+- **状态**：`go build`/`go vet`/`go test ./internal/{cluster,sipagent,api}` 全绿（新增 `TestHasBindingAndBoundPorts`）；`tsc` 通过。**端到端待本地栈**（确认启动告警 + 每通解析来源日志 + 绑定行为生效）。
+
 ## 2026-06-11 · 群呼 createAndImport 即自动拨号，移除多余 start；补任务暂停/取消 API
 - **背景**：审查 `CALL-FLOWS.md` 时发现 `orchestrator.RunCallCenterTask` 在 `createAndImport` 后默认再调 `status/start/{taskCode}`，并用 `if strings.Contains(err, "Task status is incorrect") { return nil }` 吞掉错误。比对 Hermes 真实源码：
   - `TaskOpenApiController.createTaskAndImportNumber`：注释「创建任务并导入号码**(可选)**」；末尾直接 `NotifyDialJob.runJob(...)` 异步拨号；`createTask` 内 `status = determineCurrentStatusByDate(...)`（startDate≤今天≤endDate 即 `IN_PROGRESS`）。

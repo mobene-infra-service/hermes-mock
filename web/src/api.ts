@@ -200,7 +200,7 @@ export const deleteProfile = (code: string) => delJSON(`/cluster/profiles/${enco
 export const deleteGroup = (code: string) => delJSON(`/cluster/groups/${encodeURIComponent(code)}`)
 export const deleteOverride = (number: string) => delJSON(`/cluster/overrides/${encodeURIComponent(number)}`)
 export const deleteBinding = (listenPort: number) => delJSON(`/cluster/bindings/${encodeURIComponent(String(listenPort))}`)
-export async function clusterResolve(number: string, listenPort?: number): Promise<{ matched: boolean; resolved?: { groupCode: string; profile: BehaviorProfile; disabled: boolean } }> {
+export async function clusterResolve(number: string, listenPort?: number): Promise<{ matched: boolean; source?: string; note?: string; resolved?: { groupCode: string; profile: BehaviorProfile; disabled: boolean } }> {
   const q = new URLSearchParams({ number, ...(listenPort ? { listenPort: String(listenPort) } : {}) })
   return getJSON(`/cluster/resolve?${q}`)
 }

@@ -92,6 +92,30 @@ func TestResolveByPortSeparatesSameNumberAcrossGroups(t *testing.T) {
 	}
 }
 
+// TestHasBindingAndBoundPorts 校验端口绑定的存在性判定（绑定权威解析、启动期对账的基础）：
+// 只认**启用**绑定；disabled 绑定视为无绑定（运行时回退按号/默认，而非端口绑定行为）。
+func TestHasBindingAndBoundPorts(t *testing.T) {
+	s := NewMemory()
+	s.UpsertProfile(BehaviorProfile{Code: "ans", Outcome: "ANSWER", AnswerRatio: 100})
+	s.UpsertGroup(CustomerGroup{Code: "gA", NumberStart: 100, Count: 10, BehaviorCode: "ans", State: "ENABLED"})
+	s.UpsertBinding(LineBinding{ListenPort: 5060, GroupCode: "gA", Enabled: 1})
+	s.UpsertBinding(LineBinding{ListenPort: 5061, GroupCode: "gA", Enabled: 0}) // 禁用
+
+	if !s.HasBinding(5060) {
+		t.Error("5060 启用绑定应判定为有绑定")
+	}
+	if s.HasBinding(5061) {
+		t.Error("5061 禁用绑定应判定为无绑定（回退按号）")
+	}
+	if s.HasBinding(5062) {
+		t.Error("5062 无绑定")
+	}
+	bound := s.BoundPorts()
+	if len(bound) != 1 || bound[0] != 5060 {
+		t.Errorf("BoundPorts 应只含启用端口 [5060]，got %v", bound)
+	}
+}
+
 func TestResolveByLineName(t *testing.T) {
 	s := NewMemory()
 	s.UpsertProfile(BehaviorProfile{Code: "ans", Outcome: "ANSWER", AnswerRatio: 100})
