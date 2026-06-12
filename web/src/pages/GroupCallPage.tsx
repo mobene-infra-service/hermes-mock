@@ -153,7 +153,7 @@ export default function GroupCallPage() {
       })
       setCcRun(r)
       setRestored(false)
-      message[r.ok ? 'success' : 'error'](r.ok ? '群呼任务已观测到客户腿' : '群呼任务未通过')
+      message[r.ok ? 'success' : 'error'](r.ok ? '群呼任务已创建并自动拨号，下方实时观测客户腿/坐席腿进展' : '群呼任务创建失败')
     } catch (e) {
       message.error(String(e))
     } finally {

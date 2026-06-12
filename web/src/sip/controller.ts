@@ -9,6 +9,22 @@ import { message } from 'antd'
 import md5 from 'blueimp-md5'
 import { setAgentToken, clearAgentToken } from './request'
 
+// hermes-ws 工作台推送的消息 action 常量（集中声明，消灭散落字符串）。
+export const WsAction = {
+  Auth: 'auth',                         // 登录成功，下发 token/rtpengineId
+  Status: 'status',                     // 坐席工作状态变更（带时间戳去重）
+  NumberInfo: 'numberInfo',             // 号码/回拨信息
+  Ping: 'ping',                         // 服务端心跳探测（回 pong）
+  Kick: 'kick',                         // 坐席被踢（同号他处登录等）
+  GroupCallNotify: 'groupCallNotify',   // 群呼任务/号码进度推送（type 1/2/3/4）
+  PongTimeOut: 'PongTimeOut',           // 心跳超时
+  CurrentCallUuid: 'currentCallUuid',   // 本通业务 callUuid/callType/客户号（mock 据此关联 hermes 侧 callId 做断言）
+  VoicemailNotify: 'voicemailNotify',   // 转语音信箱通知
+  CallTrace: 'callTrace',               // 实时对话/通话轨迹（ASR）
+  IncomingRouting: 'incomingRouting',   // 来电路由信息
+  WarpUpTimeNotify: 'warpUpTimeNotify', // 话后整理时长（注意服务端拼写为 warp）
+} as const
+
 export interface SipControllerParams {
   proto?: boolean
   host?: string
@@ -19,6 +35,7 @@ export interface SipControllerParams {
   statusListener?: (v: number) => void
   callbackInfo?: (v: unknown) => void
   groupCallNotify?: (v: unknown) => void
+  callLinkInfo?: (v: unknown) => void // currentCallUuid：hermes 下发本通 callUuid/callType/客户号
   otherEvent?: (v: unknown) => void
   onOpenHook?: () => void // 工作台 WS 物理连上（尚未登录）——用于细化连接阶段态
   loginHook?: () => void // 收到 auth（登录成功）——只在首次触发，避免重复 auth 重建实例
@@ -53,6 +70,7 @@ class SipController {
   private statusListener?: (v: number) => void
   private callbackInfo?: (v: unknown) => void
   private groupCallNotify?: (v: unknown) => void
+  private callLinkInfo?: (v: unknown) => void
   private otherEvent?: (v: unknown) => void
   private onOpenHook?: () => void
   private loginHook?: () => void
@@ -67,6 +85,7 @@ class SipController {
     this.statusListener = params.statusListener
     this.callbackInfo = params.callbackInfo
     this.groupCallNotify = params.groupCallNotify
+    this.callLinkInfo = params.callLinkInfo
     this.otherEvent = params.otherEvent
     this.onOpenHook = params.onOpenHook
     this.loginHook = params.loginHook
@@ -106,60 +125,69 @@ class SipController {
       } catch {
         return
       }
-      if (res?.action === 'auth' && res?.content) {
-        const c = res.content as { token?: string; refreshToken?: string; expireAt?: number; rtpengineId?: string }
-        this.auth.token = c.token || ''
-        this.auth.refreshToken = c.refreshToken || ''
-        this.auth.expireAt = c.expireAt || 0
-        setAgentToken(this.loginInfo.username, this.auth.token) // SDK REST 鉴权（authorization 头）
-        this.rtpId = c.rtpengineId || ''
-        // 仅在首次登录成功时触发 loginHook：hermes-ws 在 token 刷新/重连时可能重发 auth，
-        // 若每次都触发会重复 new SipCall、旧 UA/socket 泄漏 + 信令打架。
-        const firstAuth = !this.loginStatus
-        this.loginStatus = true
-        if (firstAuth) this.loginHook?.()
-        return
-      }
-      if (res?.action === 'status') {
-        if (!res?.timestamp) return
-        const content = res.content as number
-        if (this.beforeStatusTimestamp) {
-          if (Number(this.beforeStatusTimestamp.timestamp) < Number(res.timestamp)) {
+      if (!res?.action) return
+      switch (res.action) {
+        case WsAction.Auth: {
+          if (!res.content) return
+          const c = res.content as { token?: string; refreshToken?: string; expireAt?: number; rtpengineId?: string }
+          this.auth.token = c.token || ''
+          this.auth.refreshToken = c.refreshToken || ''
+          this.auth.expireAt = c.expireAt || 0
+          setAgentToken(this.loginInfo.username, this.auth.token) // SDK REST 鉴权（authorization 头）
+          this.rtpId = c.rtpengineId || ''
+          // 仅在首次登录成功时触发 loginHook：hermes-ws 在 token 刷新/重连时可能重发 auth，
+          // 若每次都触发会重复 new SipCall、旧 UA/socket 泄漏 + 信令打架。
+          const firstAuth = !this.loginStatus
+          this.loginStatus = true
+          if (firstAuth) this.loginHook?.()
+          return
+        }
+        case WsAction.Status: {
+          if (!res?.timestamp) return
+          const content = res.content as number
+          if (this.beforeStatusTimestamp) {
+            if (Number(this.beforeStatusTimestamp.timestamp) < Number(res.timestamp)) {
+              this.beforeStatusTimestamp = { timestamp: res.timestamp, content }
+              this.agentStatus = content
+              this.statusListener?.(content)
+            } else {
+              this.statusListener?.(this.beforeStatusTimestamp.content as number)
+            }
+          } else {
             this.beforeStatusTimestamp = { timestamp: res.timestamp, content }
             this.agentStatus = content
             this.statusListener?.(content)
-          } else {
-            this.statusListener?.(this.beforeStatusTimestamp.content as number)
           }
-        } else {
-          this.beforeStatusTimestamp = { timestamp: res.timestamp, content }
-          this.agentStatus = content
-          this.statusListener?.(content)
+          return
         }
-        return
+        case WsAction.NumberInfo:
+          this.callbackInfo?.(res.content)
+          return
+        case WsAction.Ping:
+          this.client?.send(JSON.stringify({ action: 'pong' }))
+          return
+        case WsAction.Kick:
+          this.client?.close()
+          this.kick?.(typeof res.msg === 'string' ? res.msg : undefined)
+          return
+        case WsAction.GroupCallNotify:
+          this.groupCallNotify?.(res.content)
+          return
+        case WsAction.CurrentCallUuid:
+          this.callLinkInfo?.(res.content) // 本通业务 callUuid/callType/客户号 → 关联 hermes 侧 callId
+          return
+        case WsAction.PongTimeOut:
+          message.error('工作台连接超时')
+          return
+        // 其余已知但 mock 暂不专门消费的 action（语音信箱/轨迹/路由/整理时长）显式列出，统一透传 otherEvent，
+        // 避免像参考实现那样塞进一个桶后再到组件里拆。要消费时给上面任一加专用回调即可。
+        case WsAction.VoicemailNotify:
+        case WsAction.CallTrace:
+        case WsAction.IncomingRouting:
+        case WsAction.WarpUpTimeNotify:
+        default:
+          this.otherEvent?.(res)
       }
-      if (res?.action === 'numberInfo') {
-        this.callbackInfo?.(res.content)
-        return
-      }
-      if (res?.action === 'ping') {
-        this.client?.send(JSON.stringify({ action: 'pong' }))
-        return
-      }
-      if (res?.action === 'kick') {
-        this.client?.close()
-        this.kick?.(typeof res.msg === 'string' ? res.msg : undefined)
-        return
-      }
-      if (res?.action === 'groupCallNotify') {
-        this.groupCallNotify?.(res.content)
-        return
-      }
-      if (res?.action === 'PongTimeOut') {
-        message.error('工作台连接超时')
-        return
-      }
-      if (res?.action) this.otherEvent?.(res)
     }
     this.client.onclose = (event) => {
       console.log('工作台 WS 已关闭', event.code, event.reason)

@@ -365,7 +365,7 @@ type CallCenterTaskParams struct {
 	DialTimePeriod           []string `json:"dialTimePeriod"`
 	// LineType 线路类型（Hermes 7cbb285：任务期间仅用该 type 线路选号；空=默认 base）。
 	LineType string `json:"lineType"`
-	WaitSec  int    `json:"waitSec"` // 观测腿的最长秒（默认 90，预测式拨号按 Quartz 分钟级调度）
+	WaitSec  int    `json:"waitSec"` // 已不再同步等待（建任务即返回，客户腿/坐席腿进展交前端轮询）；保留字段兼容前端传参
 }
 
 // toReq 把测试用例参数装配成 Hermes 群呼请求（号码已在调用前 resolve 好）。
@@ -393,9 +393,6 @@ func (k *Kit) RunCallCenterTaskObserved(p CallCenterTaskParams) Run {
 	if k.orch == nil {
 		r.Steps = append(r.Steps, Step{Name: "校验", OK: false, Detail: "业务编排器未注入（先到「机构」页配置 call-center 地址）"})
 		return k.finish(r, start)
-	}
-	if p.WaitSec <= 0 {
-		p.WaitSec = 90
 	}
 	p.Numbers = k.resolveCustomerNumbers(p.CustomerGroup, p.Numbers, p.CustomerLimit, 20)
 	if len(p.Numbers) == 0 {
@@ -425,55 +422,14 @@ func (k *Kit) RunCallCenterTaskObserved(p CallCenterTaskParams) Run {
 	}
 	r.Steps = append(r.Steps, Step{Name: "创建群呼任务（即自动拨号）", OK: true, Detail: "Hermes 已受理：" + clip(string(out), 160)})
 
-	// Step 2: 断言客户腿接通（任一导入号被预测式拨到 mock 且 INVITE 200 OK）
-	if hit, ev := k.waitAnyLegInviteOK(start, p.Numbers, time.Duration(p.WaitSec)*time.Second); !ev.Answered {
-		r.Steps = append(r.Steps, Step{Name: "断言 客户腿接通", OK: false,
-			Detail: fmt.Sprintf("%ds 内未观测到任一客户号 %v 的 INVITE 200 OK（%s）", p.WaitSec, p.Numbers, ev.Detail)})
-		r.Calls = k.callViewsForCustomers(start, p.Numbers, "callcenter-task", p.ObserveAgent, strings.Join(p.AgentGroups, ","))
-		return k.finish(r, start)
-	} else {
-		r.Steps = append(r.Steps, Step{Name: "断言 客户腿接通", OK: true, Detail: hit + " " + ev.Detail})
-	}
-
-	// Step 3: 断言坐席腿接通（群呼客户接通后转接坐席）。坐席腿走 FS↔浏览器 jssip，不经 mock SIP，
-	// 故由前端坐席软电话回存的 agent-inbound 记录观测。标 Optional：本地 RTP/转坐席链路常走不通，
-	// 不计入 run 总体 ok（仅展示坐席侧是否接通），避免本地环境把整条 run 判失败。
-	// 只做短观测（12s）拿即时快照；后续进展由群呼页前端轮询 agent-inbound 记录实时更新。
-	seatAns, seatAgent, seatDetail := k.waitSeatTransferAnswered(start, p.AgentGroups, 12*time.Second)
-	r.Steps = append(r.Steps, Step{Name: "断言 坐席腿接通", OK: seatAns, Optional: true, Detail: seatDetail})
-	if seatAns {
-		r.Artifacts["seatAnswered"] = seatAgent
-	}
-
+	// 群呼是 call-center 预测式分钟级调度（Quartz）：客户腿/坐席腿要数十秒才陆续被拨到。
+	// 不在 HTTP 内同步长等（旧实现阻塞 WaitSec=90s + 转坐席 12s，导致建任务接口很慢）——
+	// 改为「建任务即返回」+ 当前即时快照（callViewsForCustomers 非阻塞地查此刻已进来的腿）；
+	// 后续进展由前端 GroupCallPage 的 liveCalls（每 3s 轮询被叫/agent-inbound 记录）实时补齐。
 	r.Calls = k.callViewsForCustomers(start, p.Numbers, "callcenter-task", p.ObserveAgent, strings.Join(p.AgentGroups, ","))
+	r.Steps = append(r.Steps, Step{Name: "观测 客户腿/坐席腿", OK: true, Optional: true,
+		Detail: "任务已受理并自动拨号；客户腿/坐席腿进展由群呼页实时轮询观测（预测式分钟级调度，无需同步等待）"})
 	return k.finish(r, start)
-}
-
-// waitSeatTransferAnswered 在 start 之后观测「坐席被转接接通」：查前端坐席软电话回存的 agent-inbound 记录
-// （scenario=agent-inbound、ANSWERED）。本地坐席腿不经 mock SIP，故只能靠前端回存的记录判定。
-func (k *Kit) waitSeatTransferAnswered(start time.Time, agentGroups []string, timeout time.Duration) (bool, string, string) {
-	if k.repo == nil {
-		return false, "", "无持久化，无法观测坐席侧（需 DB）"
-	}
-	deadline := time.Now().Add(timeout)
-	from := start.Add(-2 * time.Second)
-	for time.Now().Before(deadline) {
-		ctx, cancel := dbCtx()
-		recs, _, err := k.repo.ListCallRecords(ctx, cluster.CallRecordFilter{Scenario: "agent-inbound", PageSize: 20})
-		cancel()
-		if err == nil {
-			for _, rec := range recs {
-				if rec.StartedAt.Before(from) {
-					continue
-				}
-				if rec.Status == cluster.CallRecordStatusEnded || rec.Status == cluster.CallRecordStatusAnswered {
-					return true, rec.AgentNumber, fmt.Sprintf("坐席 %s 接听了转接来电（agent-inbound 记录）", rec.AgentNumber)
-				}
-			}
-		}
-		time.Sleep(800 * time.Millisecond)
-	}
-	return false, "", "未观测到坐席被转接接通（坐席软电话需在线就绪；本地 RTP/转坐席链路常走不通——属已知限制，不计入 run 成败）"
 }
 
 // ---- 换线重试观测（Hermes 2026-06：47bf482 usedSet 按 lineCode / b90673c channelUuid 隔离）----

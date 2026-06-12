@@ -84,6 +84,10 @@ const DEFAULT_RULE: AnswerRule = { enabled: false, ringSec: 2, action: 'answer',
 
 const traceDir: Record<string, string> = { IN: '入', OUT: '出', '-': '·' }
 function msText(ms?: number) { return !ms || ms < 0 ? '-' : `${(ms / 1000).toFixed(1)}s` }
+// wsBrief 把 hermes-ws 推送内容压成短字符串（截断），用于日志展示。
+function wsBrief(v: unknown): string {
+  try { const s = typeof v === 'string' ? v : JSON.stringify(v); return s.length > 120 ? `${s.slice(0, 120)}…` : s } catch { return String(v) }
+}
 function shortId(s?: string) { return s ? (s.length > 18 ? `${s.slice(0, 18)}…` : s) : '-' }
 function hdr(headers: { name: string; value: string }[] | undefined, name: string) {
   return headers?.find((h) => h.name.toLowerCase() === name.toLowerCase())?.value || ''
@@ -373,7 +377,15 @@ const SoftphoneCard = forwardRef<CardHandle, {
         port: location.port || (location.protocol === 'https:' ? '443' : '80'),
         username: num, password,
         statusListener: (s: number) => setAgentStatus(s),
-        callbackInfo: () => {}, groupCallNotify: () => {}, otherEvent: () => {},
+        // hermes-ws 推送的非状态消息：有业务价值的进卡片日志，噪音进 console.debug（避免刷前端 UI）。
+        groupCallNotify: (v) => pushLog('群呼进度：' + wsBrief(v)),
+        callLinkInfo: (v) => {
+          // currentCallUuid：hermes 主动下发本通业务 callUuid/callType/客户号——联调时确认 hermes 侧 callId、为关联断言铺路。
+          const info = (v || {}) as { callUuid?: string; callType?: string; customerNumber?: string; number?: string }
+          pushLog(`hermes 通话下发：callUuid=${info.callUuid || '?'} type=${info.callType || '?'}${info.customerNumber || info.number ? ' 客户=' + (info.customerNumber || info.number) : ''}`)
+        },
+        callbackInfo: (v) => console.debug('[ws] numberInfo', v),
+        otherEvent: (v) => console.debug('[ws] other', v),
         kick: (msg?: string) => {
           message.warning(`坐席 ${num} 被踢下线${msg ? `：${msg}` : '（同号在别处登录）'}`); disconnect()
         },

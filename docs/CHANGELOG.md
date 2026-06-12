@@ -5,6 +5,10 @@
 
 ## 2026-06-12
 
+- **`/tests/callcenter-task` 由同步长轮询改为「建任务即返回」**：原 `RunCallCenterTaskObserved` 建任务后在 HTTP 内同步阻塞 `waitAnyLegInviteOK(WaitSec=90s)` + 转坐席 `waitSeatTransferAnswered(12s)`，群呼是预测式分钟级调度故接口最坏挂 ~102s。改为建任务+启动后立即返回 + 当前即时快照（`callViewsForCustomers` 非阻塞查此刻已进来的腿）；客户腿/坐席腿进展由前端 `GroupCallPage` 已有的 `liveCalls`（每 3s 轮询）实时补。删孤儿 `waitSeatTransferAnswered`、`CallCenterTaskParams.WaitSec` 默认 90s（字段保留兼容前端）；前端 toast 文案改「已创建并自动拨号」。`go build`/`go test` 全绿。
+- **整理 hermes-ws 工作台消息处理（参考 org-management-temp）**：对照真实工作台前端确认 mock `controller.ts` 分发层本已对齐，真正问题是 `AgentSoftphone.tsx` 把 `groupCallNotify`/`callbackInfo`/`otherEvent` 全置空 no-op、hermes-ws 推的非状态消息被静默丢弃。整改：① controller 抽 `WsAction` 常量、`onmessage` 的 if 链重构为 `switch`、新增 `callLinkInfo` 专用回调接 `currentCallUuid`（hermes 下发本通业务 callUuid/callType/客户号）、显式列出 voicemailNotify/callTrace/incomingRouting/warpUpTimeNotify 等已知 action（统一透传 otherEvent，备扩展）；② AgentSoftphone 接住 `groupCallNotify`（群呼进度）+ `callLinkInfo`（hermes callUuid，联调可见、为关联断言铺路）进卡片日志，`numberInfo`/`otherEvent` 噪音降到 `console.debug`（不刷前端 UI）。避开了 org 自身的 incomingRouting bug。前端因本机无 node_modules 未跑 tsc。
+- **批量坐席上线优化**：① `getSipWebrtcAddr` 改 single-flight 缓存（N 坐席共享一次 `/agent/webrtc/addr` 请求/结果，机构切换经 `resetSipWebrtcAddrCache` 失效）；② 前端 `markSipReady` 保活定时器从固定 `setInterval(30s)` 改自调度 `setTimeout` + 随机首相位，避免多坐席同秒爆发；③ 反代 `/public/auth/sip` 保活心跳成功降 Debug（失败仍 Warn/Error 不隐藏）。
+
 - **修复「cluster 页绑了端口却不按绑定行为处理」+ 加诊断**（详见 [DECISIONS.md](DECISIONS.md) 2026-06-12）：
   - 根因①**静默回退**：`sipagent.resolveRule` 端口解析返回 nil（绑定禁用/组不存在/行为档缺失）时静默 `ResolveByNumber`，可能命中**别的号段组**的行为，且无日志。根因②**死绑定**：`UpsertBinding` 不校验端口是否在实际 SIP 监听端口（`SIP_LISTEN_PORTS` 默认仅 5060）内，绑了非监听端口永不收到来话。
   - **端口绑定权威化**：入口端口有启用绑定 → 只按绑定客户组(+个例)解析；组/行为档缺失则默认兜底 + WARN，不再串到别的组；端口无绑定才回退按号。
