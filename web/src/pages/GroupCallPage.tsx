@@ -3,7 +3,7 @@ import {
   AutoComplete, Button, Card, Col, Collapse, Form, Input, InputNumber, Radio, Row, Select, Space, Switch, Tag, Typography, message,
 } from 'antd'
 import { ScenarioHeader } from '../components/scenario/ScenarioHeader'
-import { CallBoard, RunSteps, ScenarioSummary, callsOf, parseList } from '../components/scenario/utils'
+import { CallBoard, RunSteps, callsOf, parseList } from '../components/scenario/utils'
 import ScenarioRecords from '../components/scenario/ScenarioRecords'
 import { useScenarioMeta } from '../hooks/useScenarioMeta'
 import { useReadyAgents } from '../hooks/useReadyAgents'
@@ -473,7 +473,21 @@ export default function GroupCallPage() {
               ↓ 上次群呼结果（run {ccRun.id} · {new Date(ccRun.startedAt).toLocaleString()}）——切页/刷新后从历史回填，点「创建并启动」发起新任务
             </Text>
           )}
-          <ScenarioSummary run={ccRun} />
+          {ccRun && (() => {
+            // 群呼是异步预测式拨号，不是「同步用例出 N 个通过/失败」。统计基于真实被叫腿（liveCalls 轮询 sip-inbound
+            // 匹配本次客户号）的实时状态，而非 run.ok×占位数（那会一创建就假「通过10」）。
+            const cs = liveCalls || callsOf(ccRun)
+            const answered = cs.filter((c) => c.status === 'OBSERVED' || c.status === 'CONNECTED').length
+            return (
+              <div style={{ marginTop: 16, padding: 12, border: '1px solid #f0f0f0', borderRadius: 6, background: '#fff' }}>
+                <Space size="large" wrap>
+                  <span>取号 <b style={{ fontSize: 18 }}>{cs.length}</b></span>
+                  <span style={{ color: '#3f8600' }}>已接入(被叫腿) <b style={{ fontSize: 18 }}>{answered}</b></span>
+                  <Text type="secondary" style={{ fontSize: 12 }}>群呼为异步预测式分批拨号，进度以被叫腿实时观测为准（每 3s 刷新），非「通过/失败」用例结果</Text>
+                </Space>
+              </div>
+            )
+          })()}
           {taskCode && (
             <Card size="small" style={{ marginTop: 8 }} styles={{ body: { padding: '8px 12px' } }}>
               <Space wrap size="small">
@@ -491,12 +505,20 @@ export default function GroupCallPage() {
               通话状态每 3s 自动刷新（预测式分批拨号，客户腿/坐席腿接通进展实时更新）
             </Text>
           ) : null}
-          <CallBoard calls={liveCalls || callsOf(ccRun)} />
+          <div style={{ maxHeight: 460, overflowY: 'auto' }}>
+            <CallBoard calls={liveCalls || callsOf(ccRun)} />
+          </div>
           <RunSteps run={ccRun} />
         </Col>
       </Row>
 
-      <ScenarioRecords scenario="callcenter-task" caseKinds={['callcenter-task']} title="群呼通话记录 / 测试历史" />
+      <ScenarioRecords
+        scenario="sip-inbound"
+        filterCustomers={(ccRun?.artifacts?.customerNumbers as string[] | undefined) || undefined}
+        sinceMs={ccRun ? new Date(ccRun.startedAt).getTime() : undefined}
+        caseKinds={['callcenter-task']}
+        title="本次群呼·被叫腿通话记录 / 测试历史"
+      />
     </div>
   )
 }

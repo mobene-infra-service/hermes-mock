@@ -197,6 +197,11 @@ func (k *Kit) persistCallRecords(r Run, started time.Time) {
 	ctx, cancel := dbCtx()
 	defer cancel()
 	for _, c := range r.Calls {
+		// 只落「已观测到结果」的通话。未观测的占位（如群呼建任务即返回时的客户号占位，status=PENDING）不落库——
+		// 群呼是异步预测式拨号，真实通话由被叫腿 sip-inbound 记录承载；落假占位会污染记录表（且占位 record_id 撞，数量也不对）。
+		if c.Status == "" || c.Status == "PENDING" {
+			continue
+		}
 		row := callRecordFromRunCall(r, c, started, string(steps))
 		_ = k.repo.SaveCallRecord(ctx, &row)
 	}
@@ -402,6 +407,7 @@ func (k *Kit) RunCallCenterTaskObserved(p CallCenterTaskParams) Run {
 	sess := k.bus.OpenSession("test", "群呼任务 "+p.Name)
 	r.TraceID = sess
 	r.Artifacts["numbers"] = len(p.Numbers)
+	r.Artifacts["customerNumbers"] = p.Numbers // 本次导入的客户号——前端据此 + run 起始时间精确关联真实被叫腿(sip-inbound)
 	r.Artifacts["agentGroups"] = p.AgentGroups
 	r.Artifacts["customerGroup"] = p.CustomerGroup
 	r.Artifacts["taskName"] = p.Name

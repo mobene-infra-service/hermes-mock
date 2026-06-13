@@ -66,10 +66,12 @@ func (t *Tracker) save(row entity.MockCall) {
 }
 
 // Start 登记一通新通话（被叫腿 RINGING），返回 record id。
-// callUUID 为 Hermes 业务 callUuid（被叫腿 INVITE 的 X-CALL-UUID 提取，由 sipagent 传入）：
+// callUUID 为 Hermes 业务 callUuid（被叫腿 INVITE 的 X-CALL-UUID/x-session-id 提取，由 sipagent 传入）：
 // 用作 record_id 主键，使本记录与同一通话的 trace 会话（同 call_uuid）天然关联，
 // 也让 INVITE 重传/同一通话多次落库幂等合并到一行（根除「一通电话多条记录」）。空则回退随机 uuid。
-func (t *Tracker) Start(callUUID, callee, caller, outcome string) string {
+// businessID 为被叫腿 INVITE 的 X-JBusinessId/x-business_id（发起业务的 businessId，可空）：存 task_code，
+// 让前端把被叫腿精确关联到发起它的业务（坐席外呼/群呼任务）。
+func (t *Tracker) Start(callUUID, businessID, callee, caller, outcome string) string {
 	id := callUUID
 	if id == "" {
 		id = uuid.NewString()
@@ -83,6 +85,7 @@ func (t *Tracker) Start(callUUID, callee, caller, outcome string) string {
 			Status:    entity.CallRecordStatusRinging,
 			Direction: "HERMES_TO_MOCK", StartedAt: now, LastEventAt: now,
 			CallUUID:   callUUID,
+			TaskCode:   businessID, // 关联键：发起业务的 businessId（X-JBusinessId/x-business_id）
 			DetailJSON: string(detail),
 		})
 		return id

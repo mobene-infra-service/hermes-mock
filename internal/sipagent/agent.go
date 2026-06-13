@@ -160,11 +160,12 @@ func (a *Agent) handleInbound(in *diago.DialogServerSession) {
 	// 既作 trace 会话聚合键（与传输层 tracer 一致），又作 call_record 主键（被叫腿记录与 trace 同 call_uuid）。
 	leg := callee
 	callID, bizUUID := inviteAggKeys(in.InviteRequest)
+	businessID := inviteBusinessID(in.InviteRequest) // X-JBusinessId/x-business_id：被叫腿关联到发起业务（坐席外呼/群呼任务）
 	aggKey := bizUUID
 	if aggKey == "" {
 		aggKey = callID
 	}
-	id := a.tracker.Start(aggKey, callee, caller, string(rule.Outcome))
+	id := a.tracker.Start(aggKey, businessID, callee, caller, string(rule.Outcome))
 
 	// 通话链路观测：传输层 SIP tracer 已自动抓真实 INVITE/180/200/BYE。
 	// 这里附加「mock 客户腿业务决策(FLOW)」，与真实报文同会话。
@@ -770,6 +771,28 @@ func inviteAggKeys(req *sip.Request) (callID, bizUUID string) {
 		callID = cid.Value()
 	}
 	return callID, tracelog.BizUUIDFromHeaders(kv)
+}
+
+// businessIDHeaders 业务 businessId 头名（小写，大小写不敏感匹配）。被叫腿据此关联到发起它的业务：
+//   - X-JBusinessId：坐席外呼前端 jssip 注入（已抓包确认客户腿带，值=前端 param.businessId）。
+//   - x-business_id：群呼/外呼任务后端 originate 可能注入（sip_h_x-business_id 经 FS 去前缀；待群呼实测）。
+var businessIDHeaders = []string{"x-jbusinessid", "x-business_id", "x-business-id"}
+
+// inviteBusinessID 从入站 INVITE 提取 Hermes businessId（X-JBusinessId / x-business_id，大小写不敏感）。
+// 空表示该 INVITE 未带 businessId（如纯 sip-call 或群呼未设 NumberInfo.businessId）。
+func inviteBusinessID(req *sip.Request) string {
+	if req == nil {
+		return ""
+	}
+	for _, h := range req.Headers() {
+		ln := strings.ToLower(h.Name())
+		for _, want := range businessIDHeaders {
+			if ln == want && h.Value() != "" {
+				return h.Value()
+			}
+		}
+	}
+	return ""
 }
 
 // dialogCallee 取被叫号码。对照 diago v0.28.0
