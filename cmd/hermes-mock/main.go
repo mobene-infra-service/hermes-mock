@@ -11,13 +11,11 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
 
-	"hermes-mock/internal/agents"
 	"hermes-mock/internal/api"
 	"hermes-mock/internal/callbacks"
 	"hermes-mock/internal/calltrace"
 	"hermes-mock/internal/cluster"
 	"hermes-mock/internal/config"
-	"hermes-mock/internal/hermesprobe"
 	"hermes-mock/internal/model"
 	"hermes-mock/internal/orchestrator"
 	"hermes-mock/internal/orgcfg"
@@ -25,7 +23,6 @@ import (
 	"hermes-mock/internal/siptrace"
 	"hermes-mock/internal/testkit"
 	"hermes-mock/internal/tracelog"
-	"hermes-mock/internal/wsagent"
 
 	"embed"
 )
@@ -76,16 +73,13 @@ func main() {
 	// 5. 观测与编排组件
 	// 通话跟踪（被叫腿生命周期落 mock_call）
 	tracker := calltrace.New(repo)
-	// 坐席状态表（工作台 WS 在线态 + SIP 注册态 + 工作状态）
-	registry := agents.New()
 	// 通话链路事件总线（SIP/媒体/WS 统一时间线，可观测核心）
 	bus := tracelog.New()
 	// 在 sipgo 传输层注册 SIP tracer：自动捕获**所有收发的原始 SIP 报文**（含业务头），
 	// 按 Call-ID 聚合进 tracelog。必须在创建 SIP agent（建 UA/传输）之前安装。
 	siptrace.Install(bus)
-	// Hermes 栈可观测（健康端点从当前机构配置推导）+ 针对性测试编排
-	prober := hermesprobe.New(orgStore)
-	kit := testkit.New(cfg, prober, bus, clu)
+	// 针对性测试编排
+	kit := testkit.New(cfg, bus, clu)
 	kit.SetRepo(repo)
 	kit.SetOrgs(orgStore)
 	// 编排器：经 Hermes 业务 REST 触发 call-bot 任务 / 坐席操作（转接/转组/切状态）。
@@ -93,8 +87,6 @@ func main() {
 	kit.SetBizCaller(orch) // 让 testkit 能触发群呼/自动外呼任务并观测链路
 	// Hermes 回调接收（webhook）：回调地址需在 Hermes 侧配置指向 mock。
 	cbStore := callbacks.New(repo)
-	// 坐席工作台客户端：让 mock 坐席经 hermes-ws 上线 + 切状态（地址/口令从当前机构配置动态取）。
-	wsCli := wsagent.New(registry, bus, orgStore)
 
 	// 6. 启动 SIP agent（diago）：接收 FreeSWITCH 的 INVITE，按入口端口对应的客户集群行为应答（只演客户被叫腿）
 	sipPorts, err := cfg.ListenPorts()
@@ -125,8 +117,10 @@ func main() {
 	// 7. HTTP：配置后台 + REST + 前端
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
-	r.Use(gin.Recovery())
-	api.Register(r, cfg, repo, clu, tracker, prober, kit, bus, orgStore, cbStore, registry, wsCli, orch)
+	// RequestLogger 在外层：统一记录每个请求结果（含错误响应体），根治「接口报错却没日志」。
+	// Recovery 在内层：就地恢复 panic（带堆栈落 Error），恢复后外层 RequestLogger 仍能记到最终 500。
+	r.Use(api.RequestLogger(), api.Recovery())
+	api.Register(r, cfg, repo, clu, tracker, kit, bus, orgStore, cbStore, orch)
 
 	distFS, _ := fs.Sub(webDist, "web/dist")
 	api.MountFrontend(r, distFS)

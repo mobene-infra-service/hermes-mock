@@ -63,7 +63,8 @@ type Client struct {
 
 func New(cred Cred) *Client {
 	// 60s：包住 orchestrator 的 45s ctx（http 层不应先于 ctx 超时）；call-center 过载时重接口慢。
-	return &Client{cred: cred, http: &http.Client{Timeout: 60 * time.Second}}
+	// loggingTransport：统一打印每次 mock→Hermes 调用的请求/响应。
+	return &Client{cred: cred, http: &http.Client{Timeout: 60 * time.Second, Transport: &loggingTransport{}}}
 }
 
 // Resp Hermes 统一响应包络（code=0 成功）。

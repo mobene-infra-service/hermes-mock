@@ -151,7 +151,7 @@ func (f *fakeBiz) inject(numbers []string) {
 
 // finish: Optional 步骤即使失败也不拉低 run 总体 ok（坐席腿本地走不通，不应判整条 run 失败）。
 func TestFinishOptionalStepDoesNotFailRun(t *testing.T) {
-	k := New(&config.Config{}, nil, tracelog.New(), nil)
+	k := New(&config.Config{}, tracelog.New(), nil)
 	// 必做步骤全通过 + 一个失败的 Optional 步骤 → run 应仍 OK
 	r := Run{Steps: []Step{
 		{Name: "创建并启动", OK: true},
@@ -175,7 +175,7 @@ func TestFinishOptionalStepDoesNotFailRun(t *testing.T) {
 // 群呼任务用例：触发业务接口 + 观测到客户腿进 mock → 用例通过。
 func TestRunCallCenterTaskObserved(t *testing.T) {
 	bus := tracelog.New()
-	k := New(&config.Config{}, nil, bus, nil)
+	k := New(&config.Config{}, bus, nil)
 	fb := &fakeBiz{bus: bus, injectLeg: "8613800000001"}
 	k.SetBizCaller(fb)
 	r := k.RunCallCenterTaskObserved(CallCenterTaskParams{
@@ -191,7 +191,7 @@ func TestRunCallCenterTaskObserved(t *testing.T) {
 
 // 未注入业务编排器时应明确失败（不静默通过）。
 func TestRunCallCenterTaskNoBiz(t *testing.T) {
-	k := New(&config.Config{}, nil, tracelog.New(), nil)
+	k := New(&config.Config{}, tracelog.New(), nil)
 	r := k.RunCallCenterTaskObserved(CallCenterTaskParams{Name: "t", Numbers: []string{"x"}})
 	if r.OK {
 		t.Error("未注入编排器应失败")
@@ -201,7 +201,7 @@ func TestRunCallCenterTaskNoBiz(t *testing.T) {
 // 自动外呼用例：触发 + 观测客户腿。
 func TestRunAutoCallObserved(t *testing.T) {
 	bus := tracelog.New()
-	k := New(&config.Config{}, nil, bus, nil)
+	k := New(&config.Config{}, bus, nil)
 	fb := &fakeBiz{bus: bus, injectLeg: "8613900000002"}
 	k.SetBizCaller(fb)
 	r := k.RunAutoCallObserved(AutoCallParams{TemplateCode: "TPL", Numbers: []string{"8613900000002"}, WaitSec: 3})
@@ -216,7 +216,7 @@ func TestRunAutoCallObserved(t *testing.T) {
 // call-bot 任务用例：创建任务 + 观测客户腿。
 func TestRunCallBotTaskObserved(t *testing.T) {
 	bus := tracelog.New()
-	k := New(&config.Config{}, nil, bus, nil)
+	k := New(&config.Config{}, bus, nil)
 	fb := &fakeBiz{bus: bus, injectLeg: "8613900000004"}
 	k.SetBizCaller(fb)
 	r := k.RunCallBotTaskObserved(CallBotTaskParams{Name: "bot", TaskType: 2, Numbers: []string{"8613900000004"}, WaitSec: 3})
@@ -231,7 +231,7 @@ func TestRunCallBotTaskObserved(t *testing.T) {
 // OTP 用例：Hermes 下发语音验证码 + mock 观测客户腿。
 func TestRunOTPObserved(t *testing.T) {
 	bus := tracelog.New()
-	k := New(&config.Config{}, nil, bus, nil)
+	k := New(&config.Config{}, bus, nil)
 	fb := &fakeBiz{bus: bus, injectLeg: "8613900000003"}
 	k.SetBizCaller(fb)
 	r := k.RunOTPObserved(OTPParams{To: "8613900000003", TemplateCode: "OTP", WaitSec: 3})
@@ -246,7 +246,7 @@ func TestRunOTPObserved(t *testing.T) {
 // OTP 批量用例：客户组/号码展开后逐通聚合。
 func TestRunOTPBatchObserved(t *testing.T) {
 	bus := tracelog.New()
-	k := New(&config.Config{}, nil, bus, nil)
+	k := New(&config.Config{}, bus, nil)
 	fb := &fakeBiz{bus: bus, injectLeg: "8613900000005"}
 	k.SetBizCaller(fb)
 	r := k.RunOTPBatchObserved(OTPBatchParams{Numbers: []string{"8613900000005"}, TemplateCode: "OTP", WaitSec: 3})
@@ -277,7 +277,7 @@ func injectInvite(bus *tracelog.Bus, number, lineName, sipCallID, finalCode stri
 // 提取 X-Line-Name 与最终响应码、时间升序。
 func TestCollectInvitesForCallee(t *testing.T) {
 	bus := tracelog.New()
-	k := New(&config.Config{}, nil, bus, nil)
+	k := New(&config.Config{}, bus, nil)
 	start := time.Now().Add(-time.Second)
 	num := "8613800000077"
 	injectInvite(bus, num, "line-base-a", "cid-1", "486") // 首呼：拒接线失败
@@ -306,7 +306,7 @@ func TestCollectInvitesForCallee(t *testing.T) {
 // 同一线路重拨（修复前的 bug 形态）：线路名不互异 → distinctLineNames 只有 1 条。
 func TestCollectInvitesSameLineNotDistinct(t *testing.T) {
 	bus := tracelog.New()
-	k := New(&config.Config{}, nil, bus, nil)
+	k := New(&config.Config{}, bus, nil)
 	start := time.Now().Add(-time.Second)
 	num := "8613800000078"
 	injectInvite(bus, num, "line-base-a", "cid-x1", "486")

@@ -18,7 +18,6 @@ import (
 	"hermes-mock/internal/cluster"
 	"hermes-mock/internal/config"
 	"hermes-mock/internal/entity"
-	"hermes-mock/internal/hermesprobe"
 	"hermes-mock/internal/model"
 	"hermes-mock/internal/orgcfg"
 	"hermes-mock/internal/tracelog"
@@ -71,14 +70,13 @@ type Run struct {
 
 // Kit 测试编排器。
 type Kit struct {
-	cfg    *config.Config
-	prober *hermesprobe.Prober
-	bus    *tracelog.Bus
-	clu    *cluster.Store   // 客户集群配置缓存（取号/解析；可为 nil）
-	repo   model.Repository // 测试运行/呼叫记录落库（可为 nil=仅内存）
-	orgs   *orgcfg.Store    // 当前机构接入配置（OpenAPI 服务地址/hermes-ws；可为 nil=未注入）
-	orch   BizCaller        // 业务编排器（群呼/自动外呼任务触发；可为 nil）
-	http   *http.Client
+	cfg  *config.Config
+	bus  *tracelog.Bus
+	clu  *cluster.Store   // 客户集群配置缓存（取号/解析；可为 nil）
+	repo model.Repository // 测试运行/呼叫记录落库（可为 nil=仅内存）
+	orgs *orgcfg.Store    // 当前机构接入配置（OpenAPI 服务地址/hermes-ws；可为 nil=未注入）
+	orch BizCaller        // 业务编排器（群呼/自动外呼任务触发；可为 nil）
+	http *http.Client
 
 	mu   sync.Mutex
 	runs []Run
@@ -93,8 +91,8 @@ type BizCaller interface {
 	OTP(to, templateCode string, params map[string]string) ([]byte, error)
 }
 
-func New(cfg *config.Config, prober *hermesprobe.Prober, bus *tracelog.Bus, clu *cluster.Store) *Kit {
-	return &Kit{cfg: cfg, prober: prober, bus: bus, clu: clu, http: &http.Client{Timeout: 8 * time.Second}}
+func New(cfg *config.Config, bus *tracelog.Bus, clu *cluster.Store) *Kit {
+	return &Kit{cfg: cfg, bus: bus, clu: clu, http: &http.Client{Timeout: 8 * time.Second}}
 }
 
 // SetRepo 注入持久化（main 启动时设置；落 mock_test_run / mock_call）。

@@ -18,7 +18,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
 
-	"hermes-mock/internal/agents"
 	"hermes-mock/internal/bootstrap"
 	"hermes-mock/internal/callbacks"
 	"hermes-mock/internal/calltrace"
@@ -26,14 +25,12 @@ import (
 	"hermes-mock/internal/config"
 	"hermes-mock/internal/entity"
 	"hermes-mock/internal/hermesopenapi"
-	"hermes-mock/internal/hermesprobe"
 	"hermes-mock/internal/model"
 	"hermes-mock/internal/orchestrator"
 	"hermes-mock/internal/orgcfg"
 	"hermes-mock/internal/preflight"
 	"hermes-mock/internal/testkit"
 	"hermes-mock/internal/tracelog"
-	"hermes-mock/internal/wsagent"
 )
 
 // Deps 聚合 HTTP 层依赖。mock 只演被叫客户线路：不主动呼出、不模拟坐席。
@@ -42,19 +39,16 @@ type Deps struct {
 	Repo    model.Repository
 	Cluster *cluster.Store
 	Tracker *calltrace.Tracker
-	Prober  *hermesprobe.Prober
 	Kit     *testkit.Kit
 	Bus     *tracelog.Bus
 	Orgs    *orgcfg.Store
 	CB      *callbacks.Store
-	Agents  *agents.Registry
-	Ws      *wsagent.Client
 	Orch    *orchestrator.Orchestrator
 }
 
 // Register 注册 REST 路由。
-func Register(r *gin.Engine, cfg *config.Config, repo model.Repository, clu *cluster.Store, tracker *calltrace.Tracker, prober *hermesprobe.Prober, kit *testkit.Kit, bus *tracelog.Bus, orgs *orgcfg.Store, cb *callbacks.Store, reg *agents.Registry, ws *wsagent.Client, orch *orchestrator.Orchestrator) {
-	d := &Deps{Cfg: cfg, Repo: repo, Cluster: clu, Tracker: tracker, Prober: prober, Kit: kit, Bus: bus, Orgs: orgs, CB: cb, Agents: reg, Ws: ws, Orch: orch}
+func Register(r *gin.Engine, cfg *config.Config, repo model.Repository, clu *cluster.Store, tracker *calltrace.Tracker, kit *testkit.Kit, bus *tracelog.Bus, orgs *orgcfg.Store, cb *callbacks.Store, orch *orchestrator.Orchestrator) {
+	d := &Deps{Cfg: cfg, Repo: repo, Cluster: clu, Tracker: tracker, Kit: kit, Bus: bus, Orgs: orgs, CB: cb, Orch: orch}
 	g := r.Group("/api")
 	g.GET("/health", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ok", "mode": cfg.Mode}) })
 
@@ -88,16 +82,10 @@ func Register(r *gin.Engine, cfg *config.Config, repo model.Repository, clu *clu
 	g.GET("/trace/sessions", d.traceSessions)
 	g.GET("/trace/sessions/:id", d.traceSession)
 
-	// Hermes 栈服务健康 + 一屏概览（仅探测健康，不查业务库）
-	g.GET("/hermes/health", d.hermesHealth)
+	// 一屏概览（mock 通话统计/活跃 + 近期链路；不查业务库）
 	g.GET("/hermes/overview", d.hermesOverview)
 
-	// 坐席（mock 模拟坐席经 hermes-ws 上线 + 状态切换；call-center 呼叫流程要求坐席在线）
-	g.GET("/agents", d.listAgents)
-	g.POST("/agents/login", d.agentLogin)
-	g.POST("/agents/login-batch", d.agentLoginBatch)
-	g.POST("/agents/status-batch", d.agentStatusBatch)
-	// 经 OpenAPI 管理真实 Hermes 坐席（查/建/改/删/启停/控状态）——区别于上面 wsagent 的本地上线态
+	// 经 OpenAPI 管理真实 Hermes 坐席（查/建/改/删/启停/控状态）
 	g.GET("/agents/managed", d.listManagedAgents)
 	g.POST("/agents/managed", d.addManagedAgent)
 	g.PUT("/agents/managed", d.updateManagedAgent)
@@ -314,8 +302,6 @@ func clusterReply(c *gin.Context, out any, err error) {
 	c.JSON(http.StatusOK, out)
 }
 
-func (d *Deps) hermesHealth(c *gin.Context) { c.JSON(http.StatusOK, d.Prober.Health()) }
-
 // traceSessionSummary 是会话列表的轻量摘要（不含 events）。列表轮询只需这些字段，
 // 避免每次把每条 event 的原始 SIP 报文（数百 KB）也序列化下发。events 走 /trace/sessions/:id 单查。
 type traceSessionSummary struct {
@@ -394,7 +380,7 @@ func (d *Deps) traceSession(c *gin.Context) {
 	c.JSON(http.StatusOK, s)
 }
 
-// hermesOverview 一屏概览：mock 端（通话统计/活跃）+ Hermes 端（服务健康）+ 链路（近期会话）。
+// hermesOverview 一屏概览：mock 端通话统计/活跃 + 链路（近期会话）。
 func (d *Deps) hermesOverview(c *gin.Context) {
 	sessions := d.Bus.Sessions()
 	if len(sessions) > 12 {
@@ -406,12 +392,8 @@ func (d *Deps) hermesOverview(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"mock": gin.H{
-			"agents": d.Agents.List(),
 			"stats":  d.Tracker.Stats(),
 			"active": d.Tracker.Active(),
-		},
-		"hermes": gin.H{
-			"health": d.Prober.Health(),
 		},
 		"trace": gin.H{
 			"sessions": summaries,
@@ -420,7 +402,7 @@ func (d *Deps) hermesOverview(c *gin.Context) {
 }
 
 // ===== 经 OpenAPI 管理真实 Hermes 坐席（查/建/改/删/启停/控状态）=====
-// 与 /api/agents（mock 经 hermes-ws 的本地上线态）区分：这里直接操作 Hermes basic 的真实坐席。
+// 直接操作 Hermes basic 的真实坐席台账（mock 只走 OpenAPI、不碰库）；坐席上线/外呼走前端 jssip 软电话。
 
 // openapiClient 取当前机构的 OpenAPI 客户端，未配凭据时直接回错。
 func (d *Deps) openapiClient(c *gin.Context) (*hermesopenapi.Client, bool) {
@@ -545,90 +527,6 @@ func (d *Deps) switchManagedAgentStatus(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true, "number": req.Number, "status": req.Status})
-}
-
-// listAgents 列出 mock 坐席状态（工作台 WS 在线态 / SIP 注册态 / 工作状态）。
-func (d *Deps) listAgents(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{"agents": d.Agents.List()})
-}
-
-// agentLogin 让单个坐席经 hermes-ws 上线（WS login）。
-func (d *Deps) agentLogin(c *gin.Context) {
-	var req struct {
-		Number   string `json:"number"`
-		Password string `json:"password"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil || req.Number == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "需提供 number"})
-		return
-	}
-	if err := d.Ws.Login(req.Number, req.Password); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "number": req.Number})
-}
-
-// agentLoginBatch 批量让坐席经 hermes-ws 上线。
-func (d *Deps) agentLoginBatch(c *gin.Context) {
-	var req struct {
-		Numbers  []string `json:"numbers"`
-		Password string   `json:"password"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil || len(req.Numbers) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "需提供 numbers"})
-		return
-	}
-	started := 0
-	for _, num := range req.Numbers {
-		if d.Ws.Login(num, req.Password) == nil {
-			started++
-		}
-	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "started": started, "total": len(req.Numbers)})
-}
-
-// agentStatusBatch 批量切坐席工作状态（ONLINE/RESTING/BUSY/OFFLINE）。
-func (d *Deps) agentStatusBatch(c *gin.Context) {
-	var req struct {
-		Numbers []string `json:"numbers"`
-		Status  string   `json:"status"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil || len(req.Numbers) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "需提供 numbers"})
-		return
-	}
-	code := agentStatusCode(req.Status)
-	applied, failed := 0, 0
-	errs := []string{}
-	for _, num := range req.Numbers {
-		if err := d.Ws.SwitchStatus(num, code); err != nil {
-			failed++
-			if len(errs) < 3 {
-				errs = append(errs, num+": "+err.Error())
-			}
-			continue
-		}
-		applied++
-	}
-	resp := gin.H{"ok": failed == 0, "applied": applied, "failed": failed, "total": len(req.Numbers), "status": req.Status}
-	if len(errs) > 0 {
-		resp["error"] = strings.Join(errs, "；")
-	}
-	c.JSON(http.StatusOK, resp)
-}
-
-func agentStatusCode(name string) int {
-	switch strings.ToUpper(strings.TrimSpace(name)) {
-	case "ONLINE", "IDLE", "2":
-		return wsagent.StatusOnline
-	case "RESTING", "REST", "6":
-		return wsagent.StatusResting
-	case "BUSY", "7":
-		return wsagent.StatusBusy
-	default:
-		return wsagent.StatusOffline
-	}
 }
 
 // preflight 业务测试场景就绪自检：采集运行态快照，对每类场景给出可操作诊断。

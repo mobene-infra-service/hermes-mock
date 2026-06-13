@@ -63,24 +63,13 @@ export interface TraceSession {
   events?: TraceEvent[] // 仅单查 /trace/sessions/:id 或 ?match= 时返回
 }
 
-// ===== Hermes 栈服务健康（仅健康，不查业务库）=====
-export interface ServiceHealth {
-  name: string
-  url: string
-  up: boolean
-  status: number
-  latencyMs: number
-  err?: string
-}
-
 export interface Overview {
   mock: { stats: Stats; active: Call[] }
-  hermes: { health: ServiceHealth[] }
   trace: { sessions: TraceSession[] }
 }
 
 // ===== 真实 Hermes 坐席管理（经 OpenAPI：查/建/改/删/启停/切工作状态）=====
-// 区别于上面的 hermes-ws 上线：这里直接 CRUD 当前机构 Hermes basic 的真实坐席（mock 只调 OpenAPI、不碰库）。
+// 这里直接 CRUD 当前机构 Hermes basic 的真实坐席（mock 只调 OpenAPI、不碰库）；坐席上线/外呼走前端 jssip 软电话。
 export interface ManagedAgent {
   agentCode?: string
   agentName?: string

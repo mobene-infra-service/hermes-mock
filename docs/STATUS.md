@@ -10,9 +10,13 @@
 
 ## 已知技术债 / 待办
 
-- **后端 `wsagent` + `agents.Registry` 是死代码，待删（不影响功能）**：坐席统一走前端 jssip 软电话上线，后端 wsagent（`/agents/login`、`/agents/login-batch`、`/agents/status-batch`、`GET /agents`）已全链零调用方（前端/testkit/orchestrator/sipagent 均不引用），启动也不自动 Login。`agents.Registry` 唯一写入方是 wsagent，输出 `mock.agents`/`GET /agents` 前端不消费。属边界收敛后遗留的旧实现（SCOPE 非目标「后端模拟坐席」）。**后续清理**：删 `internal/wsagent/` + `internal/agents/` + api 的 3 个上线 handler/路由 + `Deps.Ws/Agents` + main 接线 + `hermesOverview` 的 `mock.agents`。删前确认无外部脚本 curl 这些接口。
+- _（坐席死代码 `wsagent`/`agents.Registry` 与 `hermesprobe` 健康探测已于 2026-06-13 清理，见验证记录。）_
 
 ## 验证记录
+
+- 2026-06-13：统一后端请求日志，根治「接口报错却没日志」——`main.go` 由 `gin.New()+gin.Recovery()` 改挂 `api.RequestLogger()+api.Recovery()`（新增 `internal/api/middleware.go`）。`RequestLogger` 在响应写出后按状态码统一落日志：5xx→Error、4xx→Warn（均把错误响应体抄进 `resp` 字段，封顶 4KB）、2xx/3xx→Debug（默认 info 级不刷屏），`/api/health` 跳过（k8s 探针高频轮询）；零改动 handler，现有+未来接口自动有日志。`Recovery` 经 logrus 把 panic 落 Error 带堆栈并返回 500 JSON，置于 RequestLogger 内层使恢复后仍记到最终 500。**同时统一 mock→Hermes 出站调用日志**：`hermesopenapi.New` 给 `http.Client` 装 `loggingTransport`（新增 `internal/hermesopenapi/logging.go`），每次 Hermes OpenAPI 调用打 `method/url/reqBody/status/respBody/latency`（体封顶 2KB，2xx→Info、非 2xx→Warn、传输错→Error，**不打请求头避免泄漏 X-OpenApi-Key**）——一处覆盖 orchestrator + 各 api handler + ping/tts/agent-groups/managed-agents 全部出站。`go build ./...`、`go test ./...` 全绿，新增 `middleware_test.go`/`logging_test.go` 表驱动覆盖日志级别、响应体抄录与回灌不丢、panic 落库、health 跳过。
+
+- 2026-06-13：清理死代码——删 `internal/hermesprobe/`（Hermes 栈健康探测，页面展示早已撤、前端不消费）、`internal/wsagent/`（坐席经 hermes-ws 上线，坐席统一走前端 jssip 软电话，全链零调用方）、`internal/agents/`（坐席状态表，唯一写入方是 wsagent）。连带：api 删 `/hermes/health`、`GET /agents`、`/agents/login`、`/agents/login-batch`、`/agents/status-batch` 路由及 handler（`hermesHealth`/`listAgents`/`agentLogin`/`agentLoginBatch`/`agentStatusBatch`/`agentStatusCode`）+ `Deps.Prober/Agents/Ws` 字段 + `Register` 形参收窄；`hermesOverview` 去掉 `hermes.health` 与 `mock.agents` 段（前端 OverviewPage 本就只读 `mock.stats/active`+`trace.sessions`，**总览页与 `/hermes/overview` 端点保留**）；`testkit.New` 去掉未用的 `prober` 形参；main 删对应接线；前端 `types/index.ts` 删 `ServiceHealth` 接口 + `Overview.hermes` 字段。`go build ./...`、`go vet ./...`、`go test ./...`、`go mod tidy` 全绿（同步修正 `kit_test.go` 的 `New` 调用）。**注**：前端类型改动需 `make web` 重建 embed 后再部署（仅类型收敛，运行时本就不消费这两段，不影响行为）。
 
 - 2026-06-12：群呼任务参数补全 + 模式策略组合（后端+前端）——`BizCaller.CallCenterTask` 长签名收敛为 `entity.CallCenterTaskReq` 单结构体（顺带删 orchestrator 死字段 ObserveAgent/WaitSec/AutoStart）；`modeStrategy=1→proportion` / `=2→lossRate+historicalConnectionRate` 按 Hermes `validateAddRequest` 分支下发；补齐 sortMethod/isPriorityTask/isVmHangup/maxRedialTimes/redialInterval/bestRingDuration/agentMaxRingDuration/assignDelaySeconds/transferType/description（可选项有值才入 body）。前端 `GroupCallPage` 删「自动启动」、TTS code 改 Select 展示名称、新增模式策略条件渲染 + 高级参数折叠面板；lineType 维持 AutoComplete 支持自定义输入。`gofmt`/`go build`/`go test`（除 hermesopenapi 沙箱）全绿；`tsc -b`/`vite build`/`make sync-web` 通过。**端到端实测待本地栈**。
 

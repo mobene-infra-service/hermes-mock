@@ -15,7 +15,6 @@
  │ orchestrator:  经 Hermes OpenAPI 让业务侧发起外呼（call-center/call-bot/otp）   │
  │ siptrace+tracelog: 传输层抓真实 SIP 报文，聚合成链路时间线（周期落库）            │
  │ calltrace/callbacks: 每通被叫 / Hermes 回调 落库（mock_call/mock_callback）│
- │ agents/wsagent: 坐席状态表 + hermes-ws 上线（坐席场景；详见 STATUS 开放问题）     │
  └────────────────────────▲───────────────────────────────────────────────┘
               真实 SIP/RTP │（Hermes 线路 t_line.address 指向 mock）
  ┌────────────────────────┴───────────────────────────────────────────────┐
@@ -58,11 +57,8 @@ docs/                    本套文档
 | `siptrace` | sipgo 传输层 tracer：捕获**所有收发的原始 SIP 报文**（含 X- 业务头），按 Call-ID 聚合进 tracelog（须在建 SIP agent 前 Install） |
 | `orchestrator` | 经 Hermes 业务 REST/OpenAPI 触发 call-bot/otp/call-center 任务 + 坐席操作 |
 | `callbacks` | 接收 Hermes 回调（webhook）→ 经 Repository 落 `mock_callback` |
-| `hermesprobe` | Hermes 栈健康探测（HTTP `/state/up`，目标从当前机构配置推导；不直连业务库） |
 | `testkit` | 业务测试编排（触发 + 真实 SIP 断言）；`SetBizCaller(orch)` 接 orchestrator，`SetRepo` 落测试历史 |
-| `agents` | **坐席状态表**：工作台 WS 在线态 + SIP 注册态 + 工作状态（坐席场景，见 STATUS 开放问题） |
-| `wsagent` | **坐席工作台 WS 客户端**：经 hermes-ws 让坐席上线/切状态（地址/口令从当前机构配置动态取） |
-| `api` | Gin 路由 + REST + 前端 embed 挂载（`Register` / `MountFrontend`） |
+| `api` | Gin 路由 + REST + 前端 embed 挂载（`Register` / `MountFrontend`）；请求/出站 Hermes 调用统一日志见 `middleware.go` / `hermesopenapi/logging.go` |
 
 **支撑包**（未在 main 直接接线，被上面的包引用）：
 `behavior`（被叫行为类型 Outcome/Fault/IVR/Rule）、

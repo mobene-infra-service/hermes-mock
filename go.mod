@@ -16,7 +16,6 @@ require (
 require (
 	github.com/emiago/diago v0.28.0
 	github.com/emiago/sipgo v1.4.0
-	github.com/gobwas/ws v1.4.0
 	gorm.io/driver/sqlite v1.6.0
 )
 
@@ -35,6 +34,7 @@ require (
 	github.com/go-sql-driver/mysql v1.8.1 // indirect
 	github.com/gobwas/httphead v0.1.0 // indirect
 	github.com/gobwas/pool v0.2.1 // indirect
+	github.com/gobwas/ws v1.4.0 // indirect
 	github.com/goccy/go-json v0.10.2 // indirect
 	github.com/goccy/go-yaml v1.18.0 // indirect
 	github.com/icholy/digest v1.1.0 // indirect
