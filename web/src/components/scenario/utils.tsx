@@ -1,6 +1,8 @@
-import { Col, Progress, Row, Space, Statistic, Steps, Tag, Tooltip, Typography } from 'antd'
-import { CheckCircleTwoTone, CloseCircleTwoTone, MinusCircleTwoTone } from '@ant-design/icons'
-import type { CallView, PreflightReport, ScenarioResult, TestRun } from '../../api'
+import { type ReactNode, useEffect, useState } from 'react'
+import { Col, Progress, Row, Space, Spin, Statistic, Steps, Tag, Tooltip, Typography } from 'antd'
+import { CaretRightOutlined, CheckCircleTwoTone, CloseCircleTwoTone, MinusCircleTwoTone } from '@ant-design/icons'
+import { getTraceSession } from '../../api'
+import type { CallView, PreflightReport, ScenarioResult, TestRun, TraceEvent } from '../../api'
 
 const { Text, Paragraph } = Typography
 
@@ -178,4 +180,198 @@ export function RunSteps({ run }: { run?: TestRun | null }) {
       })}
     />
   )
+}
+
+// ============================================================================
+// 统一通话结果术语（一处定义，全局用）——根除 CONNECTED/OBSERVED/ANSWERED/ENDED…
+// 三套状态词混用。把后端各来源状态归一成 4 个可读结局。
+// ============================================================================
+export type CallOutcomeKind = 'answered' | 'failed' | 'ringing' | 'pending'
+
+// callOutcome 把 CallView.status 或 CallRecord.status 统一成一个结局描述。
+export function callOutcome(status?: string): { kind: CallOutcomeKind; text: string; color: string; icon: string } {
+  switch (status) {
+    case 'CONNECTED':
+    case 'OBSERVED':
+    case 'ANSWERED':
+    case 'ENDED':
+      return { kind: 'answered', text: '已接通', color: '#52c41a', icon: '✅' }
+    case 'FAILED':
+    case 'REJECTED':
+      return { kind: 'failed', text: '未接通', color: '#ff4d4f', icon: '❌' }
+    case 'RINGING':
+      return { kind: 'ringing', text: '振铃中', color: '#1677ff', icon: '📳' }
+    default:
+      return { kind: 'pending', text: '等待呼入', color: '#faad14', icon: '⏳' }
+  }
+}
+
+// ============================================================================
+// 结论横幅：一次运行最顶部的「成/败/进行中」单一答案 + 关键数字 + 右侧操作槽。
+// ============================================================================
+export type BannerVerdict = 'success' | 'fail' | 'running' | 'idle'
+export interface BannerMetric { label: string; value: number | string; color?: string }
+
+export function ResultBanner({
+  verdict, title, sub, metrics, extra,
+}: {
+  verdict: BannerVerdict
+  title: string
+  sub?: ReactNode
+  metrics?: BannerMetric[]
+  extra?: ReactNode
+}) {
+  const icon = verdict === 'success' ? '✅' : verdict === 'fail' ? '❌' : verdict === 'running' ? '🟢' : '○'
+  return (
+    <div className={`result-banner is-${verdict}`}>
+      <div className="result-banner-verdict">
+        <span className="rb-icon">{icon}</span>
+        <span>{title}</span>
+        {sub ? <span className="result-banner-sub">{sub}</span> : null}
+      </div>
+      <Space size={18} wrap>
+        {metrics?.length ? (
+          <div className="result-banner-metrics">
+            {metrics.map((m) => (
+              <div className="rb-metric" key={m.label}>
+                <div className="rb-metric-num" style={{ color: m.color }}>{m.value}</div>
+                <div className="rb-metric-label">{m.label}</div>
+              </div>
+            ))}
+          </div>
+        ) : null}
+        {extra}
+      </Space>
+    </div>
+  )
+}
+
+// ============================================================================
+// 通话证据：从 trace events 提取 mock 被叫腿亲历的硬证据（编解码 / RTP 收发·丢包 /
+// DTMF / 故障注入 / 挂断）。后端 sipagent 已采集进 ChanBridge(MEDIA/BRIDGE) detail，
+// 这里汇总展示——把「测试浅」（只验接通）补成「接通后行为对不对」。
+// ============================================================================
+export interface CallEvidenceData {
+  codec?: string
+  media?: string      // 双向/单向 + 收发包
+  loss?: string       // 丢包率
+  dtmf?: string[]     // 收到的按键
+  fault?: string      // 注入的故障
+  hangup?: string     // 挂断 summary
+  empty: boolean
+}
+
+// extractEvidence 从一段 trace events 里抽取证据（纯函数，便于复用/测试）。
+export function extractEvidence(events: TraceEvent[]): CallEvidenceData {
+  const out: CallEvidenceData = { dtmf: [], empty: true }
+  for (const e of events) {
+    const d = e.detail || {}
+    if (e.method === '媒体协商' && d.codec) {
+      out.codec = `${d.codec}${d.payloadType ? ` (pt=${d.payloadType})` : ''}`
+    } else if (e.method === '媒体统计') {
+      out.media = d.twoWay === 'true'
+        ? `双向 · 收${d.rxPackets || '0'}/发${d.txPackets || '0'}包`
+        : `单向 · 收${d.rxPackets || '0'}/发${d.txPackets || '0'}包`
+      if (d.rxLossPercent !== undefined) out.loss = `丢包 ${d.rxLossPercent}%`
+    } else if (e.method === 'DTMF' && d.digit) {
+      out.dtmf!.push(d.digit)
+    } else if (e.method === '故障注入') {
+      out.fault = d.fault || e.summary
+    } else if (e.method === '挂断' || e.method === '决策') {
+      if (e.summary && (e.method === '挂断' || /拒接|不可用|振铃不接/.test(e.summary))) out.hangup = e.summary
+    }
+  }
+  out.empty = !out.codec && !out.media && !out.dtmf!.length && !out.fault && !out.hangup
+  return out
+}
+
+// CallEvidence 拉取某通的 trace（按 traceId）并展示证据格。无 traceId / 拉取中 / 无证据各有占位。
+export function CallEvidence({ traceId, hangupCode }: { traceId?: string; hangupCode?: number }) {
+  const [ev, setEv] = useState<CallEvidenceData | null>(null)
+  const [loading, setLoading] = useState(false)
+  useEffect(() => {
+    if (!traceId) { setEv(null); return }
+    let alive = true
+    setLoading(true)
+    getTraceSession(traceId)
+      .then((s) => { if (alive) setEv(extractEvidence(s.events || [])) })
+      .catch(() => { if (alive) setEv(null) })
+      .finally(() => { if (alive) setLoading(false) })
+    return () => { alive = false }
+  }, [traceId])
+
+  if (!traceId) return <Text type="secondary" style={{ fontSize: 12 }}>无关联链路（尚未观测到被叫腿）</Text>
+  if (loading && !ev) return <Spin size="small" />
+  if (!ev || ev.empty) {
+    return (
+      <div className="evidence-grid">
+        {hangupCode ? <Cell label="挂断码" value={String(hangupCode)} /> : null}
+        <Cell label="媒体证据" value="—" />
+      </div>
+    )
+  }
+  return (
+    <div className="evidence-grid">
+      {ev.codec && <Cell label="协商编解码" value={ev.codec} />}
+      {ev.media && <Cell label="RTP 媒体" value={ev.media} />}
+      {ev.loss && <Cell label="丢包" value={ev.loss} />}
+      {ev.dtmf?.length ? <Cell label="收到 DTMF" value={ev.dtmf.join(' ')} /> : null}
+      {ev.fault && <Cell label="故障注入" value={ev.fault} />}
+      {(ev.hangup || hangupCode) && <Cell label="挂断" value={ev.hangup || String(hangupCode)} />}
+    </div>
+  )
+}
+
+function Cell({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="evidence-cell">
+      <div className="evidence-cell-label">{label}</div>
+      <div className="evidence-cell-value">{value}</div>
+    </div>
+  )
+}
+
+// ============================================================================
+// 通话明细行：可展开。收起=结局+号码+证据摘要一行；展开=Hermes侧↔mock侧 + 证据格。
+// ============================================================================
+export function CallRow({ call }: { call: CallView }) {
+  const [open, setOpen] = useState(false)
+  const o = callOutcome(call.status)
+  return (
+    <div className="call-row">
+      <div className="call-row-head" onClick={() => setOpen((v) => !v)}>
+        <CaretRightOutlined className={`call-row-caret${open ? ' is-open' : ''}`} />
+        <span>{o.icon}</span>
+        <Tag color={o.kind === 'answered' ? 'success' : o.kind === 'failed' ? 'error' : o.kind === 'ringing' ? 'processing' : 'warning'}>
+          {o.text}
+        </Tag>
+        <span className="call-row-number">{call.customer || '-'}</span>
+        <span className="call-row-spacer" />
+        <span className="call-row-evidence-inline">
+          {call.durationMs ? <span>{(call.durationMs / 1000).toFixed(1)}s</span> : null}
+          {call.agent ? <span>坐席 {call.agent}</span> : call.agentGroup ? <span>组 {call.agentGroup}</span> : null}
+          {call.detail ? <Text type="secondary" style={{ fontSize: 12 }}>{shortText(call.detail, 24)}</Text> : null}
+        </span>
+        {call.traceId ? (
+          <a href={`/trace?session=${encodeURIComponent(call.traceId)}`} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>trace ↗</a>
+        ) : null}
+      </div>
+      {open && (
+        <div className="call-row-body">
+          <Space size="large" wrap style={{ marginBottom: 4 }}>
+            <span><Text type="secondary" style={{ fontSize: 12 }}>Hermes 业务侧</Text> <Text strong>{call.agent || call.agentGroup || '由 Hermes 调度'}</Text></span>
+            <span style={{ color: '#bfbfbf' }}>⇄</span>
+            <span><Text type="secondary" style={{ fontSize: 12 }}>mock 客户被叫</Text> <Text strong>{call.customer || '-'}</Text> <Text type="secondary" style={{ fontSize: 12 }}>{call.customerState}</Text></span>
+          </Space>
+          <CallEvidence traceId={call.traceId} />
+        </div>
+      )}
+    </div>
+  )
+}
+
+// CallRows 一组通话明细行（替代 CallBoard 的卡片墙；空态返回 null）。
+export function CallRows({ calls }: { calls: CallView[] }) {
+  if (!calls.length) return null
+  return <div>{calls.map((c, i) => <CallRow key={`${c.id}-${i}`} call={c} />)}</div>
 }

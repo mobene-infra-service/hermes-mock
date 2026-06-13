@@ -3,7 +3,7 @@ import {
   AutoComplete, Button, Card, Col, Collapse, Form, Input, InputNumber, Radio, Row, Select, Space, Switch, Tag, Typography, message,
 } from 'antd'
 import { ScenarioHeader } from '../components/scenario/ScenarioHeader'
-import { CallBoard, RunSteps, callsOf, parseList } from '../components/scenario/utils'
+import { CallRows, ResultBanner, callsOf, parseList, type BannerVerdict } from '../components/scenario/utils'
 import ScenarioRecords from '../components/scenario/ScenarioRecords'
 import { useScenarioMeta } from '../hooks/useScenarioMeta'
 import { useReadyAgents } from '../hooks/useReadyAgents'
@@ -44,6 +44,13 @@ interface GroupCallForm {
   waitSec?: number
   observeAgent?: string
   numbers?: string
+}
+
+// recordToCallStatus 把被叫腿记录的 status 映射成 CallView.status（统一术语见 utils.callOutcome）。
+function recordToCallStatus(s?: string): CallView['status'] {
+  if (s === 'ANSWERED' || s === 'ENDED') return 'OBSERVED'
+  if (s === 'REJECTED' || s === 'FAILED') return 'FAILED'
+  return 'PENDING'
 }
 
 // call-center 群呼任务独立页：Hermes 业务侧创建并启动群呼任务，mock 扮客户被叫应答。
@@ -91,37 +98,37 @@ export default function GroupCallPage() {
   }, [])
 
   // 群呼是预测式分批拨号：run 结束时只是「那一刻」快照，后续被拨到/转坐席的进展看不到。
-  // 这里对当前 run 的客户号持续轮询后端记录（被叫腿 sip-inbound + 坐席腿 agent-inbound），实时更新卡片。
+  // 这里对当前 run 的客户号持续轮询后端「被叫腿」记录（scenario=sip-inbound），实时更新明细行。
+  // 关联一律按 customerNumber 命中 + startedAt≥since 收窄（避免历史撞号）——坐席腿 mock 侧基本不可见
+  // （坐席在真实 Hermes / 前端 jssip），故不再用「任意一条 agent-inbound ENDED」张冠李戴地标到每个客户卡。
   useEffect(() => {
     const base = ccRun?.calls
     if (!base || !base.length) { setLiveCalls(null); return }
     const customers = Array.from(new Set(base.map((c) => c.customer).filter(Boolean)))
     if (!customers.length) { setLiveCalls(null); return }
+    const since = ccRun ? new Date(ccRun.startedAt).getTime() - 5000 : 0
     let alive = true
     const tick = async () => {
       try {
-        // 拉被叫腿（客户接通）+ 坐席腿（转接接听）记录
-        const [calleeRes, seatRes] = await Promise.all([
-          queryCallRecords({ pageSize: 100 }),
-          queryCallRecords({ scenario: 'agent-inbound', pageSize: 50 }),
-        ])
+        // 只拉被叫腿（mock 自己亲历的 sip-inbound）。按客户号 + 起始时间精确关联本次任务的真实通话。
+        const res = await queryCallRecords({ scenario: 'sip-inbound', pageSize: 200 })
         if (!alive) return
-        const calleeRecs = calleeRes.records || []
-        const seatRecs = seatRes.records || []
+        const recs = (res.records || []).filter((r) => !since || new Date(r.startedAt).getTime() >= since)
         const next: CallView[] = base.map((c) => {
-          // 该客户号被叫腿是否接通（mock 收到并 ANSWERED/ENDED）
-          const callee = calleeRecs.find((r) => r.customerNumber === c.customer && (r.scenario === 'sip-inbound' || r.source === 'mock' || r.source === 'sip'))
-          // 是否有坐席被转接接听（按时间近似关联）
-          const seat = seatRecs.find((r) => r.status === 'ENDED' || r.status === 'ANSWERED')
-          const customerAns = callee && (callee.status === 'ANSWERED' || callee.status === 'ENDED')
-          let status = c.status
-          let customerState = c.customerState
-          let agentState = c.agentState
-          if (customerAns) { status = 'OBSERVED'; customerState = '已接入' }
-          if (seat) { status = 'CONNECTED'; agentState = `坐席 ${seat.agentNumber} 已接听` }
+          // 命中本次该客户号的被叫腿记录（取最近一条）——这是 mock 唯一可信的接通证据。
+          const rec = recs
+            .filter((r) => r.customerNumber === c.customer)
+            .sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())[0]
+          if (!rec) return c // 尚未观测到该号被叫腿 → 维持原占位（等待呼入）
+          const o = recordToCallStatus(rec.status)
           return {
-            ...c, status, customerState, agentState,
-            traceId: callee?.traceId || c.traceId,
+            ...c,
+            status: o,
+            customerState: o === 'OBSERVED' || o === 'CONNECTED' ? '已接入' : o === 'FAILED' ? `未接通（${rec.hangupCode || rec.result || '失败'}）` : c.customerState,
+            traceId: rec.traceId || c.traceId,
+            callUuid: rec.callUuid || c.callUuid,
+            durationMs: rec.durationMs || c.durationMs,
+            detail: rec.result || rec.lastSummary || c.detail,
           }
         })
         setLiveCalls(next)
@@ -130,7 +137,7 @@ export default function GroupCallPage() {
     void tick()
     const t = setInterval(tick, 3000)
     return () => { alive = false; clearInterval(t) }
-  }, [ccRun?.id])
+  }, [ccRun?.id, ccRun?.startedAt, ccRun?.calls])
 
   const runCC = async () => {
     let v: GroupCallForm
@@ -468,47 +475,50 @@ export default function GroupCallPage() {
         </Col>
 
         <Col span={14}>
-          {restored && ccRun && (
-            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginBottom: 8 }}>
-              ↓ 上次群呼结果（run {ccRun.id} · {new Date(ccRun.startedAt).toLocaleString()}）——切页/刷新后从历史回填，点「创建并启动」发起新任务
-            </Text>
-          )}
-          {ccRun && (() => {
-            // 群呼是异步预测式拨号，不是「同步用例出 N 个通过/失败」。统计基于真实被叫腿（liveCalls 轮询 sip-inbound
-            // 匹配本次客户号）的实时状态，而非 run.ok×占位数（那会一创建就假「通过10」）。
+          {ccRun ? (() => {
+            // 群呼是异步预测式分批拨号，不是「同步用例出 N 个通过/失败」。结论与统计基于真实被叫腿
+            // （liveCalls 轮询 sip-inbound 精确匹配本次客户号），而非 run.ok×占位数。
             const cs = liveCalls || callsOf(ccRun)
             const answered = cs.filter((c) => c.status === 'OBSERVED' || c.status === 'CONNECTED').length
+            const failed = cs.filter((c) => c.status === 'FAILED').length
+            const pending = cs.length - answered - failed
+            // 结论：还有等待中→进行中；全部有结果且无失败→成功；有失败→失败。
+            const verdict: BannerVerdict = pending > 0 ? 'running' : failed > 0 ? 'fail' : answered > 0 ? 'success' : 'idle'
+            const title = pending > 0 ? '群呼进行中' : failed > 0 ? `群呼完成 · ${failed} 通未接通` : answered > 0 ? '群呼完成 · 全部接通' : '群呼已受理'
             return (
-              <div style={{ marginTop: 16, padding: 12, border: '1px solid #f0f0f0', borderRadius: 6, background: '#fff' }}>
-                <Space size="large" wrap>
-                  <span>取号 <b style={{ fontSize: 18 }}>{cs.length}</b></span>
-                  <span style={{ color: '#3f8600' }}>已接入(被叫腿) <b style={{ fontSize: 18 }}>{answered}</b></span>
-                  <Text type="secondary" style={{ fontSize: 12 }}>群呼为异步预测式分批拨号，进度以被叫腿实时观测为准（每 3s 刷新），非「通过/失败」用例结果</Text>
-                </Space>
-              </div>
+              <>
+                <ResultBanner
+                  verdict={verdict}
+                  title={title}
+                  sub={restored ? `上次结果 · run ${ccRun.id} · ${new Date(ccRun.startedAt).toLocaleString()}` : `run ${ccRun.id}`}
+                  metrics={[
+                    { label: '取号', value: cs.length },
+                    { label: '已接通', value: answered, color: '#52c41a' },
+                    { label: '未接通', value: failed, color: failed ? '#ff4d4f' : undefined },
+                    { label: '等待中', value: pending, color: pending ? '#faad14' : undefined },
+                  ]}
+                  extra={taskCode ? (
+                    <Space size={4} wrap>
+                      <Button size="small" loading={taskBusy} onClick={() => taskAction('pause')}>暂停</Button>
+                      <Button size="small" loading={taskBusy} onClick={() => taskAction('resume')}>恢复</Button>
+                      <Button size="small" danger loading={taskBusy} onClick={() => taskAction('cancel')}>取消</Button>
+                      <Button size="small" type="link" onClick={taskStatus}>状态</Button>
+                    </Space>
+                  ) : undefined}
+                />
+                {taskCode && (
+                  <Text type="secondary" style={{ fontSize: 12, display: 'block', margin: '6px 0' }}>
+                    任务 <Text code copyable style={{ fontSize: 12 }}>{taskCode}</Text> · 预测式分批拨号，每 3s 刷新（展开任一通看协商编解码 / RTP 收发·丢包 / DTMF / 挂断码）
+                  </Text>
+                )}
+                <div style={{ maxHeight: 520, overflowY: 'auto', marginTop: 8 }}>
+                  <CallRows calls={cs} />
+                </div>
+              </>
             )
-          })()}
-          {taskCode && (
-            <Card size="small" style={{ marginTop: 8 }} styles={{ body: { padding: '8px 12px' } }}>
-              <Space wrap size="small">
-                <Text type="secondary" style={{ fontSize: 12 }}>任务 taskCode</Text>
-                <Text code copyable style={{ fontSize: 12 }}>{taskCode}</Text>
-                <Button size="small" loading={taskBusy} onClick={() => taskAction('pause')}>暂停</Button>
-                <Button size="small" loading={taskBusy} onClick={() => taskAction('resume')}>恢复</Button>
-                <Button size="small" danger loading={taskBusy} onClick={() => taskAction('cancel')}>取消</Button>
-                <Button size="small" type="link" onClick={taskStatus}>查状态</Button>
-              </Space>
-            </Card>
+          })() : (
+            <ResultBanner verdict="idle" title="尚未发起群呼" sub="填写左侧表单后点「创建任务」，结果在此实时呈现" />
           )}
-          {ccRun && (liveCalls?.length || callsOf(ccRun).length) ? (
-            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 8 }}>
-              通话状态每 3s 自动刷新（预测式分批拨号，客户腿/坐席腿接通进展实时更新）
-            </Text>
-          ) : null}
-          <div style={{ maxHeight: 460, overflowY: 'auto' }}>
-            <CallBoard calls={liveCalls || callsOf(ccRun)} />
-          </div>
-          <RunSteps run={ccRun} />
         </Col>
       </Row>
 

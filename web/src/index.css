@@ -236,6 +236,81 @@ body {
   white-space: pre-wrap;
 }
 
+/* ===== 场景结果中心：结论横幅 + 明细行 + 证据 ===== */
+.result-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 14px 18px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+}
+.result-banner.is-success { background: #f6ffed; border-color: #b7eb8f; }
+.result-banner.is-fail    { background: #fff2f0; border-color: #ffccc7; }
+.result-banner.is-running { background: #e6f4ff; border-color: #91caff; }
+.result-banner.is-idle    { background: #fafafa; border-color: #f0f0f0; }
+
+.result-banner-verdict {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 18px;
+  font-weight: 700;
+}
+.result-banner-verdict .rb-icon { font-size: 22px; line-height: 1; }
+.result-banner-sub { font-size: 12px; font-weight: 400; color: #8c8c8c; margin-left: 4px; }
+
+.result-banner-metrics {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+.rb-metric { text-align: center; line-height: 1.2; }
+.rb-metric-num { font-size: 20px; font-weight: 700; }
+.rb-metric-label { font-size: 11px; color: #8c8c8c; }
+
+/* 通话明细行（可展开看证据） */
+.call-row {
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+  background: #fff;
+  margin-top: 8px;
+  overflow: hidden;
+}
+.call-row-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  cursor: pointer;
+  user-select: none;
+}
+.call-row-head:hover { background: #fafafa; }
+.call-row-caret { color: #bfbfbf; transition: transform 0.15s; flex: none; }
+.call-row-caret.is-open { transform: rotate(90deg); }
+.call-row-number { font-weight: 600; font-family: monospace; }
+.call-row-spacer { flex: 1; }
+.call-row-evidence-inline { font-size: 12px; color: #595959; display: flex; gap: 10px; flex-wrap: wrap; }
+.call-row-body { padding: 4px 14px 14px 38px; border-top: 1px solid #f5f5f5; background: #fcfcfc; }
+
+/* 证据小格 */
+.evidence-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px;
+  margin-top: 8px;
+}
+.evidence-cell {
+  border: 1px solid #f0f0f0;
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: #fff;
+}
+.evidence-cell-label { font-size: 11px; color: #8c8c8c; }
+.evidence-cell-value { font-size: 13px; font-weight: 600; margin-top: 2px; word-break: break-all; }
+
 /* 移动端适配 */
 @media (max-width: 768px) {
   .page-container {
