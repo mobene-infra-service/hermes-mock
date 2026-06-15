@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import {
   Card, Table, Button, Modal, Form, Input, InputNumber, Select, Tabs, Tag, message, Space, Alert, Tooltip, Typography, Switch, Divider, Popconfirm, Upload,
 } from 'antd'
@@ -15,6 +15,9 @@ import { InfoBanner } from '../components/layout/InfoBanner'
 
 const { Text } = Typography
 
+function HelpText({ children }: { children: ReactNode }) {
+  return <Text type="secondary" style={{ fontSize: 12 }}>{children}</Text>
+}
 
 // 通用「列表 + 新增/编辑弹窗 + 删除」工厂
 function useCrud<T extends object, K extends string | number = string>(load: () => Promise<T[]>, save: (v: T) => Promise<T>, del?: (key: K) => Promise<void>) {
@@ -65,6 +68,13 @@ function IVREditor({ value, onChange }: { value?: string; onChange?: (v: string)
   const addStep = () => emit([...steps, { id: steps.length ? `s${steps.length + 1}` : 'start', prompt: '', waitMs: 5000, branch: {} }])
   const removeStep = (i: number) => emit(steps.filter((_, idx) => idx !== i))
   const branchPairs = (b?: Record<string, string>) => Object.entries(b || {})
+  const nextBranchKey = (b?: Record<string, string>) => {
+    const used = new Set(Object.keys(b || {}))
+    for (const k of ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '*', '#']) {
+      if (!used.has(k)) return k
+    }
+    return `key${used.size + 1}`
+  }
   const setBranch = (i: number, pairs: [string, string][]) => {
     const b: Record<string, string> = {}
     for (const [k, v] of pairs) if (k.trim() !== '') b[k.trim()] = v
@@ -98,7 +108,10 @@ function IVREditor({ value, onChange }: { value?: string; onChange?: (v: string)
               </Space>
             ))}
             <div style={{ marginTop: 4 }}>
-              <Button size="small" onClick={() => setBranch(i, [...branchPairs(s.branch), ['', '']] as [string, string][])}>+ 按键分支</Button>
+              <Button size="small" onClick={() => {
+                const k = nextBranchKey(s.branch)
+                setBranch(i, [...branchPairs(s.branch), [k, 'HANGUP']] as [string, string][])
+              }}>+ 按键分支</Button>
             </div>
           </div>
         </Card>
@@ -152,26 +165,28 @@ function ProfilesTab() {
           { title: 'IVR', dataIndex: 'ivrJson', render: (v?: string) => (v ? <Tag color="purple">脚本</Tag> : null) },
           { title: '操作', render: rowActions<BehaviorProfile>(c.onEdit, (r) => c.onDelete(r.code), (r) => `删除行为档 ${r.code}？`) },
         ]} />
-      <Modal title="行为档" open={c.open} onOk={c.onSave} onCancel={() => c.setOpen(false)} destroyOnHidden forceRender width={680}>
+      <Modal title="行为档" open={c.open} onOk={c.onSave} onCancel={() => c.setOpen(false)} destroyOnHidden forceRender width={760}>
         <Form form={c.form} layout="vertical">
           <Form.Item name="id" hidden><Input /></Form.Item>
           <Space><Form.Item name="code" label="code" rules={[{ required: true }]}><Input style={{ width: 180 }} /></Form.Item>
             <Form.Item name="name" label="名称"><Input style={{ width: 220 }} /></Form.Item></Space>
-          <Form.Item name="outcome" label="通话结果" rules={[{ required: true }]}>
+          <Form.Item name="outcome" label="通话结果" rules={[{ required: true }]}
+            extra={<HelpText>ANSWER=接听并进入媒体；REJECT/BUSY/UNAVAILABLE=直接回 SIP 失败码；NO_ANSWER=先振铃再回失败码。</HelpText>}>
             <Select options={OUTCOME_OPTIONS} />
           </Form.Item>
           <Space wrap>
-            <Form.Item name="ringMs" label="振铃ms"><InputNumber min={0} /></Form.Item>
-            <Form.Item name="talkMs" label="通话ms"><InputNumber min={0} /></Form.Item>
-            <Form.Item name="hangupCode" label="挂断码"><InputNumber min={0} placeholder="486/503/480" /></Form.Item>
-            <Form.Item name="answerRatio" label="接通率%"><InputNumber min={0} max={100} /></Form.Item>
+            <Form.Item name="ringMs" label="振铃ms" extra={<HelpText>ANSWER/NO_ANSWER 生效；REJECT/UNAVAILABLE 默认不先振铃。</HelpText>}><InputNumber min={0} /></Form.Item>
+            <Form.Item name="talkMs" label="通话ms" extra={<HelpText>接听后保持通话多久再由 mock 挂断。</HelpText>}><InputNumber min={0} /></Form.Item>
+            <Form.Item name="hangupCode" label="拒接/响应码" extra={<HelpText>仅 REJECT/BUSY/UNAVAILABLE/NO_ANSWER 生效；留空按通话结果默认 486/503/480，可填 500、603 等自定义 SIP 码。</HelpText>}>
+              <InputNumber min={0} placeholder="486/503/480/500/603" />
+            </Form.Item>
+            <Form.Item name="answerRatio" label="接通率%" extra={<HelpText>仅 ANSWER 生效；低于 100 时按概率降级为 NO_ANSWER。</HelpText>}><InputNumber min={0} max={100} /></Form.Item>
           </Space>
-          <Form.Item name="playback" label="放音文件"><PlaybackSelect /></Form.Item>
-          <Form.Item name="dtmf" label="DTMF 序列"><Input placeholder="159#" /></Form.Item>
-          <Space>
-            <Form.Item name="fault" label="故障注入"><Select style={{ width: 320 }} allowClear options={FAULT_OPTIONS} /></Form.Item>
-            <Form.Item name="bridgeTarget" label="桥接目标"><Input style={{ width: 240 }} placeholder="sip:9999@..." /></Form.Item>
-            <Form.Item name="expectDtmf" label="监听对端按键" valuePropName="checked"><Switch /></Form.Item>
+          <Form.Item name="playback" label="放音文件" extra={<HelpText>接听后发送的 wav 音频；IVR 脚本非空时优先生效。</HelpText>}><PlaybackSelect /></Form.Item>
+          <Form.Item name="dtmf" label="接听后发 DTMF" extra={<HelpText>mock 作为客户接听后，向对端发送按键序列（如 159#），用于压测 IVR/机器人收键。</HelpText>}><Input placeholder="159#" /></Form.Item>
+          <Space align="start" wrap>
+            <Form.Item name="fault" label="故障注入" extra={<HelpText>模拟媒体/信令异常：如不发 RTP、慢应答、接通即挂、丢包/乱序等。</HelpText>}><Select style={{ width: 320 }} allowClear options={FAULT_OPTIONS} /></Form.Item>
+            <Form.Item name="expectDtmf" label="监听对端按键" valuePropName="checked" extra={<HelpText>接听后记录对端发来的 DTMF，便于验证机器人/坐席是否回按键。</HelpText>}><Switch /></Form.Item>
           </Space>
           <Divider orientation="left" plain>脚本化 IVR（接听后「放音→收按键→分支」多轮；优先于普通放音/DTMF，且仅在无故障时生效）</Divider>
           <Form.Item name="ivrJson"><IVREditor /></Form.Item>

@@ -6,6 +6,32 @@ import (
 	"hermes-mock/internal/behavior"
 )
 
+func TestReasonForCode(t *testing.T) {
+	cases := []struct {
+		code     int
+		fallback string
+		want     string
+	}{
+		// 拒接类常用码：均应取标准短语，不再回退 fallback
+		{486, "Busy Here", "Busy Here"},
+		{503, "Service Unavailable", "Service Unavailable"},
+		{480, "Temporarily Unavailable", "Temporarily Unavailable"},
+		{603, "Busy Here", "Decline"}, // 自定义 603 不再误写 "Busy Here"
+		{500, "Busy Here", "Server Internal Error"},
+		{404, "x", "Not Found"},
+		{487, "x", "Request Terminated"},
+		{600, "x", "Busy Everywhere"},
+		// 未知码 → fallback 原样返回
+		{499, "保底短语", "保底短语"},
+		{0, "fb", "fb"},
+	}
+	for _, c := range cases {
+		if got := reasonForCode(c.code, c.fallback); got != c.want {
+			t.Errorf("reasonForCode(%d,%q)=%q, want %q", c.code, c.fallback, got, c.want)
+		}
+	}
+}
+
 func TestNextIVRStep(t *testing.T) {
 	step := behavior.IVRStep{
 		ID:      "menu",

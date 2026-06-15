@@ -1,14 +1,13 @@
 // 统一枚举选项。
 // 与后端 internal/behavior 的 Outcome/Fault 一一对应。
 
-// 被叫应答行为 outcome
+// 被叫应答行为 outcome（BRIDGE 是历史值，后端会降级为 ANSWER，前端不再开放新配置）
 export const OUTCOME_OPTIONS = [
   { value: 'ANSWER', label: 'ANSWER 接听' },
   { value: 'REJECT', label: 'REJECT 拒接' },
   { value: 'BUSY', label: 'BUSY 忙线' },
   { value: 'NO_ANSWER', label: 'NO_ANSWER 振铃不接' },
   { value: 'UNAVAILABLE', label: 'UNAVAILABLE 不可达' },
-  { value: 'BRIDGE', label: 'BRIDGE 桥接' },
 ]
 
 // 故障注入：与后端 behavior.Fault 一一对应（8 种 + 无）。

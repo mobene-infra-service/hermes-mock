@@ -177,27 +177,30 @@ func (a *Agent) handleInbound(in *diago.DialogServerSession) {
 	switch rule.Outcome {
 	case behavior.OutcomeReject, behavior.OutcomeBusy:
 		code := orDefault(rule.HangupCode, 486)
-		rejectCall(in, code, reasonForCode(code, "Busy Here"))
-		a.bus.Emit(sess, leg, tracelog.ChanFlow, tracelog.DirNA, "决策", "拒接(Busy Here) 码="+itoa(code), nil)
+		reason := reasonForCode(code, "Busy Here")
+		rejectCall(in, code, reason)
+		a.bus.Emit(sess, leg, tracelog.ChanFlow, tracelog.DirNA, "决策", "拒接("+reason+") 码="+itoa(code), nil)
 		a.tracker.Rejected(id, code)
-		log.Infof("拒接 %d", code)
+		log.WithField("reason", reason).Infof("被叫腿拒接 → 回 %d %s（应回送至发起腿；若发起方仍显示呼叫中，查 FS/call-center 是否透传/重拨）", code, reason)
 		return
 	case behavior.OutcomeUnavailable:
 		code := orDefault(rule.HangupCode, 503)
-		rejectCall(in, code, reasonForCode(code, "Service Unavailable"))
-		a.bus.Emit(sess, leg, tracelog.ChanFlow, tracelog.DirNA, "决策", "不可用(Service Unavailable) 码="+itoa(code), nil)
+		reason := reasonForCode(code, "Service Unavailable")
+		rejectCall(in, code, reason)
+		a.bus.Emit(sess, leg, tracelog.ChanFlow, tracelog.DirNA, "决策", "不可用("+reason+") 码="+itoa(code), nil)
 		a.tracker.Rejected(id, code)
-		log.Infof("不可用 %d", code)
+		log.WithField("reason", reason).Infof("被叫腿不可用 → 回 %d %s", code, reason)
 		return
 	case behavior.OutcomeNoAnswer:
 		ringing(in)
 		a.bus.Emit(sess, leg, tracelog.ChanFlow, tracelog.DirNA, "决策", "振铃", nil)
 		sleepMs(orDefault(rule.RingMs, a.cfg.DefaultRingMs))
 		code := orDefault(rule.HangupCode, 480)
-		rejectCall(in, code, reasonForCode(code, "Temporarily Unavailable"))
-		a.bus.Emit(sess, leg, tracelog.ChanFlow, tracelog.DirNA, "决策", "振铃不接(Temporarily Unavailable) 码="+itoa(code), nil)
+		reason := reasonForCode(code, "Temporarily Unavailable")
+		rejectCall(in, code, reason)
+		a.bus.Emit(sess, leg, tracelog.ChanFlow, tracelog.DirNA, "决策", "振铃不接("+reason+") 码="+itoa(code), nil)
 		a.tracker.Rejected(id, code)
-		log.Info("振铃不接")
+		log.WithField("reason", reason).Infof("被叫腿振铃不接 → 回 %d %s", code, reason)
 		return
 	}
 
@@ -728,24 +731,51 @@ func boolStr(b bool) string {
 	return "false"
 }
 
-// reasonForCode 给 SIP 失败码配标准 reason 短语；未知码用 fallback（保持调用处默认语义）。
-// 解决「自定义 HangupCode 时 reason 文案与码不符」（如 603 仍写 "Busy Here"）。
+// reasonForCode 给 SIP 失败码配标准 reason 短语（RFC 3261 §21 等）；未知码才用 fallback。
+// 解决「自定义 HangupCode 时 reason 文案与码不符」（如配 500 仍写 "Busy Here"、603 仍写 "Busy Here"）。
 func reasonForCode(code int, fallback string) string {
 	switch code {
+	// 4xx Request Failure
+	case 400:
+		return "Bad Request"
+	case 403:
+		return "Forbidden"
+	case 404:
+		return "Not Found"
 	case 408:
 		return "Request Timeout"
+	case 410:
+		return "Gone"
 	case 480:
 		return "Temporarily Unavailable"
+	case 484:
+		return "Address Incomplete"
 	case 486:
 		return "Busy Here"
+	case 487:
+		return "Request Terminated"
 	case 488:
 		return "Not Acceptable Here"
+	// 5xx Server Failure
+	case 500:
+		return "Server Internal Error"
+	case 501:
+		return "Not Implemented"
+	case 502:
+		return "Bad Gateway"
 	case 503:
 		return "Service Unavailable"
+	case 504:
+		return "Server Time-out"
+	// 6xx Global Failure
 	case 600:
 		return "Busy Everywhere"
 	case 603:
 		return "Decline"
+	case 604:
+		return "Does Not Exist Anywhere"
+	case 606:
+		return "Not Acceptable"
 	}
 	return fallback
 }
@@ -886,9 +916,12 @@ func ringing(in *diago.DialogServerSession) { _ = in.Ringing() }
 // answer 回 200 OK 并建立媒体会话。对照 diago v0.28.0
 func answer(in *diago.DialogServerSession) error { return in.Answer() }
 
-// rejectCall 以指定 SIP 码拒接（如 486/503/480）。对照 diago v0.28.0
+// rejectCall 以指定 SIP 码拒接（如 486/503/480/500）。对照 diago v0.28.0
+// Respond 失败会致被叫腿没把终态码发出 → 发起腿永远收不到终态、卡在呼叫中，故落 Error 不吞。
 func rejectCall(in *diago.DialogServerSession, code int, reason string) {
-	_ = in.Respond(code, reason, nil)
+	if err := in.Respond(code, reason, nil); err != nil {
+		logrus.WithFields(logrus.Fields{"code": code, "reason": reason}).Errorf("被叫腿发送拒接响应失败：%v", err)
+	}
 }
 
 // hangup 主动挂断（发 BYE）。对照 diago v0.28.0
