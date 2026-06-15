@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'react'
 import {
-  Card, Table, Tag, Button, message, Alert, Typography, Space, Modal, Form, Input, Select, Popconfirm,
+  Card, Table, Tag, Button, message, Typography, Space, Modal, Form, Input, Select, Popconfirm,
 } from 'antd'
-import { CheckCircleTwoTone, PlusOutlined, ReloadOutlined, ApiOutlined } from '@ant-design/icons'
+import { CheckCircleTwoTone, PlusOutlined, ApiOutlined } from '@ant-design/icons'
 import { listOrgs, upsertOrg, deleteOrg, pingOrg, setCurrentOrg, type OrgConfig } from '../api'
 import { resetSipWebrtcAddrCache } from '../sip/request'
+import { notifyOrgChanged } from '../components/layout/useCurrentOrg'
+import { PageHeader } from '../components/layout/PageHeader'
+import { InfoBanner } from '../components/layout/InfoBanner'
 
 const { Text, Paragraph } = Typography
 
@@ -48,7 +51,7 @@ export default function OrgsPage() {
     } catch (e) { message.error(String(e)) }
   }
   const onSwitch = async (code: string) => {
-    try { await setCurrentOrg(code); resetSipWebrtcAddrCache(); message.success(`当前机构 → ${code}`); load() }
+    try { await setCurrentOrg(code); resetSipWebrtcAddrCache(); notifyOrgChanged(); message.success(`当前机构 → ${code}`); load() }
     catch (e) { message.error(String(e)) }
   }
   const onPing = async (code: string) => {
@@ -62,17 +65,16 @@ export default function OrgsPage() {
 
   return (
     <div className="page-container">
-      <Alert
-        type="info"
-        style={{ marginBottom: 16 }}
-        message={<span>当前测试机构：<Tag color="blue" style={{ fontSize: 14 }}>{current || '未选择'}</Tag></span>}
-        description="mock 与 Hermes 的所有交互只走 OpenAPI（绝不直连 Hermes 数据库）。这里配置每个机构的接入凭据：①网关模式=网关地址+X-OpenApi-Key；②直连模式=各服务地址+机构码（无网关环境用）。切换当前机构后，坐席/任务/对话等都用该机构凭据。"
+      <PageHeader
+        title="机构"
+        status={{ tone: current ? 'success' : 'neutral', text: current ? `当前 ${current}` : '未选择机构' }}
+        onReload={load}
+        actions={<Button type="primary" icon={<PlusOutlined />} onClick={onNew}>新增机构</Button>}
       />
-      <Card title="机构 OpenAPI 接入配置" size="small"
-        extra={<Space>
-          <Button size="small" icon={<ReloadOutlined />} onClick={load}>刷新</Button>
-          <Button type="primary" size="small" icon={<PlusOutlined />} onClick={onNew}>新增机构</Button>
-        </Space>}>
+      <InfoBanner title="机构 OpenAPI 接入凭据（mock 只走 OpenAPI，绝不直连 Hermes 数据库）">
+        这里配置每个机构的接入凭据：①网关模式=网关地址+X-OpenApi-Key；②直连模式=各服务地址+机构码（无网关环境用）。切换当前机构后，坐席/任务/对话等都用该机构凭据。
+      </InfoBanner>
+      <Card title="机构列表" size="small">
         <Table rowKey="orgCode" size="small" dataSource={orgs} pagination={false}
           columns={[
             {

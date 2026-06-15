@@ -1,15 +1,15 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
-  Alert, Button, Card, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Table, Tag, Typography, message,
+  Alert, Button, Card, Form, Input, InputNumber, Modal, Popconfirm, Select, Space, Table, Tag, message,
 } from 'antd'
-import { ReloadOutlined } from '@ant-design/icons'
+import { PlusOutlined } from '@ant-design/icons'
 import {
   listManagedAgents, addManagedAgent, updateManagedAgent, deleteManagedAgent, setManagedAgentEnabled, listOrgs,
   type ManagedAgent, type AddAgentReq, type UpdateAgentReq, type OrgConfig,
 } from '../api'
-
-const { Text } = Typography
+import { PageHeader } from '../components/layout/PageHeader'
+import { InfoBanner } from '../components/layout/InfoBanner'
 
 // 账号启用状态（StatusEnum）：1=启用 / 0=停用 / 2=已删。与工作态（在线/小休/忙）无关——
 // 工作态/在线/外呼属于「坐席外呼」页（浏览器 jssip 软电话），本页只做坐席台账管理（CRUD）。
@@ -82,9 +82,15 @@ export default function AgentsPage() {
 
   return (
     <div className="page-container">
-      <Alert type="info" showIcon style={{ marginBottom: 16 }}
-        message="坐席管理（真实 Hermes 坐席台账，经 OpenAPI 增删改）"
-        description="本页只管坐席台账：查询 / 新增 / 编辑 / 删除 / 启停账号（写 t_agent 由 Hermes 完成，mock 只调 OpenAPI、不直连库）。坐席的上线 / 工作态 / 通话外呼在「重点通话场景 → 坐席外呼」页（浏览器 jssip 软电话）。删除启用中的坐席前需先「停用」。" />
+      <PageHeader
+        title="坐席台账管理"
+        status={{ tone: 'info', text: `共 ${total} 个坐席` }}
+        onReload={() => loadAgents()}
+        actions={<Button type="primary" icon={<PlusOutlined />} onClick={onNew}>新增坐席</Button>}
+      />
+      <InfoBanner title="坐席台账（真实 Hermes 坐席，经 OpenAPI 增删改）">
+        本页只管台账：查询 / 新增 / 编辑 / 删除 / 启停账号（写 t_agent 由 Hermes 完成，mock 只调 OpenAPI）。坐席的上线 / 工作态 / 外呼在「坐席外呼」页（浏览器 jssip 软电话）。删除启用中的坐席前需先「停用」。
+      </InfoBanner>
 
       {loadErr && (
         <Alert type="warning" showIcon style={{ marginBottom: 16 }}
@@ -97,9 +103,6 @@ export default function AgentsPage() {
           <Input placeholder="坐席名" style={{ width: 120 }} allowClear value={q.agentName} onChange={(e) => setQ({ ...q, agentName: e.target.value })} />
           <Input placeholder="技能组" style={{ width: 120 }} allowClear value={q.agentGroupCode} onChange={(e) => setQ({ ...q, agentGroupCode: e.target.value })} />
           <Button type="primary" onClick={queryAgents}>查询</Button>
-          <Button onClick={onNew}>新增坐席</Button>
-          <Button icon={<ReloadOutlined />} onClick={() => loadAgents()}>刷新</Button>
-          <Text type="secondary">共 {total}</Text>
         </Space>
       </Card>
 

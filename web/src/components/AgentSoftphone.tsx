@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Alert, Button, Card, Col, Collapse, Descriptions, Input, InputNumber, Modal, Progress, Radio, Row, Select, Space, Switch, Table, Tag, Timeline, Tooltip, Typography, message } from 'antd'
 import { CaretRightOutlined, PhoneOutlined, PoweroffOutlined, ThunderboltOutlined } from '@ant-design/icons'
 import SipCall, { SipState } from '../sip'
@@ -6,6 +6,8 @@ import SipController, { type CloseInfo } from '../sip/controller'
 import { markSipReady } from '../sip/request'
 import { setReadyAgents } from '../hooks/useReadyAgents'
 import ScenarioRecords from './scenario/ScenarioRecords'
+import { PageHeader } from './layout/PageHeader'
+import { InfoBanner } from './layout/InfoBanner'
 import { clusterResolve, findTraceSession, listManagedAgents, listGroups, listOrgs, saveAgentCallRecord, type BehaviorProfile, type TraceEvent, type TraceSession, type ManagedAgent, type CustomerGroup } from '../api'
 
 const { Text, Paragraph } = Typography
@@ -20,6 +22,7 @@ export interface CardHandle {
   connect: () => void
   disconnect: () => void
   setWork: (key: WorkKey) => void
+  setRule: (rule: AnswerRule) => void // 应用统一接听规则到本卡
   getSnapshot: () => CardSnapshot
 }
 // 卡片状态快照（上报父层做汇总 + 批量操作判断）。
@@ -84,6 +87,12 @@ const DEFAULT_RULE: AnswerRule = { enabled: false, ringSec: 2, action: 'answer',
 
 const traceDir: Record<string, string> = { IN: '入', OUT: '出', '-': '·' }
 function msText(ms?: number) { return !ms || ms < 0 ? '-' : `${(ms / 1000).toFixed(1)}s` }
+// mm:ss 计时（紧凑卡片通话/振铃时长展示，对齐 Figma「00:42」）
+function mmss(ms?: number) {
+  if (!ms || ms < 0) return '00:00'
+  const s = Math.floor(ms / 1000)
+  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
+}
 // wsBrief 把 hermes-ws 推送内容压成短字符串（截断），用于日志展示。
 function wsBrief(v: unknown): string {
   try { const s = typeof v === 'string' ? v : JSON.stringify(v); return s.length > 120 ? `${s.slice(0, 120)}…` : s } catch { return String(v) }
@@ -134,9 +143,9 @@ function assertCall(c: CurrentCall): { verdict: AssertVerdict; reason: string } 
 // 单坐席卡片：各持独立 SipController + SipCall 实例（多坐席同页互不干扰）。
 // forwardRef 暴露 CardHandle 供容器批量并发派号 + 批量连接/工作态。
 const SoftphoneCard = forwardRef<CardHandle, {
-  agent: ManagedAgent; password: string; groups: CustomerGroup[]; collapsed: boolean
+  agent: ManagedAgent; password: string; groups: CustomerGroup[]; collapsed: boolean; initialRule?: AnswerRule
   onRemove: (number: string) => void; onSnapshot: (number: string, s: CardSnapshot) => void
-}>(function SoftphoneCard({ agent, password, groups, collapsed, onRemove, onSnapshot }, ref) {
+}>(function SoftphoneCard({ agent, password, groups, collapsed, initialRule, onRemove, onSnapshot }, ref) {
   const num = agent.number || ''
   const [connected, setConnected] = useState(false)
   const [registered, setRegistered] = useState(false)
@@ -154,7 +163,8 @@ const SoftphoneCard = forwardRef<CardHandle, {
   const [callees, setCallees] = useState('')
   const [takeCount, setTakeCount] = useState(3)
   const [lineType, setLineType] = useState('') // 外呼线路类型（X-JLineType 头；空=不发，Hermes 默认 base）
-  const [rule, setRule] = useState<AnswerRule>(DEFAULT_RULE)
+  const [rule, setRule] = useState<AnswerRule>(initialRule || DEFAULT_RULE)
+  const [, setNowTick] = useState(0) // 通话/振铃中每秒触发重渲，让 MiniCall mm:ss 走字
   const ctrlRef = useRef<SipController | null>(null)
   const callRef = useRef<SipCall | null>(null)
   const cardRootRef = useRef<HTMLDivElement>(null) // 卡片根 DOM：判可见性（常驻软电话切到别页 display:none 时 offsetParent 为 null）
@@ -178,6 +188,12 @@ const SoftphoneCard = forwardRef<CardHandle, {
   useEffect(() => { registeredRef.current = registered }, [registered])
   useEffect(() => { phaseRef.current = phase }, [phase])
   useEffect(() => { connPhaseRef.current = connPhase }, [connPhase])
+  // 通话/振铃进行中：每秒重渲让 MiniCall 的 mm:ss 走字（隐藏标签页跳过；空闲不开计时）
+  useEffect(() => {
+    if (phase === 'idle' || !currentCall || currentCall.endedAt) return
+    const t = setInterval(() => { if (!document.hidden) setNowTick((n) => n + 1) }, 1000)
+    return () => clearInterval(t)
+  }, [phase, currentCall?.id, currentCall?.endedAt])
   // 向父层上报状态快照（汇总 + 批量操作的就绪判断）
   useEffect(() => { onSnapshot(num, { connected, registered, sipReady, status: agentStatus, phase }) },
     [num, connected, registered, sipReady, agentStatus, phase]) // eslint-disable-line
@@ -511,6 +527,7 @@ const SoftphoneCard = forwardRef<CardHandle, {
     getProgress: () => ({ total: queueRef.current.list.length, done: queueRef.current.idx, running: queueRef.current.running }),
     stop: () => { queueRef.current.running = false },
     connect, disconnect, setWork: (k: WorkKey) => { void switchWork(k) },
+    setRule: (r: AnswerRule) => setRule(r),
     getSnapshot: () => ({ connected, registered, sipReady, status: agentStatus, phase }),
   }), [num, connected, registered, sipReady, agentStatus, phase]) // eslint-disable-line
 
@@ -546,8 +563,72 @@ const SoftphoneCard = forwardRef<CardHandle, {
     </Space>
   )
 
+  // ===== 紧凑卡片（Figma AgentCard 11:442）派生：head 药丸 / MiniCall / ActionRow 主按钮 =====
+  // head 状态药丸：通话中(蓝) / 振铃中(蓝) / 就绪(绿) / 在线(绿) / 连接中(琥珀) / 未连接(灰)
+  const pill: { tone: string; label: string } = (() => {
+    if (phase === 'incall') return { tone: 'incall', label: '通话中' }
+    if (phase === 'calling') return { tone: 'incall', label: incomingRinging ? '来电振铃' : '振铃中' }
+    if (connPhase === 'connecting' || connPhase === 'logging' || connPhase === 'registering') return { tone: 'conn', label: cp.label }
+    if (sipReady) return { tone: 'ready', label: '就绪' }
+    if (connected) return { tone: 'online', label: registered ? '在线' : 'WS在线' }
+    if (connPhase === 'failed') return { tone: 'off', label: '失败' }
+    return { tone: 'off', label: '未连接' }
+  })()
+  // MiniCall 内容：通话/振铃时蓝底显当前通话；空闲/离线时灰底显就绪态 + 接听规则摘要
+  const ruleBrief = rule.enabled
+    ? `接听规则：振铃 ${rule.ringSec}s→${rule.action === 'answer' ? '接听' : '拒接'}${rule.probability < 100 ? `（${rule.probability}%）` : ''}`
+    : '接听规则：未启用'
+  const elapsed = currentCall ? (currentCall.endedAt || Date.now()) - currentCall.startedAt : 0
+  const mini: { tone: 'incall' | 'idle'; off?: boolean; main: ReactNode; sub: ReactNode } = (() => {
+    if (currentCall && phase !== 'idle') {
+      const ringing = phase === 'calling'
+      const dirArrow = currentCall.inbound ? '↘ 来电' : '⇄ 客户'
+      const q = queueRef.current
+      const dispatch = q.running && q.list.length > 1 ? ` · 派号 ${Math.min(q.idx + 1, q.list.length)}/${q.list.length}` : ''
+      const main = <>{dirArrow} {currentCall.customer || currentCall.displayCaller || '-'} · {ringing ? '振铃 ' : ''}{mmss(elapsed)}</>
+      const sub = (
+        <>
+          {ringing ? '等待被叫应答' : 'PCMU 双向'}{dispatch}
+          {currentCall.traceId
+            ? <> · <a href={`/trace?session=${encodeURIComponent(currentCall.traceId)}`} target="_blank" rel="noopener noreferrer">trace ↗</a></>
+            : ' · trace 匹配中'}
+        </>
+      )
+      return { tone: 'incall', main, sub }
+    }
+    if (!connected) {
+      return { tone: 'idle', off: true, main: '离线 · 点「连接」上线', sub: '未注册 FreeSWITCH，无法接派号' }
+    }
+    return { tone: 'idle', main: '空闲 · 等待派号或外呼', sub: <>{sipReady ? '已就绪' : '注册中'} · {ruleBrief}</> }
+  })()
+  // ActionRow 主按钮：振铃→接听 / 通话→挂断 / 未连→连接 / 空闲→外呼
+  const primaryAction: ReactNode = (() => {
+    if (incomingRinging) return <Button size="small" type="primary" onClick={answer}>接听</Button>
+    if (phase !== 'idle') return <Button size="small" danger onClick={hangup}>挂断</Button>
+    if (!connected) {
+      const connecting = connPhase === 'connecting' || connPhase === 'logging' || connPhase === 'registering'
+      return <Button size="small" type="primary" loading={connecting} onClick={connect} style={{ background: '#16a34a', borderColor: '#16a34a' }}>{connecting ? '连接中' : '连接'}</Button>
+    }
+    return <Button size="small" type="primary" disabled={!registered} onClick={startCall}>外呼</Button>
+  })()
+
   const body = (
-    <Row gutter={12}>
+    <>
+      {/* 连接步骤条（Figma ConnSteps）：连接 WS → 登录 → 注册 SIP → 就绪 */}
+      <div className="hm-conn-steps">
+        {[
+          { label: '连接 WS', done: connected },
+          { label: '登录', done: connected },
+          { label: '注册 SIP', done: registered },
+          { label: '就绪', done: sipReady },
+        ].map((s, i) => (
+          <span key={s.label} style={{ display: 'inline-flex', alignItems: 'center' }}>
+            {i > 0 && <span className="hm-conn-step-sep">·</span>}
+            <span className={`hm-conn-step ${s.done ? 'is-done' : 'is-pending'}`}>{s.done ? '✓' : '○'} {s.label}</span>
+          </span>
+        ))}
+      </div>
+      <Row gutter={12}>
       <Col xs={24} md={12}>
         {/* 工作态切换 */}
         <Space wrap style={{ marginBottom: 8 }}>
@@ -641,6 +722,7 @@ const SoftphoneCard = forwardRef<CardHandle, {
         }]} />
       </Col>
     </Row>
+    </>
   )
 
   const title = (
@@ -653,9 +735,29 @@ const SoftphoneCard = forwardRef<CardHandle, {
   )
 
   if (collapsed) {
+    // Figma 紧凑卡片：head（坐席号 + 状态药丸 + ✕）· MiniCall（状态色摘要）· ActionRow（被叫号 + 主按钮）
     return (
-      <div ref={cardRootRef}>
-        <Card size="small" style={{ ...(currentCall?.verdict === 'fail' ? { borderColor: '#ff4d4f' } : {}) }} styles={{ body: { display: 'none' } }} title={title} extra={headExtra} />
+      <div ref={cardRootRef} className={`hm-agent-card${currentCall?.verdict === 'fail' ? ' is-fail' : ''}`}>
+        <div className="hm-agent-head">
+          <div className="hm-agent-head-left">
+            <span className="hm-agent-name">坐席 {num}</span>
+            {agent.agentName && <span className="hm-agent-subname">{agent.agentName}</span>}
+            <span className={`hm-agent-pill tone-${pill.tone}`}><span className="dot" />{pill.label}</span>
+            {verdictTag}
+          </div>
+          <button className="hm-agent-remove" title="移除" onClick={() => onRemove(num)}>✕</button>
+        </div>
+        <div className="hm-agent-body">
+          <div className={`hm-minicall tone-${mini.tone}${mini.off ? ' is-off' : ''}`}>
+            <div className="hm-minicall-main">{mini.main}</div>
+            <div className="hm-minicall-sub">{mini.sub}</div>
+          </div>
+          <Space.Compact style={{ width: '100%' }}>
+            <Input size="small" placeholder="被叫客户号码" value={callees} disabled={!registered || phase !== 'idle'}
+              onChange={(e) => setCallees(e.target.value)} onPressEnter={() => { if (registered && phase === 'idle') void startCall() }} />
+            {primaryAction}
+          </Space.Compact>
+        </div>
       </div>
     )
   }
@@ -674,7 +776,6 @@ export default function AgentSoftphone({ onSummary }: { onSummary?: (s: AgentSum
   const [orgPwd, setOrgPwd] = useState('') // 当前机构「新坐席默认口令」（坐席接口未回带口令时兜底）
   const [loadingMeta, setLoadingMeta] = useState(false)
   const [collapsed, setCollapsed] = useState(true) // 卡片默认折叠为紧凑行（C）
-  const [helpOpen, setHelpOpen] = useState(false) // 顶部使用说明默认收起（A）
   // 选择区筛选（搜索 + 技能组 + 状态）（B）
   const [agentQuery, setAgentQuery] = useState('')
   const [filterGroup, setFilterGroup] = useState<string | undefined>()
@@ -689,6 +790,8 @@ export default function AgentSoftphone({ onSummary }: { onSummary?: (s: AgentSum
   const [progress, setProgress] = useState<Record<string, { total: number; done: number; running: boolean }>>({})
   const [snapshots, setSnapshots] = useState<Record<string, CardSnapshot>>({})
   const [agentsTotal, setAgentsTotal] = useState(0)
+  // 统一接听规则（默认套用到新加入坐席；可一键应用到全部）
+  const [unifiedRule, setUnifiedRule] = useState<AnswerRule>(DEFAULT_RULE)
 
   const loadMeta = () => {
     setLoadingMeta(true)
@@ -707,8 +810,10 @@ export default function AgentSoftphone({ onSummary }: { onSummary?: (s: AgentSum
   useEffect(() => { loadMeta() }, [])
 
   // 1s 轮询聚合各卡进度（批量派号期间）。仅在内容变化时 setState，避免无派号时每秒空转重渲染。
+  // 标签页隐藏时跳过（纯本地聚合，无网络，但隐藏时无人看，省渲染）。
   useEffect(() => {
     const t = setInterval(() => {
+      if (document.hidden) return
       const p: Record<string, { total: number; done: number; running: boolean }> = {}
       cardRefs.current.forEach((h, n) => { if (h) { const g = h.getProgress(); if (g.total > 0 || g.running) p[n] = g } })
       setProgress((prev) => {
@@ -791,6 +896,11 @@ export default function AgentSoftphone({ onSummary }: { onSummary?: (s: AgentSum
     let n = 0; cardRefs.current.forEach((h) => { if (h?.getSnapshot().connected) { h.setWork('idle'); n++ } })
     message.info(n ? `已对 ${n} 个在线坐席示闲` : '无在线坐席')
   }
+  // 把统一接听规则应用到全部已加入坐席卡片
+  const applyRuleToAll = () => {
+    let n = 0; cardRefs.current.forEach((h) => { if (h) { h.setRule(unifiedRule); n++ } })
+    message.success(n ? `已把接听规则应用到 ${n} 个坐席` : '尚无坐席卡片')
+  }
 
   const previewNumbers = useMemo(() => resolveDispatchNumbers(), [dispatchGroup, dispatchLimit, dispatchNumbers, groups]) // eslint-disable-line
   const totalProg = useMemo(() => {
@@ -843,18 +953,15 @@ export default function AgentSoftphone({ onSummary }: { onSummary?: (s: AgentSum
   }, [dispatchGroup, dispatchLimit, groups])
 
   return (
-    <div>
-      {helpOpen ? (
-        <Alert type="info" showIcon style={{ marginBottom: 12 }}
-          message={<Space size={8}>多坐席软电话（浏览器 jssip，每坐席一张卡片各自独立在线）<Button type="link" size="small" style={{ padding: 0, height: 'auto' }} onClick={() => setHelpOpen(false)}>收起 ▾</Button></Space>}
-          description={<>勾选坐席→加入卡片→各卡独立连接(hermes-ws 登录 + 注册 FreeSWITCH 真话路)→各自外呼或用下方「批量并发派号」一组坐席同时拨一批客户。取号会显示该号命中的<b>客户行为档</b>，通话结束按预期 outcome 给出 ✓/✗ 断言。接听规则用于坐席被群呼转接来电时自动接/拒。
-            <br /><Text type="secondary">需允许浏览器麦克风权限；分机须已在 FreeSWITCH directory 配置。</Text></>} />
-      ) : (
-        <div style={{ marginBottom: 12 }}>
-          <Text type="secondary" style={{ fontSize: 12 }}>多坐席软电话（浏览器 jssip，每坐席独立在线）</Text>
-          <Button type="link" size="small" style={{ padding: '0 4px', height: 'auto' }} onClick={() => setHelpOpen(true)}>使用说明 ▸</Button>
-        </div>
-      )}
+    <div className="page-container">
+      <PageHeader
+        title="坐席外呼（浏览器软电话）"
+        status={{ tone: summary.ready > 0 ? 'success' : 'neutral', text: summary.ready > 0 ? `就绪 ${summary.ready}` : '未就绪' }}
+        onReload={loadMeta}
+      />
+      <InfoBanner title="坐席浏览器 jssip 软电话 · 走真实 Hermes 工作台链路">
+        坐席在浏览器用 jssip 软电话登录真实 hermes-ws 工作台并经 call-center 选线，bridge 到 mock 扮演的客户被叫腿；坐席不在 mock 后端模拟。勾选坐席→加入卡片→各卡独立连接→各自外呼或用「批量并发派号」一组坐席同时拨一批客户。
+      </InfoBanner>
 
       {/* 选择区：搜索 + 技能组/状态筛选 + 表格多选（表头全选作用于当前筛选结果）；可折叠默认展开，加入后可收起省空间 */}
       <Collapse size="small" defaultActiveKey={['pick']} style={{ marginBottom: 12 }}
@@ -948,6 +1055,40 @@ export default function AgentSoftphone({ onSummary }: { onSummary?: (s: AgentSum
           }]} />
       )}
 
+      {/* 统一接听规则面板（Figma AnswerRulePanel）：坐席被群呼/转接来电时自动接/拒 · 新加入坐席默认套用 */}
+      {active.length > 0 && (
+        <div className="hm-rule-panel">
+          <div className="hm-rule-head">
+            <div>
+              <div className="hm-rule-title">📞 接听规则（统一默认）</div>
+              <div className="hm-rule-sub">坐席被群呼/转接来电时自动接/拒 · 新加入坐席默认套用此规则</div>
+            </div>
+            <Button size="small" style={{ background: '#d97706', borderColor: '#d97706', color: '#fff' }} onClick={applyRuleToAll}>↡ 应用到全部坐席</Button>
+          </div>
+          <div className="hm-rule-controls">
+            <div className="hm-rule-ctl">
+              <Switch size="small" checked={unifiedRule.enabled} onChange={(v) => setUnifiedRule((r) => ({ ...r, enabled: v }))} />
+              <span className="hm-rule-ctl-label">启用规则</span>
+            </div>
+            <div className="hm-rule-ctl">
+              <span>振铃</span>
+              <InputNumber size="small" style={{ width: 64 }} min={0} max={60} value={unifiedRule.ringSec} onChange={(v) => setUnifiedRule((r) => ({ ...r, ringSec: v ?? 0 }))} />
+              <span>秒后触发</span>
+            </div>
+            <div className="hm-rule-ctl">
+              <span>动作</span>
+              <Radio.Group size="small" optionType="button" buttonStyle="solid" value={unifiedRule.action} onChange={(e) => setUnifiedRule((r) => ({ ...r, action: e.target.value }))}
+                options={[{ value: 'answer', label: '自动接听' }, { value: 'reject', label: '自动拒接' }]} />
+            </div>
+            <div className="hm-rule-ctl">
+              <span>命中概率</span>
+              <InputNumber size="small" style={{ width: 70 }} min={0} max={100} value={unifiedRule.probability} onChange={(v) => setUnifiedRule((r) => ({ ...r, probability: v ?? 100 }))} addonAfter="%" />
+              <span style={{ fontSize: 12 }}>（按概率随机接/拒，模拟真实坐席）</span>
+            </div>
+          </div>
+        </div>
+      )}
+
       {active.length === 0
         ? <Alert type="info" showIcon message="开始：① 上方表格勾选坐席 → ② 加入卡片 → ③ 卡片内点「连接」（或顶部「全部连接」）→ ④ 外呼 / 批量并发派号。每个坐席一张卡片，各自独立在线。" />
         : (
@@ -955,7 +1096,7 @@ export default function AgentSoftphone({ onSummary }: { onSummary?: (s: AgentSum
             {active.map((a) => (
               <Col key={a.agent.number} xs={24} {...(collapsed ? { sm: 12, lg: 8 } : {})}>
                 <SoftphoneCard ref={(h) => { cardRefs.current.set(a.agent.number || '', h) }}
-                  agent={a.agent} password={a.password} groups={groups} collapsed={collapsed} onRemove={removeCard} onSnapshot={onSnapshot} />
+                  agent={a.agent} password={a.password} groups={groups} collapsed={collapsed} initialRule={unifiedRule} onRemove={removeCard} onSnapshot={onSnapshot} />
               </Col>
             ))}
           </Row>

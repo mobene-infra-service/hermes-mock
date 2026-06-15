@@ -4,6 +4,7 @@
 
 ## 当前焦点
 
+- **前端按 Figma 重构稿全量重做（2026-06-15 落地）**：新设计系统（slate/blue 色板 + Antd token 单一来源 `web/src/constants/theme.ts`）；自绘深色侧栏 + 顶栏面包屑/机构切换器（`web/src/components/layout/`）；全部 14 屏统一 PageHeader + InfoBanner；场景页（群呼/OTP/call-bot）配置表单收进右侧抽屉、主区改全宽结论横幅 + 通话明细行 + 历史。纯前端、零后端接口改动。`tsc`/`vite build`/`make sync-web`/`go build` 全绿，Playwright 逐屏核对一致。**待办**：① 本机无 eslint 可执行文件，`npm run lint` 未跑；② 端到端（接真实后端/本地栈）跑一遍各场景，确认抽屉提交 + 实时观测 + 机构切换器联动正常；③ 设计稿里坐席卡展开态/批量派号细节（BatchBar 吸顶汇总、接听规则面板）已沿用原有富交互、未逐像素对齐，如需再细化。
 - **DB 模型重构（阶段0–3）已落地**：根除「一通电话散成 3 条 call_record + 2 个 bus session」核心病。`call_uuid` 为唯一跨场景聚合锚；`mock_call_record`→`mock_call`（聚合根，删 4 个死的 SIP 观测列）、`mock_trace_session`→`mock_trace_leg`（写入严格单腿，多腿读时按 call_uuid 归并）；override 复合唯一 + OnConflict 消竞态 + schema 单源（实体 tag 权威，DDL 快照）；观测表 TTL（`OBSERVE_TTL_DAYS=7`）。**待办**：① 本地栈跑一通被叫群呼，确认 `mock_call` 1 行/通 + `mock_trace_leg` 单腿 + 前端记录页/trace 梯形图正常；② 坐席 jssip 外呼确认 `x-session-id: CCMDL{callId}` 被 FS/call-center bridge 透传到被叫腿（两腿同 call_uuid → 多腿视图），不透传则两腿独立记录（不退化）；③ `make web` 前端构建（本机无 node_modules，tsc 未跑）。
 - **Trace 接口瘦身降轮询开销已落地**：`/trace/sessions` 无 query 返回摘要（不含 events、带 `eventCount`），详情走 `/trace/sessions/:id` 单查，坐席软电话用 `?match=<jssip callId>` 让服务端匹配回完整单条；前端轮询加可见性守卫 + 非终态上限 + 周期放宽。
 - Cluster 绑定模型已从 `lineAddress` 收敛为 mock SIP 入口端口：Hermes 线路负责把 INVITE 送到 `mockIP:port`，mock 内部按 `listenPort -> customer_group` 决定客户行为。

@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState, type CSSProperties } from 'react'
 import { Badge, Card, Col, Collapse, Empty, Row, Segmented, Space, Table, Tag, Typography } from 'antd'
 import { getTraceSessions, getTraceSession, type TraceEvent, type TraceSession } from '../api'
+import { PageHeader } from '../components/layout/PageHeader'
+import { InfoBanner } from '../components/layout/InfoBanner'
+import { usePolling } from '../hooks/usePolling'
 
 const { Text, Paragraph } = Typography
 
@@ -331,9 +334,8 @@ export default function CallTracePage() {
   const [detail, setDetail] = useState<TraceSession | undefined>() // 选中会话的完整轨迹（含 events，单查）
   const [legFilter, setLegFilter] = useState<string>('全部')
 
-  // 列表只拉摘要（不含 events），轻量；标签页隐藏时跳过。
+  // 列表只拉摘要（不含 events），轻量；标签页隐藏时由 usePolling 跳过。
   const load = async () => {
-    if (document.hidden) return
     try {
       const ss = await getTraceSessions()
       setSessions(ss)
@@ -343,24 +345,34 @@ export default function CallTracePage() {
       /* ignore */
     }
   }
-  useEffect(() => {
-    load()
-    const t = setInterval(load, 3000)
-    return () => clearInterval(t)
-  }, [])
+  usePolling(load, 3000)
 
   // 选中会话 → 单查完整轨迹（含 events）。切换时先清空，避免梯形图闪上一通；进行中通话由轮询刷新。
+  // 已结束会话不必每 3s 重拉大报文：连续若干轮 updatedAt 不变即视为已定型，停止轮询（标签页隐藏也跳过）。
   useEffect(() => {
     if (!sel) { setDetail(undefined); return }
     setDetail(undefined)
     let alive = true
+    let lastUpdated = ''
+    let stableTicks = 0
+    let timer: ReturnType<typeof setTimeout> | null = null
     const fetchDetail = async () => {
-      if (document.hidden) return
-      try { const d = await getTraceSession(sel); if (alive) setDetail(d) } catch { /* ignore */ }
+      if (!alive) return
+      if (!document.hidden) {
+        try {
+          const d = await getTraceSession(sel)
+          if (!alive) return
+          setDetail(d)
+          // updatedAt 不变累计；变化则归零。稳定（~5 轮≈15s 无新事件）后停止重拉。
+          if (d.updatedAt && d.updatedAt === lastUpdated) stableTicks += 1
+          else { lastUpdated = d.updatedAt || ''; stableTicks = 0 }
+          if (stableTicks >= 5) return // 不再排程，停止轮询
+        } catch { /* ignore */ }
+      }
+      timer = setTimeout(() => { void fetchDetail() }, 3000)
     }
     void fetchDetail()
-    const t = setInterval(() => { void fetchDetail() }, 3000)
-    return () => { alive = false; clearInterval(t) }
+    return () => { alive = false; if (timer) clearTimeout(timer) }
   }, [sel])
 
   const current = sessions.find((s) => s.id === sel) // 列表摘要项（选中态/兜底标题）
@@ -375,6 +387,14 @@ export default function CallTracePage() {
 
   return (
     <div className="page-container">
+      <PageHeader
+        title="通话链路"
+        status={{ tone: 'success', text: '每 3s 自动刷新' }}
+        onReload={() => void load()}
+      />
+      <InfoBanner title="按 SIP Call-ID 抓单腿真实报文 · 同一通业务多腿按 callUuid 归并">
+        左侧选会话 → 右侧看事件梯形图（可展开真实 SIP 报文）。同一通业务通话的多腿在读时按 callUuid 归并装配（纯展示、不写回）。
+      </InfoBanner>
       <Row gutter={[16, 16]}>
         <Col xs={24} xl={7}>
           <Card title="通话链路会话" size="small" styles={{ body: { padding: 0 } }}>

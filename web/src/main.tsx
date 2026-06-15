@@ -6,6 +6,7 @@ import zhCN from 'antd/locale/zh_CN'
 import 'antd/dist/reset.css'
 import './index.css'
 import App from './App'
+import { antdTheme } from './constants/theme'
 
 // dayjs 中文与日期插件（Antd DatePicker 依赖）
 import dayjs from 'dayjs'
@@ -23,10 +24,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ConfigProvider
       locale={zhCN}
-      theme={{
-        token: { borderRadius: 6 },
-        components: { Layout: { headerHeight: 56, headerPadding: '0 24px' } },
-      }}
+      theme={antdTheme}
     >
       <BrowserRouter>
         <App />

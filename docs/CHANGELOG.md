@@ -3,6 +3,29 @@
 > 本项目改动按主题记录（倒序，最新在上）。决策原因见 [DECISIONS.md](DECISIONS.md)，当前状态见 [STATUS.md](STATUS.md)。
 ---
 
+## 2026-06-15
+
+- **坐席外呼卡片（折叠态）按 Figma `11:442` 重构为紧凑卡 + 自动刷新默认关闭**：
+  - **紧凑卡片重画**（`AgentSoftphone.tsx` 折叠态 / `index.css` 新增 `.hm-agent-card`·`.hm-agent-head`·`.hm-agent-pill`·`.hm-minicall`·`.hm-agent-body` 等）：原折叠态仅隐藏 antd Card body、头部堆一排 Tag；改为 Figma 三段式——**head**（坐席号 + 坐席名 + 单个状态色药丸：通话中/振铃中蓝·就绪/在线绿·连接中琥珀·未连接灰，带 dot + ✕ 移除）、**MiniCall**（状态色摘要框：通话/振铃蓝底显「⇄ 客户 X · mm:ss」+「PCMU 双向 · 派号 i/n · trace ↗」，空闲灰底显「空闲·等待派号或外呼」+ 接听规则摘要，离线显「离线·点连接上线」）、**ActionRow**（被叫号 input + 单个情境主按钮：振铃→接听 / 通话→挂断 / 未连→绿色连接 / 空闲→外呼）。通话/振铃中每秒走字（`mmss()` + `setNowTick`，隐藏标签页跳过）。展开态完整卡片不变。
+  - **本场景记录自动刷新默认关闭 + 记住选择**（`ScenarioRecords.tsx`）：原 `useState(true)` 默认开、且组件重挂载（切页/切 Tab）即复位回开；改为默认关闭，并按场景持久化到 localStorage（key `hm.records.auto.<scenario>`，群呼/otp/callbot/坐席各自独立），重挂载从 localStorage 恢复。
+  - 验证：Playwright 实测 `/agent-call` 加入卡片——折叠态三段式渲染对齐 Figma、展开态详情卡片仍可用；`tsc -b`/`vite build`/`make sync-web`/`make verify-embed`/`go build` 全绿。
+
+
+- **统一各页自动刷新（轮询）行为，修后台空转 + 终态不停**：新增 `web/src/hooks/usePolling.ts`（标签页隐藏 `document.hidden` 自动跳过、`enabled` 条件停止、`isVisible` 自定义可见性、fn 用 ref 镜像避免重建定时器）。逐页整改：
+  - **总览 / 通话链路列表 / Hermes 回调**：原 `setInterval` 无 `document.hidden` 守卫——切到后台标签页仍每 3–4s 打请求；统一改 `usePolling`，隐藏即停、回前台续。回调页另修「每敲一个筛选字符就重建定时器」（筛选变化只触发一次即时 load，周期轮询单独跑）。
+  - **群呼 liveCalls（最关键）**：原轮询**永不停**——即使全部接通/未接通已终态，仍每 3s 拉 200 条 sip-inbound，且不防后台。改为按条件轮询：`有取号 && (未拉到实时态 || 还有等待中) && 未超兜底上限(~5min)`，终态即停 + 隐藏跳过；提示文案随状态切换（进行中「每 3s 刷新」/ 终态「已全部出结果，停止刷新」）。
+  - **通话链路详情**：原选中已结束会话仍每 3s 重拉完整 events（含大 raw SIP 报文）；改 `setTimeout` 链式调度 + `updatedAt` 稳定检测（连续 ~5 轮 15s 无新事件即停），隐藏跳过；需要可手动「刷新」。
+  - **ScenarioRecords / 软电话进度聚合**：统一/补 `document.hidden` 守卫（ScenarioRecords 经 `usePolling` 的 `isVisible` 复用原 `offsetParent` 判断，保留 auto 开关）。
+  - 验证：Playwright 实测总览页——前台稳定 3s/次、模拟 `document.hidden` 后 7s 增量为 0（完全停止）、恢复前台自动续；`tsc -b`/`vite build`/`make sync-web`/`go build` 全绿。
+
+- **Figma 重构稿细节对齐（续）**：① 顶栏机构切换器改展示 **orgName**（缺省回退 orgCode）——`useCurrentOrg` 暴露 `currentName`、TopBar 取用；② **坐席外呼页补齐 Figma 缺失元素**：新增琥珀色**统一接听规则面板**（启用/振铃秒/动作 Segmented/命中概率 + 「应用到全部坐席」一键下发，新加入坐席默认套用 → `CardHandle.setRule` + `SoftphoneCard initialRule`），坐席卡展开态加**连接步骤条**（连接 WS · 登录 · 注册 SIP · 就绪，✓/○）；③ **群呼/OTP/call-bot 三场景页头去掉「播种 mock 客户配置」按钮**（播种入口统一收敛到「客户配置」页，避免重复）。`tsc -b`/`vite build`/`make sync-web`/`go build` 全绿，Playwright 实测机构名展示 + 规则面板/步骤条渲染正确。
+
+- **前端全量按 Figma 重构稿落地新设计系统（14 屏）**：对照 Figma「hermes-mock · 通话测试场景」重构稿重写前端外壳与全部页面，纯前端改动、零后端接口变更。
+  - **设计系统**：新增 `web/src/constants/theme.ts`（slate/blue 色板单一来源 + Antd 5 `ConfigProvider` token：主色 `#2563eb`、圆角 8/12、Inter 字体、Layout/Card/Table/Button 等组件 token）；`index.css` 重写为 CSS 变量色板 + 应用外壳/页头/信息条/统计卡/结论横幅/通话明细行样式。`main.tsx` 接入 `antdTheme`。
+  - **应用外壳**（替代旧 antd `Layout`+`Menu`）：`components/layout/` 新增 `Sidebar`（深色 `#0f172a` 自绘侧栏：品牌 LogoMark + 三组导航「控制台/通话测试场景/观测」+ 蓝底 active）、`TopBar`（面包屑「分组 / 当前页」+ 机构切换器绿点下拉 + 头像）、`nav.tsx`（导航模型单一来源 + 面包屑映射）、`useCurrentOrg`（topbar 机构切换 + 事件总线同步）、`PageHeader`/`StatusPill`、`InfoBanner`。`App.tsx` 改用新外壳，路由不变。
+  - **页面**：总览改 StatCard 行 + 双表（彩点状态）；机构/客户配置/坐席/通话链路/Hermes 回调统一 PageHeader + InfoBanner；**场景页（群呼/OTP/call-bot）配置表单移入右侧抽屉 Drawer**（页头「＋ 新建任务」打开，footer 取消/创建），主区改全宽 ResultBanner（语义色对齐新色板）+ 通话明细行（CallRow 改彩点 StatusTag + 双腿 LegView + 证据格）+ 历史记录；`ScenarioHeader` 重写为 PageHeader+InfoBanner；坐席外呼（AgentSoftphone）顶部换 PageHeader+InfoBanner。
+  - **验证**：`tsc -b`、`vite build`、`make sync-web`/`verify-embed`、`go build ./...` 全绿（eslint 因本机缺可执行文件未跑）；Playwright 1440×900 逐屏核对 总览/群呼(+抽屉)/坐席外呼/客户配置/call-bot/Hermes 回调/坐席/机构/通话链路，视觉与设计稿一致。
+
 ## 2026-06-12
 
 - **`/tests/callcenter-task` 由同步长轮询改为「建任务即返回」**：原 `RunCallCenterTaskObserved` 建任务后在 HTTP 内同步阻塞 `waitAnyLegInviteOK(WaitSec=90s)` + 转坐席 `waitSeatTransferAnswered(12s)`，群呼是预测式分钟级调度故接口最坏挂 ~102s。改为建任务+启动后立即返回 + 当前即时快照（`callViewsForCustomers` 非阻塞查此刻已进来的腿）；客户腿/坐席腿进展由前端 `GroupCallPage` 已有的 `liveCalls`（每 3s 轮询）实时补。删孤儿 `waitSeatTransferAnswered`、`CallCenterTaskParams.WaitSec` 默认 90s（字段保留兼容前端）；前端 toast 文案改「已创建并自动拨号」。`go build`/`go test` 全绿。

@@ -31,7 +31,8 @@ cmd/
   hermes-mock/web/dist/  前端构建产物（make web 同步，go:embed 进二进制）
   probe/main.go          独立 Hermes 栈探测 CLI
 internal/                见下表
-web/                     React 18 + Vite + Antd 前端（src/pages 页面、src/components/scenario 场景公共组件、
+web/                     React 18 + Vite + Antd 前端（src/pages 页面、src/components/layout 应用外壳+页头+信息条、
+                         src/components/scenario 场景公共组件、src/constants/theme.ts 设计系统色板+Antd token、
                          src/hooks 共享 hook、src/sip 软电话、src/api.ts）
 deploy/                  Dockerfile / deploy.yaml(K8s) / ddl/hermes_mock.sql（mock 自身库 DDL）
                          （deploy/hermes-stack/ 本地真实栈为本地辅助，不进 git）
@@ -114,7 +115,7 @@ FS ──INVITE──▶ siptrace 抓原始报文 ──▶ sipagent.handleInbou
 | `/trace` | CallTracePage | 通话链路：会话列表 + 事件时间线（可展开原始 SIP） |
 | `/callbacks` | CallbacksPage | Hermes 回调（webhook）接收与查询 |
 
-> 业务测试场景页共享公共模块：`components/scenario/utils.tsx`（ScenarioSummary/CallBoard/RunSteps/JSONBlock/ReadyLabel + 工具）、`components/scenario/ScenarioHeader.tsx`、`hooks/useScenarioMeta.ts`（机构/客户组/技能组/TTS/端口绑定/preflight 加载 + 派生选项 + 播种）。坐席软电话：`components/AgentSoftphone.tsx` + `sip/{index,controller,request}.ts`（多实例 jssip）。
+> 业务测试场景页共享公共模块：`components/scenario/utils.tsx`（ScenarioSummary/CallBoard/CallRows/RunSteps/JSONBlock/ReadyLabel + 工具）、`components/scenario/ScenarioHeader.tsx`（基于 PageHeader+InfoBanner）、`hooks/useScenarioMeta.ts`（机构/客户组/技能组/TTS/端口绑定/preflight 加载 + 派生选项 + 播种）。应用外壳与设计系统：`components/layout/{Sidebar,TopBar,PageHeader,InfoBanner,nav,useCurrentOrg}` + `constants/theme.ts`（slate/blue 色板 + Antd token 单一来源，与 `index.css` 的 CSS 变量对齐）。坐席软电话：`components/AgentSoftphone.tsx` + `sip/{index,controller,request}.ts`（多实例 jssip）。
 
 ## 七、持久化（hermes_mock 库，10 张 mock_* 表）
 

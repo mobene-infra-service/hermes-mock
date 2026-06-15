@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react'
-import { Card, Table, Tag, Input, Space, Button, Typography, Alert, Drawer } from 'antd'
+import { Card, Table, Tag, Input, Space, Button, Typography, Drawer } from 'antd'
 import { ReloadOutlined, SearchOutlined } from '@ant-design/icons'
 import { queryCallbacks, type CallbackRecord } from '../api'
+import { PageHeader } from '../components/layout/PageHeader'
+import { InfoBanner } from '../components/layout/InfoBanner'
+import { usePolling } from '../hooks/usePolling'
 
 const { Text, Paragraph } = Typography
 
@@ -19,16 +22,20 @@ export default function CallbacksPage() {
     try { const r = await queryCallbacks({ source, event, callUuid, keyword }); setRecs(r.callbacks || []) }
     catch { /* ignore */ }
   }
-  useEffect(() => { load(); const t = setInterval(load, 4000); return () => clearInterval(t) }, [source, event, callUuid, keyword])
+  // 筛选变化即时刷新一次；周期轮询统一交给 usePolling（标签页隐藏自动跳过，不再每敲一字符重建定时器）。
+  useEffect(() => { void load() }, [source, event, callUuid, keyword]) // eslint-disable-line
+  usePolling(load, 4000, { immediate: false })
 
   return (
     <div className="page-container">
-      <Alert
-        type="info"
-        style={{ marginBottom: 16 }}
-        message="Hermes 回调接收（webhook）"
-        description={<span>Hermes 主动回调推到 <Text code>POST /api/callbacks/&lt;source&gt;</Text>（如 callbot/autocall/cdr）。请在 Hermes 侧把回调地址配置为指向本 mock。带 callUuid 的回调会自动并入「通话链路」。下方可按来源/事件/callUuid/关键字筛选。</span>}
+      <PageHeader
+        title="Hermes 回调"
+        status={{ tone: 'info', text: `${recs.length} 条` }}
+        onReload={load}
       />
+      <InfoBanner title="Hermes 回调接收（webhook）">
+        Hermes 主动回调推到 <Text code>POST /api/callbacks/&lt;source&gt;</Text>（如 callbot/autocall/cdr）。请在 Hermes 侧把回调地址配置为指向本 mock。带 callUuid 的回调会自动并入「通话链路」。下方可按来源/事件/callUuid/关键字筛选。
+      </InfoBanner>
       <Card title="回调记录" size="small"
         extra={
           <Space wrap>

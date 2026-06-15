@@ -334,35 +334,45 @@ function Cell({ label, value }: { label: string; value: string }) {
 // ============================================================================
 // 通话明细行：可展开。收起=结局+号码+证据摘要一行；展开=Hermes侧↔mock侧 + 证据格。
 // ============================================================================
+
+// 结局状态彩点 pill（Figma StatusTag：浅底 + 彩点 + 文案）。
+function OutcomePill({ status }: { status?: string }) {
+  const o = callOutcome(status)
+  const tone = o.kind === 'answered' ? 'success' : o.kind === 'failed' ? 'danger' : o.kind === 'ringing' ? 'info' : 'warning'
+  return <span className={`hm-status-pill is-${tone}`}><span className="hm-status-dot" />{o.text}</span>
+}
+
 export function CallRow({ call }: { call: CallView }) {
   const [open, setOpen] = useState(false)
-  const o = callOutcome(call.status)
   return (
-    <div className="call-row">
+    <div className={`call-row${open ? ' is-open' : ''}`}>
       <div className="call-row-head" onClick={() => setOpen((v) => !v)}>
         <CaretRightOutlined className={`call-row-caret${open ? ' is-open' : ''}`} />
-        <span>{o.icon}</span>
-        <Tag color={o.kind === 'answered' ? 'success' : o.kind === 'failed' ? 'error' : o.kind === 'ringing' ? 'processing' : 'warning'}>
-          {o.text}
-        </Tag>
+        <OutcomePill status={call.status} />
         <span className="call-row-number">{call.customer || '-'}</span>
         <span className="call-row-spacer" />
         <span className="call-row-evidence-inline">
-          {call.durationMs ? <span>{(call.durationMs / 1000).toFixed(1)}s</span> : null}
+          {call.durationMs ? <span>{(call.durationMs / 1000).toFixed(1)}s</span> : <span>—</span>}
           {call.agent ? <span>坐席 {call.agent}</span> : call.agentGroup ? <span>组 {call.agentGroup}</span> : null}
           {call.detail ? <Text type="secondary" style={{ fontSize: 12 }}>{shortText(call.detail, 24)}</Text> : null}
+          {call.traceId ? (
+            <a href={`/trace?session=${encodeURIComponent(call.traceId)}`} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>trace ↗</a>
+          ) : null}
         </span>
-        {call.traceId ? (
-          <a href={`/trace?session=${encodeURIComponent(call.traceId)}`} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()}>trace ↗</a>
-        ) : null}
       </div>
       {open && (
         <div className="call-row-body">
-          <Space size="large" wrap style={{ marginBottom: 4 }}>
-            <span><Text type="secondary" style={{ fontSize: 12 }}>Hermes 业务侧</Text> <Text strong>{call.agent || call.agentGroup || '由 Hermes 调度'}</Text></span>
-            <span style={{ color: '#bfbfbf' }}>⇄</span>
-            <span><Text type="secondary" style={{ fontSize: 12 }}>mock 客户被叫</Text> <Text strong>{call.customer || '-'}</Text> <Text type="secondary" style={{ fontSize: 12 }}>{call.customerState}</Text></span>
-          </Space>
+          <div className="leg-view">
+            <div className="leg-card">
+              <div className="leg-card-label">Hermes 业务侧</div>
+              <div className="leg-card-value">{call.agent || call.agentGroup || '由 Hermes 调度'}{call.agentState ? ` · ${call.agentState}` : ''}</div>
+            </div>
+            <div className="leg-arrow">⇄</div>
+            <div className="leg-card">
+              <div className="leg-card-label">mock 客户被叫</div>
+              <div className="leg-card-value">{call.customer || '-'}{call.customerState ? ` · ${call.customerState}` : ''}</div>
+            </div>
+          </div>
           <CallEvidence traceId={call.traceId} />
         </div>
       )}
@@ -373,5 +383,5 @@ export function CallRow({ call }: { call: CallView }) {
 // CallRows 一组通话明细行（替代 CallBoard 的卡片墙；空态返回 null）。
 export function CallRows({ calls }: { calls: CallView[] }) {
   if (!calls.length) return null
-  return <div>{calls.map((c, i) => <CallRow key={`${c.id}-${i}`} call={c} />)}</div>
+  return <div className="call-list-wrap">{calls.map((c, i) => <CallRow key={`${c.id}-${i}`} call={c} />)}</div>
 }

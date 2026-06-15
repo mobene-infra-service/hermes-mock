@@ -1,45 +1,52 @@
-import { Alert, Button, Space, Typography } from 'antd'
-import { ReloadOutlined } from '@ant-design/icons'
+import { Button } from 'antd'
 import type { ReactNode } from 'react'
 import type { PreflightReport } from '../../api'
-import { ReadyLabel } from './utils'
+import { PageHeader, type StatusTone } from '../layout/PageHeader'
+import { InfoBanner } from '../layout/InfoBanner'
 
-const { Title } = Typography
+// preflight 报告 → 页头状态小标签的 tone/文案。
+function readyStatus(report?: PreflightReport): { tone: StatusTone; text: string } | undefined {
+  if (!report) return undefined
+  const fails = report.checks.filter((c) => c.status === 'FAIL').length
+  const warns = report.checks.filter((c) => c.status === 'WARN').length
+  if (report.ready) return { tone: warns ? 'warning' : 'success', text: warns ? `就绪 · ${warns} 提示` : '就绪' }
+  return { tone: 'danger', text: `未就绪 · ${fails} 项缺失` }
+}
 
-// 业务测试场景页统一页头：标题 + 就绪标签 + 播种/刷新；可选「Hermes 发起·mock 扮被叫」说明条。
+// 业务测试场景页统一页头：标题 + 就绪标签 + 播种/刷新（PageHeader）+「Hermes 发起·mock 扮被叫」说明条（InfoBanner）。
 export function ScenarioHeader({
-  title, ready, bootstrapping, onBootstrap, onReload, note, extra,
+  title, ready, bootstrapping, onBootstrap, onReload, note, extra, infoTitle, infoDesc,
 }: {
   title: string
   ready?: PreflightReport
   bootstrapping?: boolean
   onBootstrap?: () => void
   onReload?: () => void
-  note?: ReactNode // 额外说明
+  note?: ReactNode // 传入则完全替代默认说明条
   extra?: ReactNode
+  infoTitle?: ReactNode
+  infoDesc?: ReactNode
 }) {
   return (
-    <div style={{ marginBottom: 16 }}>
-      <Space style={{ width: '100%', justifyContent: 'space-between', flexWrap: 'wrap' }} align="start">
-        <Space align="center">
-          <Title level={4} style={{ margin: 0 }}>{title}</Title>
-          {ready !== undefined && <ReadyLabel report={ready} />}
-        </Space>
-        <Space>
-          {extra}
-          {onBootstrap && <Button size="small" type="primary" loading={bootstrapping} onClick={onBootstrap}>播种 mock 客户配置</Button>}
-          {onReload && <Button size="small" icon={<ReloadOutlined />} onClick={onReload}>刷新</Button>}
-        </Space>
-      </Space>
+    <>
+      <PageHeader
+        title={title}
+        status={readyStatus(ready)}
+        onReload={onReload}
+        actions={(
+          <>
+            {extra}
+            {onBootstrap && (
+              <Button type="primary" loading={bootstrapping} onClick={onBootstrap}>播种 mock 客户配置</Button>
+            )}
+          </>
+        )}
+      />
       {note ?? (
-        <Alert
-          type="info"
-          showIcon
-          style={{ marginTop: 12 }}
-          message="Hermes 业务发起 · mock 扮客户被叫"
-          description="由 Hermes 业务侧发起外呼，mock 扮演外部客户被叫线路应答；下方展示每通电话的 Hermes 业务侧与 mock 客户被叫侧状态。"
-        />
+        <InfoBanner title={infoTitle ?? 'Hermes 业务发起 · mock 扮客户被叫'}>
+          {infoDesc ?? '由 Hermes 业务侧发起外呼，mock 扮演外部客户被叫线路应答；下方展示每通电话的 Hermes 业务侧与 mock 客户被叫侧状态。'}
+        </InfoBanner>
       )}
-    </div>
+    </>
   )
 }
