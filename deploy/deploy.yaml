@@ -86,26 +86,3 @@ spec:
                 fieldRef:
                   fieldPath: status.podIP
       restartPolicy: Always
-
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: ${APP}-svc
-  namespace: ${PROJECT}
-  labels:
-    app: ${APP}
-spec:
-  selector:
-    app: ${APP}
-  ports:
-    - name: http
-      protocol: TCP
-      port: 80                    # svc 端口
-      targetPort: 80              # pod 端口（Dockerfile ENV HTTP_PORT=80）
-    - name: sip
-      protocol: UDP
-      port: 5060                  # 同集群 FreeSWITCH 经 ${APP}-svc:5060 把 INVITE 送到被叫腿
-      targetPort: 5060
-  type: ClusterIP
-
