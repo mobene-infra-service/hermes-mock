@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"io/fs"
@@ -832,9 +833,45 @@ func (d *Deps) queryCallRecords(c *gin.Context) {
 	if records == nil {
 		records = []cluster.CallRecordRow{}
 	}
+	d.enrichCallRecordTraceIDs(c.Request.Context(), records)
 	c.JSON(http.StatusOK, cluster.CallRecordPage{
 		Records: records, Total: meta.Total, Page: int(meta.Page), PageSize: int(meta.PageSize),
 	})
+}
+
+// enrichCallRecordTraceIDs 给通话记录补齐 traceId：事实表 mock_call 以 call_uuid 作为跨腿关联锚，
+// trace 表 mock_trace_leg 则以 session_id 作为前端可打开的 trace id、以 call_uuid 保存关联锚。
+// 早期/实时记录可能只落了 call_uuid 没落 trace_id；查询时补齐，避免各页面显示「无对应 trace」。
+func (d *Deps) enrichCallRecordTraceIDs(ctx context.Context, records []cluster.CallRecordRow) {
+	for i := range records {
+		if strings.TrimSpace(records[i].TraceID) != "" {
+			continue
+		}
+		if traceID := d.traceIDForCallUUID(ctx, records[i].CallUUID); traceID != "" {
+			records[i].TraceID = traceID
+		}
+	}
+}
+
+func (d *Deps) traceIDForCallUUID(ctx context.Context, callUUID string) string {
+	callUUID = strings.TrimSpace(callUUID)
+	if callUUID == "" {
+		return ""
+	}
+	if d.Bus != nil {
+		for _, s := range d.Bus.Sessions() {
+			if s != nil && strings.TrimSpace(s.CallID) == callUUID {
+				return s.ID
+			}
+		}
+	}
+	if d.Repo != nil {
+		legs, err := d.Repo.ListTraceLegsByCallUUID(ctx, callUUID)
+		if err == nil && len(legs) > 0 {
+			return legs[0].SessionID
+		}
+	}
+	return ""
 }
 
 // saveCallRecord 由前端坐席软电话在每通外呼结束时回存「坐席侧」记录（含期望/实际/断言）。
@@ -926,6 +963,7 @@ func (d *Deps) saveCallRecord(c *gin.Context) {
 		CallType:       callType,
 		Status:         status,
 		Result:         summary,
+		TraceID:        in.TraceID,
 		CallUUID:       callUUID,
 		StartedAt:      started,
 		AnsweredAt:     answeredAt,

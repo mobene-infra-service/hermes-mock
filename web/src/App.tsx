@@ -8,6 +8,7 @@ import CallbacksPage from './pages/CallbacksPage'
 import GroupCallPage from './pages/GroupCallPage'
 import CallbotPage from './pages/CallbotPage'
 import OtpPage from './pages/OtpPage'
+import AgentCallSdkPage from './pages/AgentCallSdkPage'
 import AgentSoftphone from './components/AgentSoftphone'
 import Sidebar from './components/layout/Sidebar'
 import TopBar from './components/layout/TopBar'
@@ -15,6 +16,7 @@ import TopBar from './components/layout/TopBar'
 export default function App() {
   const loc = useLocation()
   const onAgentCall = loc.pathname === '/agent-call'
+  const onAgentCallSdk = loc.pathname === '/agent-call-sdk'
   return (
     <div className="hm-shell">
       <Sidebar />
@@ -26,8 +28,12 @@ export default function App() {
           <div style={{ display: onAgentCall ? 'block' : 'none' }}>
             <AgentSoftphone />
           </div>
-          {/* 其它页面正常路由；/agent-call 的内容由上面常驻层提供，故路由占位为空 */}
-          <div style={{ display: onAgentCall ? 'none' : 'block' }}>
+          {/* SDK 调试台也常驻隐藏，切页不销毁 SDK 实例，避免坐席登录态/连接态丢失。 */}
+          <div style={{ display: onAgentCallSdk ? 'block' : 'none' }}>
+            <AgentCallSdkPage />
+          </div>
+          {/* 其它页面正常路由；常驻页的内容由上面常驻层提供，故路由占位为空 */}
+          <div style={{ display: onAgentCall || onAgentCallSdk ? 'none' : 'block' }}>
             <Routes>
               <Route path="/" element={<Navigate to="/overview" replace />} />
               <Route path="/overview" element={<OverviewPage />} />
@@ -35,6 +41,7 @@ export default function App() {
               <Route path="/cluster" element={<ClusterPage />} />
               <Route path="/agents" element={<AgentsPage />} />
               <Route path="/agent-call" element={null} />
+              <Route path="/agent-call-sdk" element={null} />
               <Route path="/group-call" element={<GroupCallPage />} />
               <Route path="/callbot" element={<CallbotPage />} />
               <Route path="/otp" element={<OtpPage />} />

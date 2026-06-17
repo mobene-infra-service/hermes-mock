@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"hermes-mock/internal/cluster"
 	"hermes-mock/internal/tracelog"
 )
 
@@ -81,6 +83,20 @@ func TestTraceSessionsMatchReturnsFull(t *testing.T) {
 	}
 	if len(none) != 0 {
 		t.Errorf("不存在的 token 匹配数=%d, want 0", len(none))
+	}
+}
+
+func TestEnrichCallRecordTraceIDsFromBus(t *testing.T) {
+	callUUID := "CCMDLabc123"
+	bus := busWithOneCall("jssip-ABC123", callUUID)
+	wantTraceID := bus.Sessions()[0].ID
+	rows := []cluster.CallRecordRow{{RecordID: "agent-call:abc123", CallUUID: callUUID}}
+
+	d := &Deps{Bus: bus}
+	d.enrichCallRecordTraceIDs(context.Background(), rows)
+
+	if rows[0].TraceID != wantTraceID {
+		t.Fatalf("TraceID=%q, want %q", rows[0].TraceID, wantTraceID)
 	}
 }
 

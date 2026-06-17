@@ -23,6 +23,7 @@ export interface CardHandle {
   disconnect: () => void
   setWork: (key: WorkKey) => void
   setRule: (rule: AnswerRule) => void // 应用统一接听规则到本卡
+  setOutputMuted: (muted: boolean) => void // 仅静浏览器本地播放，避免并发压测噪音
   getSnapshot: () => CardSnapshot
 }
 // 卡片状态快照（上报父层做汇总 + 批量操作判断）。
@@ -83,7 +84,8 @@ interface AnswerRule {
   probability: number  // 命中概率 %（0-100）
   talkSec: number      // answer 后自动挂断时长（0=不自动挂）
 }
-const DEFAULT_RULE: AnswerRule = { enabled: false, ringSec: 2, action: 'answer', probability: 100, talkSec: 0 }
+const DEFAULT_RULE: AnswerRule = { enabled: true, ringSec: 2, action: 'answer', probability: 100, talkSec: 0 }
+const DEFAULT_DISPATCH_GAP_MS = 500
 
 const traceDir: Record<string, string> = { IN: '入', OUT: '出', '-': '·' }
 function msText(ms?: number) { return !ms || ms < 0 ? '-' : `${(ms / 1000).toFixed(1)}s` }
@@ -144,8 +146,9 @@ function assertCall(c: CurrentCall): { verdict: AssertVerdict; reason: string } 
 // forwardRef 暴露 CardHandle 供容器批量并发派号 + 批量连接/工作态。
 const SoftphoneCard = forwardRef<CardHandle, {
   agent: ManagedAgent; password: string; groups: CustomerGroup[]; collapsed: boolean; initialRule?: AnswerRule
+  dispatchGapMs: number; outputMuted: boolean
   onRemove: (number: string) => void; onSnapshot: (number: string, s: CardSnapshot) => void
-}>(function SoftphoneCard({ agent, password, groups, collapsed, initialRule, onRemove, onSnapshot }, ref) {
+}>(function SoftphoneCard({ agent, password, groups, collapsed, initialRule, dispatchGapMs, outputMuted, onRemove, onSnapshot }, ref) {
   const num = agent.number || ''
   const [connected, setConnected] = useState(false)
   const [registered, setRegistered] = useState(false)
@@ -172,6 +175,7 @@ const SoftphoneCard = forwardRef<CardHandle, {
   const queueRef = useRef<{ list: string[]; idx: number; running: boolean }>({ list: [], idx: 0, running: false })
   const expectRef = useRef<Map<string, Expectation>>(new Map()) // 被叫号 → 期望行为档（取号时解析）
   const lineTypeRef = useRef('') // lineType 镜像（dialNext 定时器闭包里读最新值）
+  const dispatchGapMsRef = useRef(DEFAULT_DISPATCH_GAP_MS) // 批量队列呼间隔，避免定时器闭包读旧值
   const ruleRef = useRef<AnswerRule>(DEFAULT_RULE)
   const ringTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const talkTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -185,6 +189,8 @@ const SoftphoneCard = forwardRef<CardHandle, {
   const connPhaseRef = useRef<ConnPhase>('offline')
   useEffect(() => { ruleRef.current = rule }, [rule])
   useEffect(() => { lineTypeRef.current = lineType.trim() }, [lineType])
+  useEffect(() => { dispatchGapMsRef.current = Math.max(0, dispatchGapMs || 0) }, [dispatchGapMs])
+  useEffect(() => { callRef.current?.setOutputMuted(outputMuted) }, [outputMuted])
   useEffect(() => { registeredRef.current = registered }, [registered])
   useEffect(() => { phaseRef.current = phase }, [phase])
   useEffect(() => { connPhaseRef.current = connPhase }, [connPhase])
@@ -293,9 +299,9 @@ const SoftphoneCard = forwardRef<CardHandle, {
         pushLog(`外呼 ${customer}（${q.idx + 1}/${q.list.length}）`)
       } else {
         // call() 未注册时返回空串、不触发 CALL_END，队列会卡死——主动跳过继续下一个
-        pushLog(`外呼 ${customer} 未发起（坐席未就绪），跳过`); q.idx += 1; dialTimerRef.current = setTimeout(dialNext, 800)
+        pushLog(`外呼 ${customer} 未发起（坐席未就绪），跳过`); q.idx += 1; dialTimerRef.current = setTimeout(dialNext, dispatchGapMsRef.current)
       }
-    } catch (e) { pushLog(`外呼 ${customer} 失败：${String(e)}`); q.idx += 1; dialTimerRef.current = setTimeout(dialNext, 800) }
+    } catch (e) { pushLog(`外呼 ${customer} 失败：${String(e)}`); q.idx += 1; dialTimerRef.current = setTimeout(dialNext, dispatchGapMsRef.current) }
   }
 
   const onSipState = (event: string, data: unknown) => {
@@ -370,7 +376,7 @@ const SoftphoneCard = forwardRef<CardHandle, {
           return ended
         })
         const q = queueRef.current
-        if (q.running) { q.idx += 1; dialTimerRef.current = setTimeout(dialNext, 1000) }
+        if (q.running) { q.idx += 1; dialTimerRef.current = setTimeout(dialNext, dispatchGapMsRef.current) }
         break
       }
       case SipState.HOLD: setHeld(true); break
@@ -417,6 +423,7 @@ const SoftphoneCard = forwardRef<CardHandle, {
             extNo: num, extPwd: password, checkMic: true, autoRegister: true,
             stateEventListener: onSipState, sipController: ctrlRef.current!,
           })
+          callRef.current.setOutputMuted(outputMuted)
           if (destroyedRef.current) { try { callRef.current.destroy() } catch { /* ignore */ }; callRef.current = null }
         },
         onCloseHook: (info?: CloseInfo) => {
@@ -528,6 +535,7 @@ const SoftphoneCard = forwardRef<CardHandle, {
     stop: () => { queueRef.current.running = false },
     connect, disconnect, setWork: (k: WorkKey) => { void switchWork(k) },
     setRule: (r: AnswerRule) => setRule(r),
+    setOutputMuted: (muted: boolean) => { callRef.current?.setOutputMuted(muted) },
     getSnapshot: () => ({ connected, registered, sipReady, status: agentStatus, phase }),
   }), [num, connected, registered, sipReady, agentStatus, phase]) // eslint-disable-line
 
@@ -775,7 +783,7 @@ export default function AgentSoftphone({ onSummary }: { onSummary?: (s: AgentSum
   const [active, setActive] = useState<{ agent: ManagedAgent; password: string }[]>([]) // 口令随卡片快照
   const [orgPwd, setOrgPwd] = useState('') // 当前机构「新坐席默认口令」（坐席接口未回带口令时兜底）
   const [loadingMeta, setLoadingMeta] = useState(false)
-  const [collapsed, setCollapsed] = useState(true) // 卡片默认折叠为紧凑行（C）
+  const [collapsed, setCollapsed] = useState(false) // 卡片默认展开，便于直接查看链路/日志与接听规则
   // 选择区筛选（搜索 + 技能组 + 状态）（B）
   const [agentQuery, setAgentQuery] = useState('')
   const [filterGroup, setFilterGroup] = useState<string | undefined>()
@@ -784,12 +792,14 @@ export default function AgentSoftphone({ onSummary }: { onSummary?: (s: AgentSum
   const cardRefs = useRef<Map<string, CardHandle | null>>(new Map())
   const [dispatchGroup, setDispatchGroup] = useState<string | undefined>()
   const [dispatchLimit, setDispatchLimit] = useState(6)
+  const [dispatchGapMs, setDispatchGapMs] = useState(DEFAULT_DISPATCH_GAP_MS)
   const [dispatchNumbers, setDispatchNumbers] = useState('')
   const [dispatchScope, setDispatchScope] = useState<'all' | 'picked'>('all')
   const [dispatchPicked, setDispatchPicked] = useState<string[]>([])
   const [progress, setProgress] = useState<Record<string, { total: number; done: number; running: boolean }>>({})
   const [snapshots, setSnapshots] = useState<Record<string, CardSnapshot>>({})
   const [agentsTotal, setAgentsTotal] = useState(0)
+  const [outputMuted, setOutputMuted] = useState(false)
   // 统一接听规则（默认套用到新加入坐席；可一键应用到全部）
   const [unifiedRule, setUnifiedRule] = useState<AnswerRule>(DEFAULT_RULE)
 
@@ -875,6 +885,14 @@ export default function AgentSoftphone({ onSummary }: { onSummary?: (s: AgentSum
   const stopAll = () => {
     cardRefs.current.forEach((h) => h?.stop())
     message.info('已停止全部批量派号（当前通话不中断）')
+  }
+  const toggleOutputMuted = () => {
+    setOutputMuted((muted) => {
+      const next = !muted
+      cardRefs.current.forEach((h) => h?.setOutputMuted(next))
+      message.info(next ? '已静音全部坐席本地播放' : '已取消全部坐席本地播放静音')
+      return next
+    })
   }
 
   // 批量连接/断开/示闲（反馈实际作用张数）
@@ -1000,6 +1018,7 @@ export default function AgentSoftphone({ onSummary }: { onSummary?: (s: AgentSum
             <Button size="small" onClick={connectAll}>全部连接</Button>
             <Button size="small" onClick={disconnectAll}>全部断开</Button>
             <Button size="small" onClick={idleAll}>全部示闲</Button>
+            <Button size="small" type={outputMuted ? 'primary' : 'default'} onClick={toggleOutputMuted}>{outputMuted ? '取消静音' : '一键静音'}</Button>
             <Switch size="small" checkedChildren="折叠" unCheckedChildren="展开" checked={collapsed} onChange={setCollapsed} />
             <Text type="secondary" style={{ fontSize: 12 }}>汇总:</Text>
             <Tag>卡片 {summary.total}</Tag>
@@ -1026,6 +1045,9 @@ export default function AgentSoftphone({ onSummary }: { onSummary?: (s: AgentSum
                     <Select style={{ width: 160 }} allowClear placeholder="客户组取号" value={dispatchGroup} onChange={setDispatchGroup}
                       options={groups.map((g) => ({ value: g.code, label: `${g.code}（${g.count || 0}）` }))} />
                     <Tooltip title="从客户组取多少个号"><InputNumber style={{ width: 80 }} min={1} max={500} value={dispatchLimit} onChange={(v) => setDispatchLimit(v ?? 1)} /></Tooltip>
+                    <Tooltip title="同一坐席队列里，上一通结束后等待多久再拨下一通；坐席之间仍并发。">
+                      <InputNumber style={{ width: 120 }} min={0} max={5000} step={100} addonAfter="ms" value={dispatchGapMs} onChange={(v) => setDispatchGapMs(v ?? DEFAULT_DISPATCH_GAP_MS)} />
+                    </Tooltip>
                   </Space.Compact>
                   <Input style={{ width: 240 }} placeholder="或手填被叫号(逗号分隔)" value={dispatchNumbers} onChange={(e) => setDispatchNumbers(e.target.value)} />
                   <Radio.Group value={dispatchScope} onChange={(e) => setDispatchScope(e.target.value)} optionType="button" size="small"
@@ -1096,7 +1118,8 @@ export default function AgentSoftphone({ onSummary }: { onSummary?: (s: AgentSum
             {active.map((a) => (
               <Col key={a.agent.number} xs={24} {...(collapsed ? { sm: 12, lg: 8 } : {})}>
                 <SoftphoneCard ref={(h) => { cardRefs.current.set(a.agent.number || '', h) }}
-                  agent={a.agent} password={a.password} groups={groups} collapsed={collapsed} initialRule={unifiedRule} onRemove={removeCard} onSnapshot={onSnapshot} />
+                  agent={a.agent} password={a.password} groups={groups} collapsed={collapsed} initialRule={unifiedRule}
+                  dispatchGapMs={dispatchGapMs} outputMuted={outputMuted} onRemove={removeCard} onSnapshot={onSnapshot} />
               </Col>
             ))}
           </Row>
