@@ -1,8 +1,14 @@
 /* 全局样式：设计系统色板（slate/blue）+ 应用外壳 + 统一页面容器 + 响应式。 */
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
+@layer hermes-reset {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  body {
+    margin: 0;
+  }
 }
 
 body {

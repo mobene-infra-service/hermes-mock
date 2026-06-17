@@ -87,6 +87,7 @@ export default class SipCall {
   private sipController?: SipController
   private stateEventListener: (event: string, data: unknown) => void
   private closed = false
+  private outputMuted = false
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private registerKeepaliveTimer: ReturnType<typeof setInterval> | null = null
 
@@ -265,10 +266,12 @@ export default class SipCall {
 
   private handleAudio(pc: RTCPeerConnection) {
     this.audioView.autoplay = true
+    this.audioView.muted = this.outputMuted
     if ('ontrack' in pc) {
       pc.ontrack = (media) => {
         if (media.streams.length > 0 && media.streams[0].active) {
           this.audioView.srcObject = media.streams[0]
+          this.audioView.muted = this.outputMuted
         }
       }
     }
@@ -382,6 +385,14 @@ export default class SipCall {
     }
   }
 
+  // 静音浏览器本地播放的远端音频：不改 SIP/RTP 发送方向，适合多坐席压测时一键消音。
+  public setOutputMuted(muted: boolean) {
+    this.outputMuted = muted
+    this.audioView.muted = muted
+    const ringEl = document.getElementById(this.ringId) as HTMLAudioElement | null
+    if (ringEl) ringEl.muted = muted
+  }
+
   public transfer(phone: string) {
     if (this.currentSession && this.checkCurrentCallIsActive()) this.currentSession.refer(phone)
   }
@@ -439,6 +450,7 @@ export default class SipCall {
       el.loop = true
       document.body.appendChild(el)
     }
+    el.muted = this.outputMuted
     el.play().catch(() => {})
   }
 

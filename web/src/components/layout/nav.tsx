@@ -1,7 +1,7 @@
 import {
   DashboardOutlined, NodeIndexOutlined, ClusterOutlined, CustomerServiceOutlined,
   BankOutlined, BellOutlined, TeamOutlined, RobotOutlined, SafetyCertificateOutlined,
-  PhoneOutlined,
+  PhoneOutlined, ApiOutlined,
 } from '@ant-design/icons'
 import type { ReactNode } from 'react'
 
@@ -31,6 +31,7 @@ export const NAV_GROUPS: NavGroup[] = [
     label: '通话测试场景',
     items: [
       { key: '/agent-call', label: '坐席外呼', icon: <CustomerServiceOutlined />, group: '通话测试场景' },
+      { key: '/agent-call-sdk', label: '坐席外呼 SDK', icon: <ApiOutlined />, group: '通话测试场景' },
       { key: '/group-call', label: '群呼任务', icon: <PhoneOutlined />, group: '通话测试场景' },
       { key: '/callbot', label: 'call-bot 外呼', icon: <RobotOutlined />, group: '通话测试场景' },
       { key: '/otp', label: 'OTP 验证码', icon: <SafetyCertificateOutlined />, group: '通话测试场景' },

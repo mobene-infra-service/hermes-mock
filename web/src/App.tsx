@@ -8,6 +8,7 @@ import CallbacksPage from './pages/CallbacksPage'
 import GroupCallPage from './pages/GroupCallPage'
 import CallbotPage from './pages/CallbotPage'
 import OtpPage from './pages/OtpPage'
+import AgentCallSdkPage from './pages/AgentCallSdkPage'
 import AgentSoftphone from './components/AgentSoftphone'
 import Sidebar from './components/layout/Sidebar'
 import TopBar from './components/layout/TopBar'
@@ -35,6 +36,7 @@ export default function App() {
               <Route path="/cluster" element={<ClusterPage />} />
               <Route path="/agents" element={<AgentsPage />} />
               <Route path="/agent-call" element={null} />
+              <Route path="/agent-call-sdk" element={<AgentCallSdkPage />} />
               <Route path="/group-call" element={<GroupCallPage />} />
               <Route path="/callbot" element={<CallbotPage />} />
               <Route path="/otp" element={<OtpPage />} />
