@@ -17,6 +17,8 @@
 
 ## 验证记录
 
+- 2026-06-17：为排查 K8s NodePort SIP 回包路径问题，增强 mock 被叫腿 SIP 路由诊断日志：收到 INVITE 时记录 `Call-ID/CSeq/requestURI/reqSource/reqDestination/Contact/Record-Route/topVia/topViaHost/topViaPort/topViaRPort/topViaReceived/responseDestHint`；发送 180、200、4xx/5xx 前后记录同一组字段，并在失败时带 `response` 与错误。用于无 tcpdump 容器环境下判断 mock 响应预计回到哪里、是否因 Via/rport/回程路径导致 `transaction terminated`。`go test ./internal/sipagent` 通过。
+
 - 2026-06-17：`/agent-call-sdk` 补充 SDK 浮窗呼叫按钮调试日志：页面右侧「外呼 makeCall」继续打印宿主实际调用 `sdk.makeCall(phone, params)` 的完整参数，因此选中的 `lineType` 会出现在日志与入参里；SDK 自渲染浮窗的呼叫按钮走 SDK 内部 store，不会触发宿主 `handleMakeCall`，页面现在通过 DOM 事件捕获额外记录“SDK 内部发起”的调试日志，并明确提示本页 `lineType` 下拉只影响右侧编程式 `makeCall`，浮窗呼叫使用 SDK 内部默认线路类型。`npm --prefix web run build` 通过（仅既有 chunk size warning）。
 
 - 2026-06-17：`/agent-call-sdk` 默认 SDK 脚本地址从 OSS 0.0.14 裸地址切换为官方 latest 公共地址 `https://pub-res.hermesomni.com/sdk/js-sip/sip-dialpad-sdk.latest.js`；`scriptUrl` 仍保留可编辑，便于临时回退指定版本或签名 URL 排查问题。`npm --prefix web run build` 通过（仅既有 chunk size warning）。

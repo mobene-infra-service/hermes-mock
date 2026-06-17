@@ -155,6 +155,7 @@ func (a *Agent) handleInbound(in *diago.DialogServerSession) {
 	rule := a.resolveRule(callee)
 	log := logrus.WithFields(logrus.Fields{"callee": callee, "caller": caller, "listenPort": a.listenPort, "line": line, "outcome": rule.Outcome})
 	log.Info("收到 INVITE")
+	logSIPRoute("INVITE 入站路由诊断", in, logrus.Fields{"listenPort": a.listenPort, "callee": callee, "caller": caller})
 
 	// 聚合键：优先 Hermes 业务 callUuid，否则退回 SIP Call-ID。
 	// 既作 trace 会话聚合键（与传输层 tracer 一致），又作 call_record 主键（被叫腿记录与 trace 同 call_uuid）。
@@ -178,7 +179,7 @@ func (a *Agent) handleInbound(in *diago.DialogServerSession) {
 	case behavior.OutcomeReject, behavior.OutcomeBusy:
 		code := orDefault(rule.HangupCode, 486)
 		reason := reasonForCode(code, "Busy Here")
-		rejectCall(in, code, reason)
+		rejectCall(in, code, reason, log)
 		a.bus.Emit(sess, leg, tracelog.ChanFlow, tracelog.DirNA, "决策", "拒接("+reason+") 码="+itoa(code), nil)
 		a.tracker.Rejected(id, code)
 		log.WithField("reason", reason).Infof("被叫腿拒接 → 回 %d %s（应回送至发起腿；若发起方仍显示呼叫中，查 FS/call-center 是否透传/重拨）", code, reason)
@@ -186,18 +187,18 @@ func (a *Agent) handleInbound(in *diago.DialogServerSession) {
 	case behavior.OutcomeUnavailable:
 		code := orDefault(rule.HangupCode, 503)
 		reason := reasonForCode(code, "Service Unavailable")
-		rejectCall(in, code, reason)
+		rejectCall(in, code, reason, log)
 		a.bus.Emit(sess, leg, tracelog.ChanFlow, tracelog.DirNA, "决策", "不可用("+reason+") 码="+itoa(code), nil)
 		a.tracker.Rejected(id, code)
 		log.WithField("reason", reason).Infof("被叫腿不可用 → 回 %d %s", code, reason)
 		return
 	case behavior.OutcomeNoAnswer:
-		ringing(in)
+		ringing(in, log)
 		a.bus.Emit(sess, leg, tracelog.ChanFlow, tracelog.DirNA, "决策", "振铃", nil)
 		sleepMs(orDefault(rule.RingMs, a.cfg.DefaultRingMs))
 		code := orDefault(rule.HangupCode, 480)
 		reason := reasonForCode(code, "Temporarily Unavailable")
-		rejectCall(in, code, reason)
+		rejectCall(in, code, reason, log)
 		a.bus.Emit(sess, leg, tracelog.ChanFlow, tracelog.DirNA, "决策", "振铃不接("+reason+") 码="+itoa(code), nil)
 		a.tracker.Rejected(id, code)
 		log.WithField("reason", reason).Infof("被叫腿振铃不接 → 回 %d %s", code, reason)
@@ -217,18 +218,18 @@ func (a *Agent) handleInbound(in *diago.DialogServerSession) {
 	}
 	// SLOW_ANSWER：先 180，拖很久才 200（压 post-dial delay / 应答慢）。
 	if rule.Fault == behavior.FaultSlowAnswer {
-		ringing(in)
+		ringing(in, log)
 		delay := orDefault(rule.RingMs, behavior.SlowAnswerDelayMs)
 		log.Warnf("故障注入 SLOW_ANSWER：延迟 %dms 才应答", delay)
 		a.bus.Emit(sess, leg, tracelog.ChanFlow, tracelog.DirNA, "故障注入",
 			"SLOW_ANSWER：180 后延迟 "+itoa(delay)+"ms 才 200（慢应答）", map[string]string{"fault": "SLOW_ANSWER"})
 		sleepMs(delay)
 	} else if rule.RingMs > 0 {
-		ringing(in)
+		ringing(in, log)
 		a.bus.Emit(sess, leg, tracelog.ChanFlow, tracelog.DirNA, "决策", "振铃", nil)
 		sleepMs(rule.RingMs)
 	}
-	if err := answer(in); err != nil {
+	if err := answer(in, log); err != nil {
 		log.Errorf("answer: %v", err)
 		a.bus.Emit(sess, leg, tracelog.ChanFlow, tracelog.DirNA, "失败", "应答失败: "+err.Error(), nil)
 		a.tracker.Rejected(id, 500)
@@ -911,17 +912,124 @@ func dialogLine(in *diago.DialogServerSession) string {
 }
 
 // ringing 回 180 Ringing。对照 diago v0.28.0
-func ringing(in *diago.DialogServerSession) { _ = in.Ringing() }
+func ringing(in *diago.DialogServerSession, log *logrus.Entry) {
+	logSIPRoute("SIP 响应发送前 180 Ringing", in, nil)
+	if err := in.Ringing(); err != nil {
+		logSIPResponseError(log, "180 Ringing", err, in, nil)
+		return
+	}
+	logSIPRoute("SIP 响应发送成功 180 Ringing", in, nil)
+}
 
 // answer 回 200 OK 并建立媒体会话。对照 diago v0.28.0
-func answer(in *diago.DialogServerSession) error { return in.Answer() }
+func answer(in *diago.DialogServerSession, log *logrus.Entry) error {
+	logSIPRoute("SIP 响应发送前 200 OK", in, nil)
+	err := in.Answer()
+	if err != nil {
+		logSIPResponseError(log, "200 OK", err, in, nil)
+		return err
+	}
+	logSIPRoute("SIP 响应发送成功 200 OK", in, nil)
+	return nil
+}
 
 // rejectCall 以指定 SIP 码拒接（如 486/503/480/500）。对照 diago v0.28.0
 // Respond 失败会致被叫腿没把终态码发出 → 发起腿永远收不到终态、卡在呼叫中，故落 Error 不吞。
-func rejectCall(in *diago.DialogServerSession, code int, reason string) {
+func rejectCall(in *diago.DialogServerSession, code int, reason string, log *logrus.Entry) {
+	extra := logrus.Fields{"code": code, "reason": reason}
+	logSIPRoute("SIP 响应发送前 "+itoa(code)+" "+reason, in, extra)
 	if err := in.Respond(code, reason, nil); err != nil {
-		logrus.WithFields(logrus.Fields{"code": code, "reason": reason}).Errorf("被叫腿发送拒接响应失败：%v", err)
+		logSIPResponseError(log, itoa(code)+" "+reason, err, in, extra)
+		return
 	}
+	logSIPRoute("SIP 响应发送成功 "+itoa(code)+" "+reason, in, extra)
+}
+
+func logSIPResponseError(log *logrus.Entry, response string, err error, in *diago.DialogServerSession, extra logrus.Fields) {
+	fields := sipRouteFields(in)
+	for k, v := range extra {
+		fields[k] = v
+	}
+	fields["response"] = response
+	if log == nil {
+		logrus.WithFields(fields).Errorf("SIP 响应发送失败：%v", err)
+		return
+	}
+	log.WithFields(fields).Errorf("SIP 响应发送失败：%v", err)
+}
+
+func logSIPRoute(message string, in *diago.DialogServerSession, extra logrus.Fields) {
+	fields := sipRouteFields(in)
+	for k, v := range extra {
+		fields[k] = v
+	}
+	logrus.WithFields(fields).Info(message)
+}
+
+func sipRouteFields(in *diago.DialogServerSession) logrus.Fields {
+	fields := logrus.Fields{}
+	if in == nil || in.InviteRequest == nil {
+		return fields
+	}
+	req := in.InviteRequest
+	fields["sipMethod"] = req.Method
+	fields["requestURI"] = req.Recipient.String()
+	fields["transport"] = req.Transport()
+	fields["reqSource"] = req.Source()
+	fields["reqDestination"] = req.Destination()
+	if cid := req.CallID(); cid != nil {
+		fields["callID"] = cid.Value()
+	}
+	if cseq := req.CSeq(); cseq != nil {
+		fields["cseq"] = cseq.Value()
+	}
+	if contact := req.Contact(); contact != nil {
+		fields["contact"] = contact.Value()
+	}
+	if via := req.Via(); via != nil {
+		fields["topVia"] = via.Value()
+		fields["topViaHost"] = via.Host
+		fields["topViaPort"] = via.Port
+		fields["topViaTransport"] = via.Transport
+		if via.Params != nil {
+			if rport, ok := via.Params.Get("rport"); ok {
+				fields["topViaRPort"] = rport
+			}
+			if received, ok := via.Params.Get("received"); ok {
+				fields["topViaReceived"] = received
+			}
+		}
+		fields["responseDestHint"] = responseDestinationHint(req, via)
+	}
+	if route := req.GetHeader("Record-Route"); route != nil {
+		fields["recordRoute"] = route.Value()
+	}
+	return fields
+}
+
+func responseDestinationHint(req *sip.Request, via *sip.ViaHeader) string {
+	if req == nil {
+		return ""
+	}
+	if via == nil {
+		return req.Source()
+	}
+	if via.Params != nil {
+		if rport, ok := via.Params.Get("rport"); ok && rport == "" {
+			return req.Source()
+		}
+		if rport, ok := via.Params.Get("rport"); ok && rport != "" {
+			host := via.Host
+			if received, ok := via.Params.Get("received"); ok && received != "" {
+				host = received
+			}
+			return host + ":" + rport
+		}
+	}
+	if via.Port > 0 {
+		return via.Host + ":" + itoa(via.Port)
+	}
+	return via.Host + ":5060"
 }
 
 // hangup 主动挂断（发 BYE）。对照 diago v0.28.0
