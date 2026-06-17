@@ -17,6 +17,8 @@
 
 ## 验证记录
 
+- 2026-06-17：`/agent-call-sdk` 补充 SDK 浮窗呼叫按钮调试日志：页面右侧「外呼 makeCall」继续打印宿主实际调用 `sdk.makeCall(phone, params)` 的完整参数，因此选中的 `lineType` 会出现在日志与入参里；SDK 自渲染浮窗的呼叫按钮走 SDK 内部 store，不会触发宿主 `handleMakeCall`，页面现在通过 DOM 事件捕获额外记录“SDK 内部发起”的调试日志，并明确提示本页 `lineType` 下拉只影响右侧编程式 `makeCall`，浮窗呼叫使用 SDK 内部默认线路类型。`npm --prefix web run build` 通过（仅既有 chunk size warning）。
+
 - 2026-06-17：`/agent-call-sdk` 默认 SDK 脚本地址从 OSS 0.0.14 裸地址切换为官方 latest 公共地址 `https://pub-res.hermesomni.com/sdk/js-sip/sip-dialpad-sdk.latest.js`；`scriptUrl` 仍保留可编辑，便于临时回退指定版本或签名 URL 排查问题。`npm --prefix web run build` 通过（仅既有 chunk size warning）。
 
 - 2026-06-17：`/agent-call-sdk` 改为和 `/agent-call` 一样的常驻组件：`App.tsx` 中始终挂载 `AgentCallSdkPage`，仅按路由 `display:none/block` 切换可见性，路由表里的 `/agent-call-sdk` 改为空占位。切到其它页面不会触发 React 卸载，因此 SDK 实例、坐席登录/连接状态、表单与调用日志会保留；仍可通过页面「销毁 SDK」显式释放。`npm --prefix web run build` 通过（仅既有 chunk size warning）。

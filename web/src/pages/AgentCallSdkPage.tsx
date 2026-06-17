@@ -123,6 +123,7 @@ export default function AgentCallSdkPage() {
   const [logs, setLogs] = useState<string[]>([])
   const [lineTypeData, setLineTypeData] = useState<LineTypeData>({ lineTypes: ['base'], selectedLineType: 'base', lineTypeLocked: false })
   const [lineTypesLoading, setLineTypesLoading] = useState(false)
+  const [selectedCallLineType, setSelectedCallLineType] = useState<string | undefined>()
 
   const log = (msg: string) => {
     const ts = new Date().toLocaleTimeString('zh-CN', { hour12: false })
@@ -144,6 +145,7 @@ export default function AgentCallSdkPage() {
       const next: LineTypeData = { lineTypes, selectedLineType, lineTypeLocked: Boolean(data.lineTypeLocked) }
       setLineTypeData(next)
       callForm.setFieldValue('lineType', selectedLineType)
+      setSelectedCallLineType(selectedLineType)
       log(`getLineTypeData() → ${JSON.stringify(next)}`)
     } catch (e) {
       log(`✗ getLineTypeData 失败：${String(e)}`)
@@ -157,6 +159,36 @@ export default function AgentCallSdkPage() {
   useEffect(() => {
     return () => { try { sdkRef.current?.destroy() } catch { /* ignore */ } sdkRef.current = null }
   }, [])
+
+  // SDK 浮窗的呼叫按钮走 SDK 内部 store，不会调用本页 handleMakeCall。
+  // 这里仅做宿主调试日志捕获，不改变 SDK 实际外呼参数。
+  useEffect(() => {
+    if (!mounted) return undefined
+    const describeSdkUiCall = (source: string, target: Element | null) => {
+      const root = target?.closest('.sip-dialpad-root')
+      const phone = root?.querySelector<HTMLInputElement>('.dp-mono')?.value.trim()
+      const hostLineType = selectedCallLineType || '(未选)'
+      const sdkLineType = lineTypeData.selectedLineType || 'base'
+      log(`SDK 浮窗${source}：${phone ? `'${phone}'` : '(空号码)'}（SDK 内部发起，不经过本页 makeCall；本页 lineType=${hostLineType}，SDK 默认=${sdkLineType}）`)
+    }
+    const handleClick = (event: MouseEvent) => {
+      const target = event.target instanceof Element ? event.target : null
+      const callButton = target?.closest('.sip-dialpad-root .dp-dialbox-call')
+      if (callButton) describeSdkUiCall('呼叫按钮点击', callButton)
+    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Enter') return
+      const target = event.target instanceof Element ? event.target : null
+      const dialInput = target?.closest('.sip-dialpad-root .dp-mono')
+      if (dialInput) describeSdkUiCall('回车呼叫', dialInput)
+    }
+    document.addEventListener('click', handleClick, true)
+    document.addEventListener('keydown', handleKeyDown, true)
+    return () => {
+      document.removeEventListener('click', handleClick, true)
+      document.removeEventListener('keydown', handleKeyDown, true)
+    }
+  }, [mounted, selectedCallLineType, lineTypeData.selectedLineType])
 
   // 挂载 SDK：加载脚本 → createSipDialpadSDK({instanceId}) → render(containerId, config)。
   // 仅传用户实际填写的字段，空值不传以尊重 SDK 默认值。
@@ -219,6 +251,7 @@ export default function AgentCallSdkPage() {
       sdkRef.current = null
       setMounted(false)
       setLineTypeData({ lineTypes: ['base'], selectedLineType: 'base', lineTypeLocked: false })
+      setSelectedCallLineType(undefined)
       callForm.setFieldValue('lineType', undefined)
     }
   }
@@ -403,6 +436,7 @@ export default function AgentCallSdkPage() {
                       loading={lineTypesLoading}
                       disabled={!mounted || lineTypeData.lineTypeLocked}
                       options={lineTypeData.lineTypes.map((t) => ({ value: t, label: t }))}
+                      onChange={(value) => setSelectedCallLineType(value)}
                       popupRender={(menu) => (
                         <>
                           {menu}
@@ -416,7 +450,7 @@ export default function AgentCallSdkPage() {
                   </Form.Item>
                   {mounted && (
                     <Text type={lineTypeData.lineTypeLocked ? 'warning' : 'secondary'} style={{ display: 'block', marginTop: -16, marginBottom: 16, fontSize: 12 }}>
-                      {lineTypeData.lineTypeLocked ? '线路已锁定：坐席绑定外显号码，不应切换。' : `SDK 当前默认：${lineTypeData.selectedLineType || 'base'}`}
+                      {lineTypeData.lineTypeLocked ? '线路已锁定：坐席绑定外显号码，不应切换。' : `本页选择只影响右侧 makeCall；SDK 浮窗使用 SDK 内部默认：${lineTypeData.selectedLineType || 'base'}`}
                     </Text>
                   )}
                 </Col>
