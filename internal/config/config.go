@@ -12,7 +12,7 @@ import (
 // mock 只演被叫客户线路：无主叫/坐席/SIP REGISTER/录音相关配置。
 type Config struct {
 	// ---- HTTP / Web 配置后台 ----
-	HTTPPort int `env:"HTTP_PORT" envDefault:"80"`
+	HTTPPort int `env:"HTTP_PORT" envDefault:"18080"`
 
 	// ---- SIP agent（diago，被叫 UAS）----
 	// FS 把 INVITE 发到这里；mock 作被叫按客户集群行为应答。

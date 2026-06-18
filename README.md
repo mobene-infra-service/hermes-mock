@@ -69,7 +69,7 @@ DDL：`deploy/ddl/hermes_mock.sql`（建 `hermes_mock` 库及各表）。
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `HTTP_PORT` | 80 | 配置后台 / API 端口 |
+| `HTTP_PORT` | 18080 | 配置后台 / API 端口 |
 | `SIP_LISTEN_IP` / `SIP_LISTEN_PORT` / `SIP_LISTEN_PORTS` | 0.0.0.0 / 15060 / 15060,15061,...,15069 | 被叫 SIP 监听；多端口用逗号分隔，默认监听 10 个入口端口，为空时兼容单端口 `SIP_LISTEN_PORT` |
 | `SIP_TRANSPORT` / `CODECS` | udp / PCMU,PCMA | SIP 传输 / SDP 编解码 |
 | `EXTERNAL_IP` | 自动 | 对 FS 暴露的可达 IP（写入 SDP/Contact）；多网卡/host network 部署建议显式设置，如 `172.16.7.27` |

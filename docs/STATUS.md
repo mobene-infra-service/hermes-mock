@@ -17,7 +17,7 @@
 
 ## 验证记录
 
-- 2026-06-18：为将 mock 从 K8s NodePort 迁到 `hermes-freeswitch-test` Docker/裸跑，调整程序默认基础设施端口：`HTTP_PORT=80`、`SIP_LISTEN_PORT=15060`、`SIP_LISTEN_PORTS=15060,15061,15062,15063,15064,15065,15066,15067,15068,15069`、`RTP_PORT_START/END=10000-10999`，避开该 FS 机器现有 Kamailio `5060/udp`、FreeSWITCH `5080/udp,tcp`、WS `5066/tcp`、WSS `7443/tcp`、ESL `8021/tcp`。`EXTERNAL_IP` 保持代码默认留空（由 diago 尝试探测），FS 服务器部署建议显式传 `EXTERNAL_IP=172.16.7.27`；K8s `deploy.yaml` 不参与本次迁移。
+- 2026-06-18：为将 mock 从 K8s NodePort 迁到 `hermes-freeswitch-test` Docker/裸跑，按运维要求避开 80 端口，调整程序默认基础设施端口：`HTTP_PORT=18080`、`SIP_LISTEN_PORT=15060`、`SIP_LISTEN_PORTS=15060,15061,15062,15063,15064,15065,15066,15067,15068,15069`、`RTP_PORT_START/END=10000-10999`，避开该 FS 机器现有 Kamailio `5060/udp`、FreeSWITCH `5080/udp,tcp`、WS `5066/tcp`、WSS `7443/tcp`、ESL `8021/tcp`。`EXTERNAL_IP` 保持代码默认留空（由 diago 尝试探测），FS 服务器部署建议显式传 `EXTERNAL_IP=172.16.7.27`；K8s `deploy.yaml` 不参与本次迁移。
 
 - 2026-06-17：为排查 K8s NodePort SIP 回包路径问题，增强 mock 被叫腿 SIP 路由诊断日志：收到 INVITE 时记录 `Call-ID/CSeq/requestURI/reqSource/reqDestination/Contact/Record-Route/topVia/topViaHost/topViaPort/topViaRPort/topViaReceived/responseDestHint`；发送 180、200、4xx/5xx 前后记录同一组字段，并在失败时带 `response` 与错误。用于无 tcpdump 容器环境下判断 mock 响应预计回到哪里、是否因 Via/rport/回程路径导致 `transaction terminated`。`go test ./internal/sipagent` 通过。
 
