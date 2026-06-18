@@ -17,6 +17,8 @@
 
 ## 验证记录
 
+- 2026-06-18：FS 机器 Docker 部署实测确认：Hermes 线路地址应配置为 mock 所在机器内网入口（如 `172.16.7.27:15060`），不要配置 Kamailio 对外宣告地址（如 `47.251.74.116:15060`）。该机器 Kamailio 配置 `alias="47.251.74.116"` 且 `listen=udp:172.16.7.27:5060 advertise 47.251.74.116:5060`，公网 IP 会被 Kamailio 识别为自身地址；线路目标写公网 IP 时 INVITE 可能停在 Kamailio 自身路由判断，不再继续送到 Docker mock，因此 mock 日志看不到 `收到 INVITE`。线路目标改为 `172.16.7.27:15060` 后 INVITE 正常进入 mock。
+
 - 2026-06-18：为 FS 机器 Docker 部署场景新增 SIP 响应回源开关 `SIP_RESPONSE_TO_SOURCE`（代码默认 `false`，`deploy/Dockerfile` 默认 `true`）。开启后 mock 在 UDP 入站 SIP 请求进入 sipgo parser 前，为顶层 Via 补 `rport=<包源端口>;received=<包源IP>`，让 diago/sipgo 后续 180/200/拒接响应沿标准 `NewResponseFromRequest` 路径回到实际包源（如同机 Kamailio `172.16.7.27:5060`），避免被 Kamailio `advertise 47.251.74.116:5060` 的公网 Via 误导；日志新增 `responseDest` 打印 sipgo 实际构造出的响应目的地址。`go test ./internal/sipagent`、`go test ./...` 通过。
 
 - 2026-06-18：为将 mock 从 K8s NodePort 迁到 `hermes-freeswitch-test` Docker/裸跑，按运维要求避开 80 端口，调整程序默认基础设施端口：`HTTP_PORT=18080`、`SIP_LISTEN_PORT=15060`、`SIP_LISTEN_PORTS=15060,15061,15062,15063,15064,15065,15066,15067,15068,15069`、`RTP_PORT_START/END=10000-10999`，避开该 FS 机器现有 Kamailio `5060/udp`、FreeSWITCH `5080/udp,tcp`、WS `5066/tcp`、WSS `7443/tcp`、ESL `8021/tcp`。`EXTERNAL_IP` 保持代码默认留空（由 diago 尝试探测），FS 服务器部署建议显式传 `EXTERNAL_IP=172.16.7.27`；K8s `deploy.yaml` 不参与本次迁移。

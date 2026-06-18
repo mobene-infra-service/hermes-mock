@@ -3,6 +3,14 @@
 > 本项目改动按主题记录（倒序，最新在上）。决策原因见 [DECISIONS.md](DECISIONS.md)，当前状态见 [STATUS.md](STATUS.md)。
 ---
 
+## 2026-06-18
+
+- **FS 机器 Docker 部署 SIP 回源与线路目标结论**：
+  - 新增 `SIP_RESPONSE_TO_SOURCE`：Docker 镜像默认开启，代码默认关闭。开启后 mock 在 UDP 入站 SIP 请求进入 sipgo parser 前，为顶层 Via 补 `rport=<包源端口>;received=<包源IP>`，让 diago/sipgo 的 180/200/拒接响应回到实际包源，避免被 Kamailio `advertise 47.251.74.116:5060` 的公网 Via 带偏。
+  - 日志新增 `responseDest`，用于确认 sipgo 实际构造的响应目的地址。
+  - 实测确认 FS 机器上的 Hermes 线路目标应写内网 mock 入口（如 `172.16.7.27:15060`），不要写 Kamailio 公网 alias/advertise 地址（如 `47.251.74.116:15060`）。公网地址会被 Kamailio 识别为自身地址，INVITE 可能不会继续送到 Docker mock。
+  - 验证：`go test ./internal/sipagent`、`go test ./...` 通过。
+
 ## 2026-06-15
 
 - **坐席外呼卡片（折叠态）按 Figma `11:442` 重构为紧凑卡 + 自动刷新默认关闭**：

@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-06-18 · FS Docker 部署：Hermes 线路目标使用内网 mock 入口，SIP 响应按包源回 Kamailio
+- **背景**：将 mock 从 K8s PodIP 迁到 `hermes-freeswitch-test` Docker 后，FS/Kamailio 同机存在两类地址：内网 `172.16.7.27` 和公网 `47.251.74.116`。Kamailio 配置 `listen=udp:172.16.7.27:5060 advertise 47.251.74.116:5060` 且 `alias="47.251.74.116"`，所以转发出去的顶层 Via 会写公网 `47.251.74.116:5060`，但 Docker mock 实际收到包的来源应是内网 `172.16.7.27:5060`。实测 Hermes 线路目标配置为 `47.251.74.116:15060` 时，mock 无 `收到 INVITE` 日志；改为 `172.16.7.27:15060` 后 INVITE 正常进入 mock。
+- **决策**：
+  1. FS 机器 Docker/裸跑部署时，Hermes 线路地址使用 mock 监听的**内网入口**：`172.16.7.27:15060` 到 `172.16.7.27:15069`。公网 `47.251.74.116` 是 Kamailio 对外 advertise/alias 地址，不作为同机 mock 线路目标。
+  2. mock Docker 镜像默认开启 `SIP_RESPONSE_TO_SOURCE=true`。实现上在 UDP 入站 SIP 请求进入 sipgo parser 前，为顶层 Via 补 `rport=<包源端口>;received=<包源IP>`，让 diago/sipgo 后续 180/200/拒接响应沿标准路径回到实际包源，避免被 Kamailio 公网 Via 带偏。
+  3. 保留代码默认 `SIP_RESPONSE_TO_SOURCE=false`，只在 Docker 部署默认打开，避免改变其它部署拓扑的默认 SIP 行为。
+- **影响**：`internal/config` 新增 `SIP_RESPONSE_TO_SOURCE`；`internal/sipagent` 接入 `sipgo.WithUserAgentTransportLayerOptions(sip.WithTransportLayerReadFilter(...))`；`deploy/Dockerfile` 默认打开该开关；启动/通话日志通过 `responseDest` 暴露 sipgo 实际响应目的地址。部署文档层面要求 FS 机器线路目标使用内网 IP。
+- **状态**：`go test ./internal/sipagent`、`go test ./...` 通过；FS 机器实测线路目标改为 `172.16.7.27:15060` 后呼叫可进入 mock。
+
 ## 2026-06-12 · 端口绑定权威化：命中端口绑定不再回退按号匹配别的组
 - **背景**：排查「cluster 页绑了端口却不按绑定行为处理」。`sipagent.resolveRule` 旧逻辑 `res = ResolveByPort(port); if res == nil { res = ResolveByNumber(callee) }`——只要端口解析返回 nil（绑定禁用 / 绑定的组不存在 / 组 behaviorCode 指向缺失行为档），就**静默回退**按号段匹配，可能命中**另一个**号段覆盖该号的组、用上完全不同的行为；且全程**无任何日志**。叠加 `UpsertBinding` 只校验端口 1-65535、**不校验端口是否在实际 SIP 监听端口（`SIP_LISTEN_PORTS`，默认仅 5060）内**——绑了非监听端口即「死绑定」，永不收到来话。两者合力 → 用户感知「绑定不生效/只生效一部分」。
 - **决策**：
