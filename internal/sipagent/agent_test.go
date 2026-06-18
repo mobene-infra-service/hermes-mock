@@ -1,7 +1,11 @@
 package sipagent
 
 import (
+	"bytes"
+	"net"
 	"testing"
+
+	"github.com/emiago/sipgo/sip"
 
 	"hermes-mock/internal/behavior"
 )
@@ -102,5 +106,71 @@ func TestRtpLoss(t *testing.T) {
 					c.first, c.last, c.received, lost, pct, c.wantLost, c.wantPct)
 			}
 		})
+	}
+}
+
+func TestAddTopViaSourceParams(t *testing.T) {
+	source := &net.UDPAddr{IP: net.ParseIP("172.16.7.27"), Port: 5060}
+	cases := []struct {
+		name    string
+		in      string
+		want    string
+		changed bool
+	}{
+		{
+			name: "给请求顶层Via补rport",
+			in: "INVITE sip:1000@example.com SIP/2.0\r\n" +
+				"Via: SIP/2.0/UDP 47.251.74.116:5060;branch=z9hG4bK1\r\n" +
+				"Via: SIP/2.0/UDP 172.16.7.27:5080;branch=z9hG4bK2\r\n" +
+				"Content-Length: 0\r\n\r\n",
+			want: "INVITE sip:1000@example.com SIP/2.0\r\n" +
+				"Via: SIP/2.0/UDP 47.251.74.116:5060;branch=z9hG4bK1;rport=5060;received=172.16.7.27\r\n" +
+				"Via: SIP/2.0/UDP 172.16.7.27:5080;branch=z9hG4bK2\r\n" +
+				"Content-Length: 0\r\n\r\n",
+			changed: true,
+		},
+		{
+			name: "已有rport不重复补",
+			in: "INVITE sip:1000@example.com SIP/2.0\r\n" +
+				"Via: SIP/2.0/UDP 47.251.74.116:5060;branch=z9hG4bK1;rport\r\n" +
+				"Content-Length: 0\r\n\r\n",
+			changed: false,
+		},
+		{
+			name: "SIP响应不改",
+			in: "SIP/2.0 200 OK\r\n" +
+				"Via: SIP/2.0/UDP 47.251.74.116:5060;branch=z9hG4bK1\r\n" +
+				"Content-Length: 0\r\n\r\n",
+			changed: false,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := addTopViaSourceParams(sip.TransportReadProps{Transport: "UDP", RemoteAddr: source}, []byte(c.in))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := c.want
+			if want == "" {
+				want = c.in
+			}
+			if string(got) != want {
+				t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+			}
+			if (bytes.Equal(got, []byte(c.in)) == false) != c.changed {
+				t.Fatalf("changed=%v, want %v", !bytes.Equal(got, []byte(c.in)), c.changed)
+			}
+		})
+	}
+}
+
+func TestAddTopViaSourceParamsSkipsNonUDP(t *testing.T) {
+	in := []byte("INVITE sip:1000@example.com SIP/2.0\r\nVia: SIP/2.0/TCP 47.251.74.116:5060;branch=z\r\n\r\n")
+	got, err := addTopViaSourceParams(sip.TransportReadProps{Transport: "TCP", RemoteAddr: &net.TCPAddr{IP: net.ParseIP("172.16.7.27"), Port: 5060}}, in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, in) {
+		t.Fatalf("TCP 入站不应改写 Via, got %q", got)
 	}
 }

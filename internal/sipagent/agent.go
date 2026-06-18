@@ -7,8 +7,10 @@
 package sipagent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"net"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -45,7 +47,13 @@ func New(cfg *config.Config, clu *cluster.Store, tracker *calltrace.Tracker, bus
 
 // NewOnPort 初始化指定入口端口的入站 UAS。
 func NewOnPort(cfg *config.Config, listenPort int, clu *cluster.Store, tracker *calltrace.Tracker, bus *tracelog.Bus) (*Agent, error) {
-	ua, err := sipgo.NewUA(sipgo.WithUserAgent("hermes-mock"))
+	uaOptions := []sipgo.UserAgentOption{sipgo.WithUserAgent("hermes-mock")}
+	if cfg.SIPResponseToSource {
+		uaOptions = append(uaOptions, sipgo.WithUserAgentTransportLayerOptions(
+			sip.WithTransportLayerReadFilter(addTopViaSourceParams),
+		))
+	}
+	ua, err := sipgo.NewUA(uaOptions...)
 	if err != nil {
 		return nil, err
 	}
@@ -1000,6 +1008,7 @@ func sipRouteFields(in *diago.DialogServerSession) logrus.Fields {
 			}
 		}
 		fields["responseDestHint"] = responseDestinationHint(req, via)
+		fields["responseDest"] = sip.NewResponseFromRequest(req, sip.StatusTrying, "Trying", nil).Destination()
 	}
 	if route := req.GetHeader("Record-Route"); route != nil {
 		fields["recordRoute"] = route.Value()
@@ -1030,6 +1039,84 @@ func responseDestinationHint(req *sip.Request, via *sip.ViaHeader) string {
 		return via.Host + ":" + itoa(via.Port)
 	}
 	return via.Host + ":5060"
+}
+
+// addTopViaSourceParams 在原始 SIP 请求进入 parser 前，为顶层 Via 补 received/rport。
+// 这样 sipgo/diago 后续仍走标准响应路径，但响应目的地址会解析到实际 UDP 包源。
+func addTopViaSourceParams(info sip.TransportReadProps, data []byte) ([]byte, error) {
+	if !strings.EqualFold(info.Transport, "udp") || info.RemoteAddr == nil {
+		return data, nil
+	}
+	sourceHost, sourcePort, err := net.SplitHostPort(info.RemoteAddr.String())
+	if err != nil || sourceHost == "" || sourcePort == "" {
+		return data, nil
+	}
+	if len(data) == 0 || bytes.HasPrefix(data, []byte("SIP/2.0")) || !bytes.Contains(data, []byte("SIP/2.0")) {
+		return data, nil
+	}
+	headerEnd := bytes.Index(data, []byte("\r\n\r\n"))
+	separatorLen := 4
+	if headerEnd < 0 {
+		headerEnd = bytes.Index(data, []byte("\n\n"))
+		separatorLen = 2
+	}
+	if headerEnd < 0 {
+		return data, nil
+	}
+
+	header := data[:headerEnd]
+	body := data[headerEnd:]
+	lines := bytes.Split(header, []byte("\n"))
+	for i := 1; i < len(lines); i++ {
+		line := bytes.TrimRight(lines[i], "\r")
+		if len(line) == 0 {
+			continue
+		}
+		if line[0] == ' ' || line[0] == '\t' {
+			continue
+		}
+		if !isViaHeaderLine(line) {
+			continue
+		}
+		if viaHasParam(line, "rport") {
+			return data, nil
+		}
+		addition := []byte(";rport=" + sourcePort + ";received=" + sourceHost)
+		if bytes.HasSuffix(lines[i], []byte("\r")) {
+			lines[i] = append(append([]byte{}, lines[i][:len(lines[i])-1]...), append(addition, '\r')...)
+		} else {
+			lines[i] = append(lines[i], addition...)
+		}
+		out := make([]byte, 0, len(data)+len(addition))
+		out = append(out, bytes.Join(lines, []byte("\n"))...)
+		out = append(out, body[:separatorLen]...)
+		out = append(out, body[separatorLen:]...)
+		return out, nil
+	}
+	return data, nil
+}
+
+func isViaHeaderLine(line []byte) bool {
+	if len(line) < 2 {
+		return false
+	}
+	if len(line) >= 4 && strings.EqualFold(string(line[:4]), "via:") {
+		return true
+	}
+	return (line[0] == 'v' || line[0] == 'V') && line[1] == ':'
+}
+
+func viaHasParam(line []byte, param string) bool {
+	for _, part := range bytes.Split(line, []byte(";"))[1:] {
+		part = bytes.TrimSpace(part)
+		if idx := bytes.IndexByte(part, '='); idx >= 0 {
+			part = part[:idx]
+		}
+		if strings.EqualFold(string(part), param) {
+			return true
+		}
+	}
+	return false
 }
 
 // hangup 主动挂断（发 BYE）。对照 diago v0.28.0

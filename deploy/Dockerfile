@@ -29,6 +29,7 @@ COPY --from=build /out/hermes-mock /app/hermes-mock
 COPY assets/ /app/assets/
 # Docker 部署默认避开 80 特权端口：HTTP 18080，SIP 15060-15069/udp。
 ENV HTTP_PORT=18080
+ENV SIP_RESPONSE_TO_SOURCE=true
 # HTTP 配置后台 + SIP 信令（UDP）。RTP 端口段按 RTP_PORT_START/END 另行映射。
 EXPOSE 18080 15060/udp 15061/udp 15062/udp 15063/udp 15064/udp 15065/udp 15066/udp 15067/udp 15068/udp 15069/udp
 ENTRYPOINT ["/app/hermes-mock"]

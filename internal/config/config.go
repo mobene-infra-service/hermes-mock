@@ -20,6 +20,8 @@ type Config struct {
 	SIPListenPort  int    `env:"SIP_LISTEN_PORT" envDefault:"15060"`
 	SIPListenPorts string `env:"SIP_LISTEN_PORTS" envDefault:"15060,15061,15062,15063,15064,15065,15066,15067,15068,15069"`
 	SIPTransport   string `env:"SIP_TRANSPORT" envDefault:"udp"` // udp/tcp/tls
+	// 开启后给 UDP 入站请求顶层 Via 补 received/rport，使 sipgo/diago 的响应回到实际包源地址。
+	SIPResponseToSource bool `env:"SIP_RESPONSE_TO_SOURCE" envDefault:"false"`
 	// 提供给 SDP 协商的音频编解码列表（逗号分隔，按优先级）：PCMU,PCMA,opus。
 	Codecs string `env:"CODECS" envDefault:"PCMU,PCMA"`
 	// agent 对 FreeSWITCH 暴露的可达 IP（写入 SDP / Contact）。为空时由 diago 尝试按网卡自动探测。
