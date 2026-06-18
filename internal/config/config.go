@@ -12,21 +12,21 @@ import (
 // mock 只演被叫客户线路：无主叫/坐席/SIP REGISTER/录音相关配置。
 type Config struct {
 	// ---- HTTP / Web 配置后台 ----
-	HTTPPort int `env:"HTTP_PORT" envDefault:"8080"`
+	HTTPPort int `env:"HTTP_PORT" envDefault:"80"`
 
 	// ---- SIP agent（diago，被叫 UAS）----
 	// FS 把 INVITE 发到这里；mock 作被叫按客户集群行为应答。
 	SIPListenIP    string `env:"SIP_LISTEN_IP" envDefault:"0.0.0.0"`
-	SIPListenPort  int    `env:"SIP_LISTEN_PORT" envDefault:"5060"`
-	SIPListenPorts string `env:"SIP_LISTEN_PORTS" envDefault:""`
+	SIPListenPort  int    `env:"SIP_LISTEN_PORT" envDefault:"15060"`
+	SIPListenPorts string `env:"SIP_LISTEN_PORTS" envDefault:"15060,15061,15062,15063,15064,15065,15066,15067,15068,15069"`
 	SIPTransport   string `env:"SIP_TRANSPORT" envDefault:"udp"` // udp/tcp/tls
 	// 提供给 SDP 协商的音频编解码列表（逗号分隔，按优先级）：PCMU,PCMA,opus。
 	Codecs string `env:"CODECS" envDefault:"PCMU,PCMA"`
-	// agent 对 FreeSWITCH 暴露的可达 IP（写入 SDP / Contact）。为空时尝试自动探测。
+	// agent 对 FreeSWITCH 暴露的可达 IP（写入 SDP / Contact）。为空时由 diago 尝试按网卡自动探测。
 	ExternalIP string `env:"EXTERNAL_IP" envDefault:""`
 	// RTP 端口段（按并发开）
-	RTPPortStart int `env:"RTP_PORT_START" envDefault:"20000"`
-	RTPPortEnd   int `env:"RTP_PORT_END" envDefault:"21000"`
+	RTPPortStart int `env:"RTP_PORT_START" envDefault:"10000"`
+	RTPPortEnd   int `env:"RTP_PORT_END" envDefault:"10999"`
 
 	// ---- 媒体 ----
 	AudioDir        string `env:"AUDIO_DIR" envDefault:"assets/audio"`     // 预置 G.711 WAV 目录

@@ -69,11 +69,11 @@ DDL：`deploy/ddl/hermes_mock.sql`（建 `hermes_mock` 库及各表）。
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `HTTP_PORT` | 8080 | 配置后台 / API 端口（容器镜像内 ENV 定为 80） |
-| `SIP_LISTEN_IP` / `SIP_LISTEN_PORT` / `SIP_LISTEN_PORTS` | 0.0.0.0 / 5060 / 空 | 被叫 SIP 监听；多端口用 `SIP_LISTEN_PORTS=5060,5061`，为空时兼容单端口 `SIP_LISTEN_PORT` |
+| `HTTP_PORT` | 80 | 配置后台 / API 端口 |
+| `SIP_LISTEN_IP` / `SIP_LISTEN_PORT` / `SIP_LISTEN_PORTS` | 0.0.0.0 / 15060 / 15060,15061,...,15069 | 被叫 SIP 监听；多端口用逗号分隔，默认监听 10 个入口端口，为空时兼容单端口 `SIP_LISTEN_PORT` |
 | `SIP_TRANSPORT` / `CODECS` | udp / PCMU,PCMA | SIP 传输 / SDP 编解码 |
-| `EXTERNAL_IP` | 自动 | 对 FS 暴露的可达 IP（写入 SDP/Contact；K8s 用 Downward API 注 podIP） |
-| `RTP_PORT_START` / `RTP_PORT_END` | 20000 / 21000 | RTP 端口段 |
+| `EXTERNAL_IP` | 自动 | 对 FS 暴露的可达 IP（写入 SDP/Contact）；多网卡/host network 部署建议显式设置，如 `172.16.7.27` |
+| `RTP_PORT_START` / `RTP_PORT_END` | 10000 / 10999 | RTP 端口段 |
 | `AUDIO_DIR` / `DEFAULT_PLAYBACK` | assets/audio / hello.wav | 放音目录 / 默认放音 |
 | `MOCK_DB_DSN` | — | `hermes_mock` 库 DSN 整串（优先）；或组件拼装：`MYSQL_MASTER_PASSWORD`(secret) + `DBAddr`/`DBPort`/`DBName`/`DBUser`(configmap)。**必配**，未配启动失败 |
 | `LOG_LEVEL` / `MODE` | info / DEV | 日志级别 / 运行模式 |
@@ -82,7 +82,7 @@ DDL：`deploy/ddl/hermes_mock.sql`（建 `hermes_mock` 库及各表）。
 
 ## 与 FreeSWITCH / Hermes 对接（硬前提）
 
-1. **Hermes basic 线路**：在被测 Hermes 配置 `t_line`/`t_line_phone`，确保线路 `address` 指向本 mock 的具体端口（如 `mockIP:5060`/`mockIP:5061`）；mock 仅在自己库维护「入口端口↔客户组」绑定，**不直写 Hermes 业务表**。
+1. **Hermes basic 线路**：在被测 Hermes 配置 `t_line`/`t_line_phone`，确保线路 `address` 指向本 mock 的具体端口（如 FS 测试机 Docker/裸跑默认 `mockIP:15060` 到 `mockIP:15069`）；mock 仅在自己库维护「入口端口↔客户组」绑定，**不直写 Hermes 业务表**。
 2. **FreeSWITCH**：保证 SIP/RTP 与 mock 网络互通、编解码 PCMU/PCMA 对齐（外呼目标 = `sofia/external/{callee}@{t_line.address=mock}`）。
 3. 业务侧（call-center/call-bot/otp/fs-esl-proxy）**零代码改动**。
 4. 坐席场景：群呼/手动外呼接通后转坐席，由**真实 Hermes 工作台坐席**承担（mock 不模拟坐席）。

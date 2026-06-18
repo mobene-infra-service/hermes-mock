@@ -27,9 +27,8 @@ RUN apk add --no-cache ca-certificates
 WORKDIR /app
 COPY --from=build /out/hermes-mock /app/hermes-mock
 COPY assets/ /app/assets/
-# 容器内 HTTP 监听 80（平台约定；deploy.yaml 探针/Service/Ingress 全链路 80）。
-# 本地不经容器跑（make run）仍是 Go 默认 8080；k8s 配置若覆盖 HTTP_PORT 需同步改 deploy.yaml。
+# Docker 部署默认贴合平台/服务入口习惯：HTTP 80，SIP 15060-15069/udp。
 ENV HTTP_PORT=80
 # HTTP 配置后台 + SIP 信令（UDP）。RTP 端口段按 RTP_PORT_START/END 另行映射。
-EXPOSE 80 5060/udp
+EXPOSE 80 15060/udp 15061/udp 15062/udp 15063/udp 15064/udp 15065/udp 15066/udp 15067/udp 15068/udp 15069/udp
 ENTRYPOINT ["/app/hermes-mock"]
