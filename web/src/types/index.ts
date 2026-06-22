@@ -222,6 +222,7 @@ export interface CallRecordPage {
 
 export interface CallRecordFilter {
   scenario?: string
+  scenarios?: string[]
   source?: string
   status?: string
   orgCode?: string

@@ -17,9 +17,24 @@ type Resolved struct {
 	Disabled  bool             `json:"disabled"` // 组/个例状态为禁用
 }
 
-// CallRecordFilter 通话记录查询过滤器（字段空=不过滤；字符串字段 LIKE 匹配）。
+// TraceSessionSummary 通话链路摘要（不含事件原文），用于列表/总览等轻量查询。
+type TraceSessionSummary struct {
+	SessionID  string
+	CallUUID   string
+	Kind       string
+	Title      string
+	StartedAt  time.Time
+	UpdatedAt  time.Time
+	Legs       []string
+	EventCount int
+}
+
+// CallRecordFilter 通话记录查询过滤器。
+// 结构化字段默认精确匹配；Keyword 才做模糊搜索。
 type CallRecordFilter struct {
 	Scenario       string
+	Scenarios      []string
+	Source         string
 	Status         string
 	OrgCode        string
 	RunID          string

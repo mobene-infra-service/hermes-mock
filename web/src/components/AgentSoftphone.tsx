@@ -1125,7 +1125,7 @@ export default function AgentSoftphone({ onSummary }: { onSummary?: (s: AgentSum
           </Row>
         )}
 
-      <ScenarioRecords scenario="agent" title="坐席外呼记录（外呼 + 被转接来电）" />
+      <ScenarioRecords scenario="agent-call" scenarios={['agent-call', 'agent-inbound']} title="坐席外呼记录（外呼 + 被转接来电）" />
     </div>
   )
 }

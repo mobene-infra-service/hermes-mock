@@ -50,19 +50,24 @@ func (r *GormRepository) ListCallRecords(ctx context.Context, f entity.CallRecor
 		pageSize = 200
 	}
 	q := r.db.WithContext(ctx).Model(&entity.MockCall{})
-	q = like(q, "scenario", f.Scenario)
-	q = like(q, "status", f.Status)
-	q = like(q, "org_code", f.OrgCode)
-	q = like(q, "run_id", f.RunID)
-	q = like(q, "task_name", f.TaskName)
-	q = like(q, "task_code", f.TaskCode)
-	q = like(q, "customer_group", f.CustomerGroup)
-	q = like(q, "customer_number", f.CustomerNumber)
-	q = like(q, "agent_group_code", f.AgentGroupCode)
-	q = like(q, "agent_number", f.AgentNumber)
-	q = like(q, "line_code", f.LineCode)
-	q = like(q, "trace_id", f.TraceID)
-	q = like(q, "call_uuid", f.CallUUID)
+	if scenarios := cleanStrings(f.Scenarios); len(scenarios) > 0 {
+		q = q.Where("scenario IN ?", scenarios)
+	} else {
+		q = eq(q, "scenario", f.Scenario)
+	}
+	q = eq(q, "source", f.Source)
+	q = eq(q, "status", f.Status)
+	q = eq(q, "org_code", f.OrgCode)
+	q = eq(q, "run_id", f.RunID)
+	q = eq(q, "task_name", f.TaskName)
+	q = eq(q, "task_code", f.TaskCode)
+	q = eq(q, "customer_group", f.CustomerGroup)
+	q = eq(q, "customer_number", f.CustomerNumber)
+	q = eq(q, "agent_group_code", f.AgentGroupCode)
+	q = eq(q, "agent_number", f.AgentNumber)
+	q = eq(q, "line_code", f.LineCode)
+	q = eq(q, "trace_id", f.TraceID)
+	q = eq(q, "call_uuid", f.CallUUID)
 	if f.StartedFrom != nil {
 		q = q.Where("started_at >= ?", *f.StartedFrom)
 	}
@@ -118,12 +123,26 @@ func normalizeCallRecord(r *entity.MockCall) {
 	}
 }
 
-func like(q *gorm.DB, col, val string) *gorm.DB {
+func eq(q *gorm.DB, col, val string) *gorm.DB {
 	val = strings.TrimSpace(val)
 	if val == "" {
 		return q
 	}
-	return q.Where(col+" LIKE ?", "%"+val+"%")
+	return q.Where(col+" = ?", val)
+}
+
+func cleanStrings(vals []string) []string {
+	out := make([]string, 0, len(vals))
+	seen := map[string]bool{}
+	for _, v := range vals {
+		v = strings.TrimSpace(v)
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out
 }
 
 func mergeCallRecord(existing, next entity.MockCall) entity.MockCall {

@@ -17,6 +17,14 @@
 
 ## 验证记录
 
+- 2026-06-19：`/trace` 通话链路页取消默认 3s 自动刷新，改为与场景记录页一致的「自动」开关，默认关闭并持久化到 `localStorage`；页面初次进入仍加载一次，手动「刷新」会同时刷新会话列表与当前详情，开启自动后才每 3 秒刷新列表和当前详情。`npm --prefix web run build`、`make sync-web && make verify-embed`、`go test ./...` 通过（Vite 仅既有 chunk size warning）。
+
+- 2026-06-19：修正 `/trace/sessions` 摘要列表排序：此前内存会话按创建顺序倒序、DB 会话按 `updated_at DESC`，API 合并后又固定“内存优先”，导致最近有新事件的旧会话可能排在新建但未更新会话之后。现在内存 + DB 摘要合并后统一按 `updatedAt DESC, startedAt DESC` 排序；新增 `TestTraceSessionsSummarySortsByUpdatedAt` 覆盖“先创建后更新”的会话应排第一。`go test ./...` 通过。
+
+- 2026-06-19：收敛 `/api/call-records` 查询的 SQL 语义与轮询开销：结构化过滤字段从统一 `LIKE '%xxx%'` 改为精确匹配，新增 `scenarios` 多值 `IN` 过滤并让坐席记录页显式查 `agent-call + agent-inbound`，避免继续依赖 `scenario LIKE '%agent%'`；`keyword` 保留模糊搜索。`source` 过滤补齐到后端。通话记录 traceId 回填从逐条 `call_uuid` 查询改为批量 `IN` 查询；`/trace/sessions` DB 补充列表改走摘要查询（只查 leg + eventCount/legs，不读取 raw SIP events）。`go test ./...`、`npm --prefix web run build`、`make sync-web && make verify-embed` 通过（Vite 仅既有 chunk size warning）。
+
+- 2026-06-18：修复 `/trace` 真实 SIP 原始报文块可读性：Antd Typography 的 `pre` 样式会把 `.trace-raw-message` 背景覆盖成浅灰，导致原先浅蓝文字对比度过低；改为高对比浅底深字，并用更具体选择器固定背景/文字/边框/等宽字体。`npm --prefix web run build`、`make sync-web && make verify-embed` 通过（Vite 仅既有 chunk size warning）。
+
 - 2026-06-18：FS 机器 Docker 部署实测确认：Hermes 线路地址应配置为 mock 所在机器内网入口（如 `172.16.7.27:15060`），不要配置 Kamailio 对外宣告地址（如 `47.251.74.116:15060`）。该机器 Kamailio 配置 `alias="47.251.74.116"` 且 `listen=udp:172.16.7.27:5060 advertise 47.251.74.116:5060`，公网 IP 会被 Kamailio 识别为自身地址；线路目标写公网 IP 时 INVITE 可能停在 Kamailio 自身路由判断，不再继续送到 Docker mock，因此 mock 日志看不到 `收到 INVITE`。线路目标改为 `172.16.7.27:15060` 后 INVITE 正常进入 mock。
 
 - 2026-06-18：为 FS 机器 Docker 部署场景新增 SIP 响应回源开关 `SIP_RESPONSE_TO_SOURCE`（代码默认 `false`，`deploy/Dockerfile` 默认 `true`）。开启后 mock 在 UDP 入站 SIP 请求进入 sipgo parser 前，为顶层 Via 补 `rport=<包源端口>;received=<包源IP>`，让 diago/sipgo 后续 180/200/拒接响应沿标准 `NewResponseFromRequest` 路径回到实际包源（如同机 Kamailio `172.16.7.27:5060`），避免被 Kamailio `advertise 47.251.74.116:5060` 的公网 Via 误导；日志新增 `responseDest` 打印 sipgo 实际构造出的响应目的地址。`go test ./internal/sipagent`、`go test ./...` 通过。

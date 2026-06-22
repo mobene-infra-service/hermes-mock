@@ -43,9 +43,11 @@ type Repository interface {
 	// ---- 通话链路（单腿 mock_trace_leg：按 session_id upsert；事件批量追加；读时按 call_uuid 归并多腿）----
 	SaveTraceSession(ctx context.Context, row *entity.TraceLeg) error
 	CreateTraceEvents(ctx context.Context, rows []entity.TraceEvent) error
+	ListTraceSessionSummaries(ctx context.Context, limit int) ([]entity.TraceSessionSummary, error)
 	ListTraceSessions(ctx context.Context, limit int) ([]entity.TraceLeg, error)
 	GetTraceSession(ctx context.Context, sessionID string) (*entity.TraceLeg, error)
 	ListTraceLegsByCallUUID(ctx context.Context, callUUID string) ([]entity.TraceLeg, error)
+	TraceIDsByCallUUIDs(ctx context.Context, callUUIDs []string) (map[string]string, error)
 
 	// ---- Hermes 回调 ----
 	CreateCallback(ctx context.Context, row *entity.Callback) error

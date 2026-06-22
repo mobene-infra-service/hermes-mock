@@ -588,10 +588,23 @@ body {
   padding: 10px;
   overflow: auto;
   border-radius: 4px;
-  background: #0b1021;
-  color: #d6e0ff;
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  color: #0f172a;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 11px;
+  line-height: 1.55;
   white-space: pre-wrap;
+}
+
+.trace-ladder-details .ant-typography pre.trace-raw-message {
+  margin: 0;
+  padding: 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background: #f8fafc;
+  color: #0f172a;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
 /* ===== 场景结果中心：结论横幅 + 明细行 + 证据 ===== */

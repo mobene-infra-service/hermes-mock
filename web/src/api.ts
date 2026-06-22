@@ -152,7 +152,12 @@ export async function runOTPBatch(p: {
 export const queryCallRecords = (f?: CallRecordFilter) => {
   const q = new URLSearchParams()
   Object.entries(f || {}).forEach(([k, v]) => {
-    if (v !== undefined && v !== '') q.set(k, String(v))
+    if (v === undefined || v === '') return
+    if (Array.isArray(v)) {
+      v.filter((x) => x !== undefined && x !== '').forEach((x) => q.append(k, String(x)))
+      return
+    }
+    q.set(k, String(v))
   })
   return getJSON<CallRecordPage>(`/call-records${q.toString() ? `?${q}` : ''}`)
 }

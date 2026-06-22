@@ -57,7 +57,10 @@ func TestBehaviorProfileUpsertIdempotent(t *testing.T) {
 func TestCallRecordSaveMergeAndList(t *testing.T) {
 	repo := newTestRepo(t)
 	ctx := context.Background()
-	r1 := entity.MockCall{RecordID: "rec1", Scenario: "sip-inbound", CustomerNumber: "8613800000001", Status: entity.CallRecordStatusRinging}
+	r1 := entity.MockCall{
+		RecordID: "rec1", Scenario: "sip-inbound", Source: "sip", CustomerNumber: "8613800000001",
+		TaskName: "任务 Alpha", TraceID: "trace-exact", CallUUID: "call-exact", Status: entity.CallRecordStatusRinging,
+	}
 	if err := repo.SaveCallRecord(ctx, &r1); err != nil {
 		t.Fatal(err)
 	}
@@ -76,10 +79,45 @@ func TestCallRecordSaveMergeAndList(t *testing.T) {
 	if rows[0].Status != entity.CallRecordStatusAnswered || rows[0].CustomerNumber != "8613800000001" {
 		t.Errorf("合并错: %+v", rows[0])
 	}
+	// 结构化字段是精确匹配，不再用 LIKE：agent 不应命中 agent-call。
+	if err := repo.SaveCallRecord(ctx, &entity.MockCall{RecordID: "agent-out", Scenario: "agent-call", Source: "agent", CustomerNumber: "8613800000002", Status: entity.CallRecordStatusEnded}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.SaveCallRecord(ctx, &entity.MockCall{RecordID: "agent-in", Scenario: "agent-inbound", Source: "agent", CustomerNumber: "8613800000003", Status: entity.CallRecordStatusEnded}); err != nil {
+		t.Fatal(err)
+	}
+	rows, meta, err = repo.ListCallRecords(ctx, entity.CallRecordFilter{Scenario: "agent", PageSize: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Total != 0 || len(rows) != 0 {
+		t.Fatalf("scenario 精确匹配不应命中 agent-*，got total=%d rows=%+v", meta.Total, rows)
+	}
+	rows, meta, err = repo.ListCallRecords(ctx, entity.CallRecordFilter{Scenarios: []string{"agent-call", "agent-inbound"}, PageSize: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Total != 2 || len(rows) != 2 {
+		t.Fatalf("scenarios IN 应命中两类坐席记录, got total=%d len=%d", meta.Total, len(rows))
+	}
+	rows, meta, err = repo.ListCallRecords(ctx, entity.CallRecordFilter{Keyword: "Alpha", PageSize: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Total != 1 || rows[0].RecordID != "rec1" {
+		t.Fatalf("keyword 应保留模糊搜索, got total=%d rows=%+v", meta.Total, rows)
+	}
+	rows, meta, err = repo.ListCallRecords(ctx, entity.CallRecordFilter{CallUUID: "call", PageSize: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta.Total != 0 || len(rows) != 0 {
+		t.Fatalf("call_uuid 应精确匹配，不应按前缀命中: total=%d rows=%+v", meta.Total, rows)
+	}
 	// 状态回退保护：再写 RINGING 不应把 ANSWERED 退回去
 	r3 := entity.MockCall{RecordID: "rec1", Status: entity.CallRecordStatusRinging}
 	_ = repo.SaveCallRecord(ctx, &r3)
-	rows, _, _ = repo.ListCallRecords(ctx, entity.CallRecordFilter{PageSize: 10})
+	rows, _, _ = repo.ListCallRecords(ctx, entity.CallRecordFilter{Scenario: "sip-inbound", PageSize: 10})
 	if rows[0].Status != entity.CallRecordStatusAnswered {
 		t.Errorf("状态不应回退: %s", rows[0].Status)
 	}
@@ -93,8 +131,8 @@ func TestTraceSessionRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := repo.CreateTraceEvents(ctx, []entity.TraceEvent{
-		{SessionID: "s1", Seq: 1, Method: "INVITE"},
-		{SessionID: "s1", Seq: 2, Method: "200"},
+		{SessionID: "s1", Seq: 1, Leg: "customer", Method: "INVITE"},
+		{SessionID: "s1", Seq: 2, Leg: "customer", Method: "200"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -107,6 +145,16 @@ func TestTraceSessionRoundTrip(t *testing.T) {
 	}
 	if missing, _ := repo.GetTraceSession(ctx, "nope"); missing != nil {
 		t.Error("不存在的会话应返回 nil")
+	}
+	summaries, err := repo.ListTraceSessionSummaries(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries) != 1 || summaries[0].SessionID != "s1" || summaries[0].EventCount != 2 {
+		t.Fatalf("摘要应带事件计数但不装事件原文: %+v", summaries)
+	}
+	if len(summaries[0].Legs) != 1 || summaries[0].Legs[0] != "customer" {
+		t.Fatalf("摘要应聚合 leg 列表: %+v", summaries[0].Legs)
 	}
 }
 
@@ -121,8 +169,8 @@ func TestTraceLegsByCallUUID(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := repo.CreateTraceEvents(ctx, []entity.TraceEvent{
-		{SessionID: "legCust", Seq: 1, Method: "INVITE"},
-		{SessionID: "legAgent", Seq: 1, Method: "INVITE"},
+		{SessionID: "legCust", Seq: 1, Leg: "customer", Method: "INVITE"},
+		{SessionID: "legAgent", Seq: 1, Leg: "agent", Method: "INVITE"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -140,6 +188,16 @@ func TestTraceLegsByCallUUID(t *testing.T) {
 	}
 	if none, _ := repo.ListTraceLegsByCallUUID(ctx, "nope"); none != nil {
 		t.Error("无匹配 call_uuid 应返回 nil")
+	}
+	ids, err := repo.TraceIDsByCallUUIDs(ctx, []string{"uuidX", "uuidX", "", "nope"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids["uuidX"] == "" {
+		t.Fatalf("应批量查到 uuidX 的 trace id: %+v", ids)
+	}
+	if _, ok := ids["nope"]; ok {
+		t.Fatalf("不存在 call_uuid 不应返回 trace id: %+v", ids)
 	}
 }
 

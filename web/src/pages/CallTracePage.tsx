@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useState, type CSSProperties } from 'react'
-import { Badge, Card, Col, Collapse, Empty, Row, Segmented, Space, Table, Tag, Typography } from 'antd'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { ReloadOutlined } from '@ant-design/icons'
+import { Badge, Button, Card, Col, Collapse, Empty, Row, Segmented, Space, Switch, Table, Tag, Tooltip, Typography } from 'antd'
 import { getTraceSessions, getTraceSession, type TraceEvent, type TraceSession } from '../api'
 import { PageHeader } from '../components/layout/PageHeader'
 import { InfoBanner } from '../components/layout/InfoBanner'
 import { usePolling } from '../hooks/usePolling'
 
 const { Text, Paragraph } = Typography
+const TRACE_AUTO_REFRESH_KEY = 'hm.trace.auto'
 
 const chanColor: Record<string, string> = {
   SIP: 'blue', WS: 'cyan', MEDIA: 'green', BRIDGE: 'orange', FLOW: 'default',
@@ -333,9 +335,19 @@ export default function CallTracePage() {
   const [sel, setSel] = useState<string>('')
   const [detail, setDetail] = useState<TraceSession | undefined>() // 选中会话的完整轨迹（含 events，单查）
   const [legFilter, setLegFilter] = useState<string>('全部')
+  // 自动刷新默认关闭；与其它记录页一致，用户打开后记住偏好。
+  const [auto, setAuto] = useState(() => {
+    try { return localStorage.getItem(TRACE_AUTO_REFRESH_KEY) === '1' } catch { return false }
+  })
+  const selRef = useRef(sel)
+  selRef.current = sel
+
+  useEffect(() => {
+    try { localStorage.setItem(TRACE_AUTO_REFRESH_KEY, auto ? '1' : '0') } catch { /* ignore */ }
+  }, [auto])
 
   // 列表只拉摘要（不含 events），轻量；标签页隐藏时由 usePolling 跳过。
-  const load = async () => {
+  const load = useCallback(async () => {
     try {
       const ss = await getTraceSessions()
       setSessions(ss)
@@ -344,36 +356,34 @@ export default function CallTracePage() {
     } catch {
       /* ignore */
     }
-  }
-  usePolling(load, 3000)
+  }, [])
 
-  // 选中会话 → 单查完整轨迹（含 events）。切换时先清空，避免梯形图闪上一通；进行中通话由轮询刷新。
-  // 已结束会话不必每 3s 重拉大报文：连续若干轮 updatedAt 不变即视为已定型，停止轮询（标签页隐藏也跳过）。
+  const loadDetail = useCallback(async (id: string) => {
+    try {
+      const d = await getTraceSession(id)
+      if (selRef.current === id) setDetail(d)
+    } catch {
+      /* ignore */
+    }
+  }, [])
+
+  const refresh = useCallback(async () => {
+    await load()
+    if (selRef.current) await loadDetail(selRef.current)
+  }, [load, loadDetail])
+
+  useEffect(() => { void load() }, [load])
+  usePolling(load, 3000, { enabled: auto, immediate: false })
+
+  // 选中会话 → 单查完整轨迹（含 events）。切换时先清空，避免梯形图闪上一通；自动刷新关闭时只查一次。
   useEffect(() => {
     if (!sel) { setDetail(undefined); return }
     setDetail(undefined)
-    let alive = true
-    let lastUpdated = ''
-    let stableTicks = 0
-    let timer: ReturnType<typeof setTimeout> | null = null
-    const fetchDetail = async () => {
-      if (!alive) return
-      if (!document.hidden) {
-        try {
-          const d = await getTraceSession(sel)
-          if (!alive) return
-          setDetail(d)
-          // updatedAt 不变累计；变化则归零。稳定（~5 轮≈15s 无新事件）后停止重拉。
-          if (d.updatedAt && d.updatedAt === lastUpdated) stableTicks += 1
-          else { lastUpdated = d.updatedAt || ''; stableTicks = 0 }
-          if (stableTicks >= 5) return // 不再排程，停止轮询
-        } catch { /* ignore */ }
-      }
-      timer = setTimeout(() => { void fetchDetail() }, 3000)
-    }
-    void fetchDetail()
-    return () => { alive = false; if (timer) clearTimeout(timer) }
-  }, [sel])
+    void loadDetail(sel)
+  }, [sel, loadDetail])
+  usePolling(() => {
+    if (selRef.current) return loadDetail(selRef.current)
+  }, 3000, { enabled: auto && !!sel, immediate: false })
 
   const current = sessions.find((s) => s.id === sel) // 列表摘要项（选中态/兜底标题）
   const role = callRole(detail)
@@ -389,8 +399,18 @@ export default function CallTracePage() {
     <div className="page-container">
       <PageHeader
         title="通话链路"
-        status={{ tone: 'success', text: '每 3s 自动刷新' }}
-        onReload={() => void load()}
+        status={{ tone: auto ? 'success' : 'neutral', text: auto ? '自动刷新开' : '自动刷新关' }}
+        extra={(
+          <Space size={12}>
+            <Tooltip title="每 3 秒自动刷新会话列表与当前详情">
+              <Space size={4}>
+                <Text type="secondary" style={{ fontSize: 12 }}>自动</Text>
+                <Switch size="small" checked={auto} onChange={setAuto} />
+              </Space>
+            </Tooltip>
+            <Button icon={<ReloadOutlined />} onClick={() => void refresh()}>刷新</Button>
+          </Space>
+        )}
       />
       <InfoBanner title="按 SIP Call-ID 抓单腿真实报文 · 同一通业务多腿按 callUuid 归并">
         左侧选会话 → 右侧看事件梯形图（可展开真实 SIP 报文）。同一通业务通话的多腿在读时按 callUuid 归并装配（纯展示、不写回）。

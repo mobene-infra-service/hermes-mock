@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -323,6 +324,13 @@ func toTraceSummary(s *tracelog.Session) traceSessionSummary {
 	}
 }
 
+func toTraceSummaryFromEntity(s entity.TraceSessionSummary) traceSessionSummary {
+	return traceSessionSummary{
+		ID: s.SessionID, Title: s.Title, Kind: s.Kind, CallID: s.CallUUID,
+		StartedAt: s.StartedAt, UpdatedAt: s.UpdatedAt, Legs: s.Legs, EventCount: s.EventCount,
+	}
+}
+
 func (d *Deps) traceSessions(c *gin.Context) {
 	// ?match=<token>：服务端复刻前端 sessionMatchesCall 的子串语义（坐席软电话用 jssip callId 找自己那条
 	// trace），回匹配到的完整 session（含 events）。仅扫内存——进行中的通话必在内存，且匹配键多藏在 event 里——
@@ -339,26 +347,30 @@ func (d *Deps) traceSessions(c *gin.Context) {
 	}
 	// 无 match：返回摘要列表（不含 events）。内存优先 + DB 补充已落库的旧会话，最后压成摘要。
 	sessions := d.Bus.Sessions()
+	out := make([]traceSessionSummary, 0, len(sessions))
+	seen := map[string]bool{}
+	for _, s := range sessions {
+		seen[s.ID] = true
+		out = append(out, toTraceSummary(s))
+	}
 	if d.Repo != nil {
-		rows, err := d.Repo.ListTraceSessions(c.Request.Context(), 100)
+		rows, err := d.Repo.ListTraceSessionSummaries(c.Request.Context(), 100)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		seen := map[string]bool{}
-		for _, s := range sessions {
-			seen[s.ID] = true
-		}
 		for i := range rows {
-			if s := traceSessionFromEntity(&rows[i]); s != nil && !seen[s.ID] {
-				sessions = append(sessions, s)
+			if !seen[rows[i].SessionID] {
+				out = append(out, toTraceSummaryFromEntity(rows[i]))
 			}
 		}
 	}
-	out := make([]traceSessionSummary, 0, len(sessions))
-	for _, s := range sessions {
-		out = append(out, toTraceSummary(s))
-	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if !out[i].UpdatedAt.Equal(out[j].UpdatedAt) {
+			return out[i].UpdatedAt.After(out[j].UpdatedAt)
+		}
+		return out[i].StartedAt.After(out[j].StartedAt)
+	})
 	c.JSON(http.StatusOK, out)
 }
 
@@ -803,6 +815,8 @@ func (d *Deps) queryCallbacks(c *gin.Context) {
 func (d *Deps) queryCallRecords(c *gin.Context) {
 	f := cluster.CallRecordFilter{
 		Scenario:       c.Query("scenario"),
+		Scenarios:      queryCSV(c, "scenarios"),
+		Source:         c.Query("source"),
 		Status:         c.Query("status"),
 		OrgCode:        c.Query("orgCode"),
 		RunID:          c.Query("runId"),
@@ -843,35 +857,68 @@ func (d *Deps) queryCallRecords(c *gin.Context) {
 // trace 表 mock_trace_leg 则以 session_id 作为前端可打开的 trace id、以 call_uuid 保存关联锚。
 // 早期/实时记录可能只落了 call_uuid 没落 trace_id；查询时补齐，避免各页面显示「无对应 trace」。
 func (d *Deps) enrichCallRecordTraceIDs(ctx context.Context, records []cluster.CallRecordRow) {
+	missing := make([]string, 0, len(records))
 	for i := range records {
 		if strings.TrimSpace(records[i].TraceID) != "" {
 			continue
 		}
-		if traceID := d.traceIDForCallUUID(ctx, records[i].CallUUID); traceID != "" {
+		callUUID := strings.TrimSpace(records[i].CallUUID)
+		if callUUID == "" {
+			continue
+		}
+		if traceID := d.traceIDFromBus(callUUID); traceID != "" {
+			records[i].TraceID = traceID
+			continue
+		}
+		missing = append(missing, callUUID)
+	}
+	if d.Repo == nil || len(missing) == 0 {
+		return
+	}
+	traceIDs, err := d.Repo.TraceIDsByCallUUIDs(ctx, missing)
+	if err != nil {
+		return
+	}
+	for i := range records {
+		if strings.TrimSpace(records[i].TraceID) != "" {
+			continue
+		}
+		if traceID := traceIDs[strings.TrimSpace(records[i].CallUUID)]; traceID != "" {
 			records[i].TraceID = traceID
 		}
 	}
 }
 
-func (d *Deps) traceIDForCallUUID(ctx context.Context, callUUID string) string {
-	callUUID = strings.TrimSpace(callUUID)
-	if callUUID == "" {
+func (d *Deps) traceIDFromBus(callUUID string) string {
+	if d.Bus == nil {
 		return ""
 	}
-	if d.Bus != nil {
-		for _, s := range d.Bus.Sessions() {
-			if s != nil && strings.TrimSpace(s.CallID) == callUUID {
-				return s.ID
-			}
-		}
-	}
-	if d.Repo != nil {
-		legs, err := d.Repo.ListTraceLegsByCallUUID(ctx, callUUID)
-		if err == nil && len(legs) > 0 {
-			return legs[0].SessionID
+	for _, s := range d.Bus.Sessions() {
+		if s != nil && strings.TrimSpace(s.CallID) == callUUID {
+			return s.ID
 		}
 	}
 	return ""
+}
+
+func queryCSV(c *gin.Context, key string) []string {
+	vals := c.QueryArray(key)
+	if raw := strings.TrimSpace(c.Query(key)); raw != "" {
+		vals = append(vals, strings.Split(raw, ",")...)
+	}
+	out := make([]string, 0, len(vals))
+	seen := map[string]bool{}
+	for _, v := range vals {
+		for _, part := range strings.Split(v, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" || seen[part] {
+				continue
+			}
+			seen[part] = true
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 // saveCallRecord 由前端坐席软电话在每通外呼结束时回存「坐席侧」记录（含期望/实际/断言）。

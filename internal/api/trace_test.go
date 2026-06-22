@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -55,6 +56,34 @@ func TestTraceSessionsSummaryStripsEvents(t *testing.T) {
 	}
 	if got := w.Body.String(); contains(got, "jssip-ABC123") {
 		t.Errorf("列表响应不应泄漏藏在 event 里的 jssip token: %s", got)
+	}
+}
+
+func TestTraceSessionsSummarySortsByUpdatedAt(t *testing.T) {
+	bus := tracelog.New()
+	oldID := bus.OpenSession("call", "先创建后更新")
+	time.Sleep(time.Millisecond)
+	bus.OpenSession("call", "后创建但未更新")
+	time.Sleep(time.Millisecond)
+	bus.Emit(oldID, "customer", tracelog.ChanFlow, tracelog.DirNA, "UPDATED", "旧会话追加事件", nil)
+	d := &Deps{Bus: bus}
+
+	w := doTraceSessions(d, "/api/trace/sessions")
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d, want 200", w.Code)
+	}
+	var rows []struct {
+		ID    string `json:"id"`
+		Title string `json:"title"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(rows) < 2 {
+		t.Fatalf("rows=%d, want at least 2", len(rows))
+	}
+	if rows[0].ID != oldID {
+		t.Fatalf("应按 updatedAt DESC 排序，got first=%q(%s), want %q", rows[0].ID, rows[0].Title, oldID)
 	}
 }
 
