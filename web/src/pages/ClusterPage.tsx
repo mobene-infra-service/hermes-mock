@@ -1,10 +1,10 @@
 import { useEffect, useState, type ReactNode } from 'react'
 import {
-  Card, Table, Button, Modal, Form, Input, InputNumber, Select, Tabs, Tag, message, Space, Alert, Tooltip, Typography, Switch, Divider, Popconfirm, Upload,
+  AutoComplete, Card, Table, Button, Modal, Form, Input, InputNumber, Select, Tabs, Tag, message, Space, Alert, Tooltip, Typography, Switch, Divider, Popconfirm, Upload,
 } from 'antd'
 import {
   listProfiles, upsertProfile, deleteProfile, listGroups, upsertGroup, deleteGroup,
-  listOverrides, upsertOverride, deleteOverride, listBindings, upsertBinding, deleteBinding,
+  listOverrides, upsertOverride, deleteOverride, listListenPorts, listBindings, upsertBinding, deleteBinding,
   clusterResolve, setGroupState, setCustomerState, listAudio, uploadAudio,
   type BehaviorProfile, type CustomerGroup, type CustomerOverride, type LineBinding, type IVRStep, type AudioFile,
 } from '../api'
@@ -16,6 +16,25 @@ const { Text } = Typography
 
 function HelpText({ children }: { children: ReactNode }) {
   return <Text type="secondary" style={{ fontSize: 12 }}>{children}</Text>
+}
+
+type ListenPortInput = string | number | null | undefined
+
+function parseListenPort(value: ListenPortInput): number | null {
+  const raw = String(value ?? '').trim()
+  if (!raw) return null
+  if (!/^\d+$/.test(raw)) return null
+  const port = Number(raw)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null
+  return port
+}
+
+function listenPortOptions(ports: number[]) {
+  return ports.map((port) => ({ value: String(port), label: String(port) }))
+}
+
+function listenPortFilter(input: string, option?: { value?: string }) {
+  return String(option?.value ?? '').includes(input.trim())
 }
 
 // 通用「列表 + 新增/编辑弹窗 + 删除」工厂
@@ -255,18 +274,27 @@ function GroupsTab() {
 }
 
 function BindingsTab() {
-  const c = useCrud<LineBinding, number>(listBindings, upsertBinding, deleteBinding)
+  const saveBinding = async (b: LineBinding) => {
+    const listenPort = parseListenPort(b.listenPort)
+    if (!listenPort) throw new Error('SIP 入口端口必须是 1-65535 的整数')
+    return upsertBinding({ ...b, listenPort })
+  }
+  const c = useCrud<LineBinding, number>(listBindings, saveBinding, deleteBinding)
   const [groups, setGroups] = useState<CustomerGroup[]>([])
+  const [ports, setPorts] = useState<number[]>([])
   const refreshGroups = () => listGroups().then(setGroups).catch(() => {})
-  useEffect(() => { refreshGroups() }, [])
+  const refreshPorts = () => listListenPorts().then(setPorts).catch(() => {})
+  useEffect(() => { refreshGroups(); refreshPorts() }, [])
   const onNew = async () => {
-    await refreshGroups()
+    await Promise.all([refreshGroups(), refreshPorts()])
     c.onNew({ enabled: 1 })
   }
   const onEdit = async (row: LineBinding) => {
-    await refreshGroups()
-    c.onEdit(row)
+    await Promise.all([refreshGroups(), refreshPorts()])
+    c.form.setFieldsValue({ ...row, listenPort: String(row.listenPort) } as unknown as LineBinding)
+    c.setOpen(true)
   }
+  const portOptions = listenPortOptions(ports)
   return (
     <>
       <Alert type="info" style={{ marginBottom: 12 }} showIcon
@@ -286,8 +314,15 @@ function BindingsTab() {
       <Modal title="入口端口绑定" open={c.open} onOk={c.onSave} onCancel={() => c.setOpen(false)} destroyOnHidden forceRender>
         <Form form={c.form} layout="vertical">
           <Form.Item name="id" hidden><Input /></Form.Item>
-          <Form.Item name="listenPort" label="SIP 入口端口" rules={[{ required: true }]}>
-            <InputNumber min={1} max={65535} precision={0} style={{ width: '100%' }} placeholder="5060" />
+          <Form.Item name="listenPort" label="SIP 入口端口" rules={[
+            { required: true, message: '请选择或输入 SIP 入口端口' },
+            {
+              validator: async (_, value: ListenPortInput) => {
+                if (!parseListenPort(value)) throw new Error('请输入 1-65535 的整数端口')
+              },
+            },
+          ]}>
+            <AutoComplete allowClear options={portOptions} filterOption={listenPortFilter} placeholder="选择或输入端口，如 15060" />
           </Form.Item>
           <Form.Item name="lineName" label="线路名（可选）"><Input placeholder="line-base-a" /></Form.Item>
           <Form.Item name="groupCode" label="客户组" rules={[{ required: true }]}>
@@ -350,11 +385,18 @@ function OverridesTab() {
 
 function ResolvePreview() {
   const [number, setNumber] = useState('')
-  const [listenPort, setListenPort] = useState<number | null>(null)
+  const [listenPort, setListenPort] = useState('')
+  const [ports, setPorts] = useState<number[]>([])
   const [res, setRes] = useState<string>('')
+  useEffect(() => { listListenPorts().then(setPorts).catch(() => {}) }, [])
   const onResolve = async () => {
+    const port = parseListenPort(listenPort)
+    if (listenPort.trim() && !port) {
+      message.error('入口端口必须是 1-65535 的整数')
+      return
+    }
     try {
-      const r = await clusterResolve(number, listenPort || undefined)
+      const r = await clusterResolve(number, port || undefined)
       setRes(JSON.stringify(r, null, 2))
     } catch (e) { setRes(String(e)) }
   }
@@ -362,7 +404,7 @@ function ResolvePreview() {
     <Card size="small" title="解析预览（给被叫号 + 可选入口端口，看命中哪个组/行为）" style={{ marginBottom: 16 }}>
       <Space>
         <Input placeholder="被叫号 如 86138000005" value={number} onChange={(e) => setNumber(e.target.value)} style={{ width: 220 }} />
-        <InputNumber min={1} max={65535} precision={0} placeholder="入口端口（可选）" value={listenPort} onChange={(v) => setListenPort(v)} style={{ width: 180 }} />
+        <AutoComplete allowClear options={listenPortOptions(ports)} filterOption={listenPortFilter} placeholder="入口端口（可选）" value={listenPort} onChange={setListenPort} style={{ width: 180 }} />
         <Button type="primary" onClick={onResolve}>解析</Button>
       </Space>
       {res && <pre style={{ marginTop: 12, fontSize: 12, background: '#f6f8fa', padding: 10, borderRadius: 4 }}>{res}</pre>}

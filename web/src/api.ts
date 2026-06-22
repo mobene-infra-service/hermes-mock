@@ -190,6 +190,7 @@ export const listGroups = () => getJSON<CustomerGroup[]>('/cluster/groups')
 export const upsertGroup = (g: CustomerGroup) => postJSON<CustomerGroup>('/cluster/groups', g)
 export const listOverrides = () => getJSON<CustomerOverride[]>('/cluster/overrides')
 export const upsertOverride = (o: CustomerOverride) => postJSON<CustomerOverride>('/cluster/overrides', o)
+export const listListenPorts = () => getJSON<number[]>('/cluster/listen-ports')
 export const listBindings = () => getJSON<LineBinding[]>('/cluster/bindings')
 export const upsertBinding = (b: LineBinding) => postJSON<LineBinding>('/cluster/bindings', b)
 

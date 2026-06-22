@@ -121,6 +121,7 @@ func Register(r *gin.Engine, cfg *config.Config, repo model.Repository, clu *clu
 	g.POST("/cluster/customer/state", d.setCustomerState) // 切单个客户在线/离线
 	g.GET("/cluster/overrides", d.listOverrides)
 	g.POST("/cluster/overrides", d.upsertOverride)
+	g.GET("/cluster/listen-ports", d.listListenPorts)
 	g.GET("/cluster/bindings", d.listBindings)
 	g.POST("/cluster/bindings", d.upsertBinding)
 	g.GET("/cluster/resolve", d.clusterResolve) // 解析预览：给被叫号(+入口端口)看命中哪个组/行为
@@ -138,6 +139,14 @@ func (d *Deps) listProfiles(c *gin.Context)  { c.JSON(http.StatusOK, d.Cluster.L
 func (d *Deps) listGroups(c *gin.Context)    { c.JSON(http.StatusOK, d.Cluster.ListGroups()) }
 func (d *Deps) listOverrides(c *gin.Context) { c.JSON(http.StatusOK, d.Cluster.ListOverrides()) }
 func (d *Deps) listBindings(c *gin.Context)  { c.JSON(http.StatusOK, d.Cluster.ListBindings()) }
+func (d *Deps) listListenPorts(c *gin.Context) {
+	ports, err := d.Cfg.ListenPorts()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, ports)
+}
 
 func (d *Deps) upsertProfile(c *gin.Context) {
 	var p cluster.BehaviorProfile

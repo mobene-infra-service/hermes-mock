@@ -9,13 +9,15 @@
 - **前端按 Figma 重构稿全量重做（2026-06-15 落地）**：新设计系统（slate/blue 色板 + Antd token 单一来源 `web/src/constants/theme.ts`）；自绘深色侧栏 + 顶栏面包屑/机构切换器（`web/src/components/layout/`）；全部 14 屏统一 PageHeader + InfoBanner；场景页（群呼/OTP/call-bot）配置表单收进右侧抽屉、主区改全宽结论横幅 + 通话明细行 + 历史。纯前端、零后端接口改动。`tsc`/`vite build`/`make sync-web`/`go build` 全绿，Playwright 逐屏核对一致。**待办**：① 本机无 eslint 可执行文件，`npm run lint` 未跑；② 端到端（接真实后端/本地栈）跑一遍各场景，确认抽屉提交 + 实时观测 + 机构切换器联动正常；③ 设计稿里坐席卡展开态/批量派号细节（BatchBar 吸顶汇总、接听规则面板）已沿用原有富交互、未逐像素对齐，如需再细化。
 - **DB 模型重构（阶段0–3）已落地**：根除「一通电话散成 3 条 call_record + 2 个 bus session」核心病。`call_uuid` 为唯一跨场景聚合锚；`mock_call_record`→`mock_call`（聚合根，删 4 个死的 SIP 观测列）、`mock_trace_session`→`mock_trace_leg`（写入严格单腿，多腿读时按 call_uuid 归并）；override 复合唯一 + OnConflict 消竞态 + schema 单源（实体 tag 权威，DDL 快照）；观测表 TTL（`OBSERVE_TTL_DAYS=7`）。**待办**：① 本地栈跑一通被叫群呼，确认 `mock_call` 1 行/通 + `mock_trace_leg` 单腿 + 前端记录页/trace 梯形图正常；② 坐席 jssip 外呼确认 `x-session-id: CCMDL{callId}` 被 FS/call-center bridge 透传到被叫腿（两腿同 call_uuid → 多腿视图），不透传则两腿独立记录（不退化）；③ `make web` 前端构建（本机无 node_modules，tsc 未跑）。
 - **Trace 接口瘦身降轮询开销已落地**：`/trace/sessions` 无 query 返回摘要（不含 events、带 `eventCount`），详情走 `/trace/sessions/:id` 单查，坐席软电话用 `?match=<jssip callId>` 让服务端匹配回完整单条；前端轮询加可见性守卫 + 非终态上限 + 周期放宽。
-- Cluster 绑定模型已从 `lineAddress` 收敛为 mock SIP 入口端口：Hermes 线路负责把 INVITE 送到 `mockIP:port`，mock 内部按 `listenPort -> customer_group` 决定客户行为。
+- Cluster 绑定模型已从 `lineAddress` 收敛为 mock SIP 入口端口：Hermes 线路负责把 INVITE 送到 `mockIP:port`，mock 内部按 `listenPort -> customer_group` 决定客户行为；Cluster 页端口输入已改为读取当前 `SIP_LISTEN_PORTS` 的下拉选项，同时保留手动输入能力。
 
 ## 已知技术债 / 待办
 
 - _（坐席死代码 `wsagent`/`agents.Registry` 与 `hermesprobe` 健康探测已于 2026-06-13 清理，见验证记录。）_
 
 ## 验证记录
+
+- 2026-06-22：Cluster 页端口绑定体验优化：新增后端只读接口 `/api/cluster/listen-ports` 返回当前 mock 实际 SIP 监听端口（由 `SIP_LISTEN_PORTS`/`SIP_LISTEN_PORT` 派生），前端「入口端口绑定」弹窗与「解析预览」改为端口下拉输入（AutoComplete），可选配置端口也可手填自定义端口，保存前统一校验/转换为数字。`go test ./internal/api`、`npm --prefix web run build`、`make sync-web && make verify-embed`、`go test ./...` 通过（Vite 仅既有 chunk size warning）；`npm --prefix web run lint` 因本机缺 `eslint` 可执行文件未运行。
 
 - 2026-06-19：`/trace` 通话链路页取消默认 3s 自动刷新，改为与场景记录页一致的「自动」开关，默认关闭并持久化到 `localStorage`；页面初次进入仍加载一次，手动「刷新」会同时刷新会话列表与当前详情，开启自动后才每 3 秒刷新列表和当前详情。`npm --prefix web run build`、`make sync-web && make verify-embed`、`go test ./...` 通过（Vite 仅既有 chunk size warning）。
 
