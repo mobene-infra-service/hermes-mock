@@ -6,7 +6,6 @@ import {
   listProfiles, upsertProfile, deleteProfile, listGroups, upsertGroup, deleteGroup,
   listOverrides, upsertOverride, deleteOverride, listBindings, upsertBinding, deleteBinding,
   clusterResolve, setGroupState, setCustomerState, listAudio, uploadAudio,
-  bootstrapDemo,
   type BehaviorProfile, type CustomerGroup, type CustomerOverride, type LineBinding, type IVRStep, type AudioFile,
 } from '../api'
 import { OUTCOME_OPTIONS, FAULT_OPTIONS } from '../constants/enums'
@@ -373,24 +372,13 @@ function ResolvePreview() {
 
 
 export default function ClusterPage() {
-  const [seeding, setSeeding] = useState(false)
   const [reloadKey, setReloadKey] = useState(0)
-  const seed = async () => {
-    setSeeding(true)
-    try {
-      const r = await bootstrapDemo({ provisionLine: true })
-      if (r.error) { message.error(`播种失败：${r.error}`); return }
-      message.success(`已播种 mock 客户配置：${r.result?.customerGroup}`)
-      setReloadKey((k) => k + 1)
-    } catch (e) { message.error(String(e)) } finally { setSeeding(false) }
-  }
   return (
     <div className="page-container">
       <PageHeader
         title="客户行为配置"
         status={{ tone: 'info', text: '被叫客户行为档' }}
         onReload={() => setReloadKey((k) => k + 1)}
-        actions={<Button type="primary" loading={seeding} onClick={seed}>播种 mock 客户配置</Button>}
       />
       <InfoBanner title="mock 被叫客户的「行为档 / 客户组 / 端口绑定 / 个例」配置">
         行为档定义被叫如何应答（接听/拒接/振铃不接/放音/IVR/DTMF/故障）。客户组 = 一个号段批量 N 个虚拟客户。端口绑定 = mock SIP 监听端口对应到客户组。个例 = 组内个别号码的例外。
