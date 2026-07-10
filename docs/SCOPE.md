@@ -61,3 +61,12 @@ mock 按预设的"客户行为档"应答，并采集真实 SIP 报文 + 落库�
 - ❌ **录音回放平台**。
 
 > 新功能动手前，先确认它不在上面这张清单里；若确有必要突破，先在 [DECISIONS.md](DECISIONS.md) 记录理由并和用户确认。
+
+## 六、边界注：策略流 Mock 编排（第二类 mock 的控制台）
+
+`/stratflow-mock` 页 + `/api/stratflow/mock/*` 是 **hermes-stratflow「应用层 mock」的编排/观测台**（经 OpenAPI 配结局分布/开关门闸/触发 run/观测计划断言分支），
+属「经 OpenAPI 触发 Hermes 业务 + 测试编排」的延伸（与群呼/callbot/OTP 触发同类），**不触碰被叫腿定位**。
+
+要点：stratflow 应用层 mock 与 hermes-mock 被叫腿是**同一通触达的互斥 mock**——开 stratflow mock 则**不产真实 SIP**（走事件层合成回执），
+用 hermes-mock 被叫腿则须关 stratflow mock。故本能力测的是**策略图分支/回执逻辑**，不测 SIP/媒体。它是控制台、不是被叫腿核心，
+**不得**长成 stratflow 完整管理台。详见 [DECISIONS.md](DECISIONS.md) 2026-07-08 条 + [hermes/stratflow-mock-openapi-spec.md](hermes/stratflow-mock-openapi-spec.md)。

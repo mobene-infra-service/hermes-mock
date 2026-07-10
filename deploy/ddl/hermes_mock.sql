@@ -265,6 +265,7 @@ CREATE TABLE `mock_org_config` (
   `call_center_url`  varchar(256) NOT NULL DEFAULT ''      COMMENT 'call-center 服务地址(direct 模式)',
   `call_bot_url`     varchar(256) NOT NULL DEFAULT ''      COMMENT 'call-bot 服务地址(direct 模式)',
   `otp_url`          varchar(256) NOT NULL DEFAULT ''      COMMENT 'otp 服务地址(direct 模式)',
+  `stratflow_url`    varchar(256) NOT NULL DEFAULT ''      COMMENT 'stratflow 服务地址(direct 模式，策略流 Mock 编排)',
   `agent_ws_url`     varchar(256) NOT NULL DEFAULT ''      COMMENT 'hermes-ws 工作台地址(host:port)',
   `user_code`        varchar(64)  NOT NULL DEFAULT ''      COMMENT '直连模式注入的操作人(审计)',
   `default_agent_group_code` varchar(64)  NOT NULL DEFAULT '' COMMENT '坐席外呼默认技能组',

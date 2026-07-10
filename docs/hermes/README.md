@@ -20,6 +20,7 @@
 | [backend-overview.md](backend-overview.md) | 后端总览（call-center / call-bot / otp / basic / fs-esl-proxy / hermes-ws 职责与接口） | 骨架待填 |
 | [agent-outbound-call.md](agent-outbound-call.md) | 坐席手动外呼端到端链路（选线/bridge/重试证据） | 已迁入 |
 | [otp.md](otp.md) | OTP 语音验证码外呼（请求→originate→接通放音念码→挂机/回调；mock 当被叫客户腿） | 初稿（事件流/契约直证，部分 Controller/业务 .kt 行号待补） |
+| [stratflow-mock-openapi-spec.md](stratflow-mock-openapi-spec.md) | **对接要点（非梳理）**：stratflow 已落地 `/openapi/mock` 发现/进度接口；本篇记 hermes-mock 侧消费要点（进度带时间窗、断言看 edgeFlow 而非 phase、import 按 plans[].result 分流）。契约权威源在 hermes 仓 `docs/stratflow-mock-openapi-spec.md` | 已落地 |
 
 ## 添加一篇 = 3 步
 

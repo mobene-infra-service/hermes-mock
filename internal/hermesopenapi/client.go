@@ -37,6 +37,10 @@ const (
 	prodCallCenter = "call-center"
 	prodCallBot    = "call-bot"
 	prodOTP        = "otp"
+	// prodStratflow：网关路由 Path=/stratflow/**（StripPrefix=1）→ hermes-stratflow-svc。
+	// stratflow 不在 OpenApiAuthFilter.PRODUCT_PATH_MAPPING 内，isValidProduct 对未匹配路径返回 true（不受产品限制），
+	// 故现有 X-OpenApi-Key 直接可达 /stratflow/openapi/**，无需网关改动。
+	prodStratflow = "stratflow"
 )
 
 // Cred 一套机构的 OpenAPI 接入凭据（来自「机构配置」）。
@@ -53,6 +57,7 @@ type Cred struct {
 	CallCenterURL string `json:"callCenterUrl"`
 	CallBotURL    string `json:"callBotUrl"`
 	OTPURL        string `json:"otpUrl"`
+	StratflowURL  string `json:"stratflowUrl"`
 }
 
 // Client 针对一套机构凭据的 OpenAPI 客户端。
@@ -104,6 +109,8 @@ func (c *Client) endpoint(product, path string) (urlStr string, headers map[stri
 		base = c.cred.CallBotURL
 	case prodOTP:
 		base = c.cred.OTPURL
+	case prodStratflow:
+		base = c.cred.StratflowURL
 	}
 	if base == "" {
 		return "", nil, fmt.Errorf("直连模式未配置 %s 服务地址", product)

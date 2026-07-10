@@ -135,6 +135,7 @@ export default function OrgsPage() {
               <Form.Item name="callCenterUrl" label="call-center 服务地址"><Input placeholder="http://hermes-call-center:8080" /></Form.Item>
               <Form.Item name="callBotUrl" label="call-bot 服务地址"><Input placeholder="http://hermes-call-bot:8080（可空）" /></Form.Item>
               <Form.Item name="otpUrl" label="otp 服务地址"><Input placeholder="http://hermes-otp:8080（可空）" /></Form.Item>
+              <Form.Item name="stratflowUrl" label="stratflow 服务地址"><Input placeholder="http://hermes-stratflow:8080（可空，策略流 Mock 编排用）" /></Form.Item>
               <Form.Item name="userCode" label="操作人(审计头)"><Input placeholder="操作人标识，随 OpenAPI 请求记审计" /></Form.Item>
             </>
           )}

@@ -3,6 +3,16 @@
 > 本项目改动按主题记录（倒序，最新在上）。决策原因见 [DECISIONS.md](DECISIONS.md)，当前状态见 [STATUS.md](STATUS.md)。
 ---
 
+## 2026-07-08
+
+- **新增「策略流 Mock 编排」——对接 hermes-stratflow 应用层 mock**（详见 [DECISIONS.md](DECISIONS.md) 同日条目）：
+  - 后端 `internal/hermesopenapi/stratflow.go`：stratflow mock OpenAPI 客户端（gate 开关 / per-node 结局配置 / 在途计划 / 一键清空 / 方案·版本·名单·字段·绑定·run 进度发现 / import 触发）；产品前缀 `stratflow`（gateway 共用现有 key，direct 新增 `StratflowURL`）。
+  - 后端 `internal/api/stratflow.go`：`/api/stratflow/mock/*` 18 条透传路由 + Deps handler；错误统一 502、缺 runCode/时间窗给 400。
+  - 前端 `web/src/pages/StratflowMockPage.tsx` + 菜单「策略流 Mock」：门闸探测/开关 → 选方案(拿 versionCode) → 结局配置(forced/weights/baseDelay) → 选名单导入触发 run → 观测在途计划 + 按 `edgeFlow` 断言分支；`master=false` 整台只读。
+  - schema：`OrgConfig.StratflowURL`（direct 模式）+ DDL 快照 `mock_org_config.stratflow_url`。
+  - 边界：应用层 mock 编排台，与 SIP 被叫腿正交、互斥（见 SCOPE §六补注）。
+  - 验证：`go build ./...`、`go vet`、`gofmt`、`go test ./...`（含 stratflow client 表驱动 + api 路由注册冒烟）全绿；`tsc -b`、`vite build`、`make sync-web`、`make verify-embed` 通过（仅既有 chunk size 警告）。端到端待真实 stratflow 环境；`npm run lint` 因本机缺 eslint 未跑。
+
 ## 2026-06-18
 
 - **FS 机器 Docker 部署 SIP 回源与线路目标结论**：

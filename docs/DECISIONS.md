@@ -7,6 +7,17 @@
 
 ---
 
+## 2026-07-08 · 纳入 stratflow「应用层 mock」编排台：与 SIP 被叫腿正交的第二类 mock
+
+- **背景**：Hermes 新增策略流引擎 `hermes-stratflow`，其触达节点（VOICEBOT_CALL/SMS_SEND）自带一套**应用层 mock 下游**（`MockAdminController` + `MockDownstream`）：派发那刻按结局词表采样 → 写 Redis 计划 → 定时器合成回执事件投 Kafka，交真实消费者落地。**关键事实**：它与 hermes-mock 是**同一通触达的互斥 mock**——`BatchFlusher.kt` 派发分叉 `if mockGate.enabledFor(defCode) { 合成假 taskCode+写计划 } else { 调 call-bot 真实外呼 }`。开 stratflow mock 就不打真实电话、不经 FS、不经被叫腿；要用 hermes-mock 被叫腿就得关 stratflow mock。二者层不同（应用/事件层 vs SIP/媒体层）。用户明确要接的是**场景 A：测策略图分支/回执逻辑**（用 stratflow 自带 mock，不产真实 SIP）。
+- **决策**：
+  1. **在 hermes-mock 内新增「策略流 Mock 编排」能力**（页 `/stratflow-mock` + `/api/stratflow/mock/*` 透传 + `hermesopenapi` stratflow 客户端）：发现方案/版本/名单 → 配触达节点结局（forced/weights/baseDelay）→ 导名单触发 run → 观测在途计划 + 按 `edgeFlow` 断言分支落点。**这是编排/观测台，hermes-mock 不当被叫腿参与此路径。**
+  2. **凭据/路由共用**：走当前机构 OpenAPI 凭据，产品前缀 `stratflow`（网关路由 `/stratflow/**` StripPrefix；`OpenApiAuthFilter.isValidProduct` 对未映射路径返回 true→ 现有 key 直接可达，网关无需改）。direct 模式新增 `StratflowURL`。
+  3. **契约边界**：stratflow 侧已按我方规格单补 `/openapi/mock/{workflows,collections,...}` 只读发现接口（仅 `mock-downstream.enabled=true` 装配 → prod 无此面）。契约权威源在 hermes 仓 `docs/stratflow-mock-openapi-spec.md`，hermes-mock 侧消费要点见 `docs/hermes/stratflow-mock-openapi-spec.md`。
+  4. **不做**：不把 stratflow 完整管理台（结局词表编辑、图编排）搬进来；配置项只读 stratflow 下发词表。断言用 `edgeFlow` 漏斗（stratflow 不返回 entry 级 phase）。
+- **影响**：为什么这不算 SCOPE 越界——SCOPE §五非目标清单是针对「SIP 被叫腿」维度（不主动 UAC/不 B2BUA/不模拟坐席话路/不重型可观测/不录音回放），本能力是「经 OpenAPI 触发 Hermes 业务 + 测试编排」的延伸（与「群呼/callbot/OTP 触发」同类），不触碰被叫腿定位。但它确是**第二类 mock 的控制台**，故 SCOPE 补一句边界注、此处留档，防止以后误当核心能力膨胀。涉及：`internal/hermesopenapi/{client,stratflow}.go`、`internal/api/stratflow.go`、`internal/entity/db.go`(+`stratflow_url`)、`internal/orgcfg/store.go`、`deploy/ddl/hermes_mock.sql`、`web/src/{pages/StratflowMockPage.tsx,api.ts,types,App.tsx,components/layout/nav.tsx,pages/OrgsPage.tsx}`。
+- **状态**：`go build ./...`/`go vet`/`gofmt`/`go test ./...`（含新增 stratflow client 表驱动测试 + api 路由注册冒烟）全绿；`tsc -b`/`vite build`/`make sync-web`/`make verify-embed` 通过（仅既有 chunk size 警告）。**端到端待接真实 stratflow 环境**（`mock-downstream.enabled=true` + 授权方案/名单）跑一遍「配→触发→edgeFlow 断言」闭环；`npm run lint` 因本机缺 eslint 未跑。
+
 ## 2026-06-18 · FS Docker 部署：Hermes 线路目标使用内网 mock 入口，SIP 响应按包源回 Kamailio
 - **背景**：将 mock 从 K8s PodIP 迁到 `hermes-freeswitch-test` Docker 后，FS/Kamailio 同机存在两类地址：内网 `172.16.7.27` 和公网 `47.251.74.116`。Kamailio 配置 `listen=udp:172.16.7.27:5060 advertise 47.251.74.116:5060` 且 `alias="47.251.74.116"`，所以转发出去的顶层 Via 会写公网 `47.251.74.116:5060`，但 Docker mock 实际收到包的来源应是内网 `172.16.7.27:5060`。实测 Hermes 线路目标配置为 `47.251.74.116:15060` 时，mock 无 `收到 INVITE` 日志；改为 `172.16.7.27:15060` 后 INVITE 正常进入 mock。
 - **决策**：

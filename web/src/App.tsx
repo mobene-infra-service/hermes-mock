@@ -9,6 +9,7 @@ import GroupCallPage from './pages/GroupCallPage'
 import CallbotPage from './pages/CallbotPage'
 import OtpPage from './pages/OtpPage'
 import AgentCallSdkPage from './pages/AgentCallSdkPage'
+import StratflowMockPage from './pages/StratflowMockPage'
 import AgentSoftphone from './components/AgentSoftphone'
 import Sidebar from './components/layout/Sidebar'
 import TopBar from './components/layout/TopBar'
@@ -45,6 +46,7 @@ export default function App() {
               <Route path="/group-call" element={<GroupCallPage />} />
               <Route path="/callbot" element={<CallbotPage />} />
               <Route path="/otp" element={<OtpPage />} />
+              <Route path="/stratflow-mock" element={<StratflowMockPage />} />
               {/* 旧路由兼容 */}
               <Route path="/call-records" element={<Navigate to="/overview" replace />} />
               <Route path="/call-scenarios" element={<Navigate to="/agent-call" replace />} />

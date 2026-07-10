@@ -59,11 +59,11 @@ docs/                    本套文档
 | `orchestrator` | 经 Hermes 业务 REST/OpenAPI 触发 call-bot/otp/call-center 任务 + 坐席操作 |
 | `callbacks` | 接收 Hermes 回调（webhook）→ 经 Repository 落 `mock_callback` |
 | `testkit` | 业务测试编排（触发 + 真实 SIP 断言）；`SetBizCaller(orch)` 接 orchestrator，`SetRepo` 落测试历史 |
-| `api` | Gin 路由 + REST + 前端 embed 挂载（`Register` / `MountFrontend`）；请求/出站 Hermes 调用统一日志见 `middleware.go` / `hermesopenapi/logging.go` |
+| `api` | Gin 路由 + REST + 前端 embed 挂载（`Register` / `MountFrontend`）；请求/出站 Hermes 调用统一日志见 `middleware.go` / `hermesopenapi/logging.go`；`stratflow.go`=策略流应用层 mock 编排透传（`/api/stratflow/mock/*`） |
 
 **支撑包**（未在 main 直接接线，被上面的包引用）：
 `behavior`（被叫行为类型 Outcome/Fault/IVR/Rule）、
-`hermesopenapi`（Hermes OpenAPI 客户端，被 orchestrator/orgcfg 用）、
+`hermesopenapi`（Hermes OpenAPI 客户端，被 orchestrator/orgcfg 用；`stratflow.go`=对接 hermes-stratflow 应用层 mock 下游）、
 `bootstrap`（启动播种端口绑定/默认数据）、
 `preflight`（场景就绪自检）。
 

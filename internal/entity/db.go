@@ -270,6 +270,7 @@ type OrgConfig struct {
 	CallCenterURL         string    `json:"callCenterUrl" gorm:"column:call_center_url;size:256"`
 	CallBotURL            string    `json:"callBotUrl" gorm:"column:call_bot_url;size:256"`
 	OTPURL                string    `json:"otpUrl" gorm:"column:otp_url;size:256;not null;default:''"`
+	StratflowURL          string    `json:"stratflowUrl" gorm:"column:stratflow_url;size:256;not null;default:''"`
 	AgentWsURL            string    `json:"agentWsUrl" gorm:"column:agent_ws_url;size:256;not null;default:''"`
 	UserCode              string    `json:"userCode" gorm:"column:user_code;size:64"`
 	DefaultAgentGroupCode string    `json:"defaultAgentGroupCode" gorm:"column:default_agent_group_code;size:64;not null;default:''"`

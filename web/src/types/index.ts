@@ -325,6 +325,7 @@ export interface OrgConfig {
   callBotUrl?: string
   agentWsUrl?: string
   otpUrl?: string
+  stratflowUrl?: string
   userCode?: string
   defaultAgentGroupCode?: string
   defaultAgentRoleCode?: string
@@ -342,3 +343,27 @@ export interface AgentGroupAgg { code: string; name?: string; count: number }
 
 // Hermes 回调
 export interface CallbackRecord { seq: number; ts: string; source: string; event: string; orgCode: string; callUuid: string; remote: string; payload: unknown }
+
+// ---- 策略流应用层 mock 编排（对接 hermes-stratflow /openapi/mock）----
+// 这是「应用层 mock（stratflow 合成回执）」的编排台，与 SIP 被叫腿正交；测策略图分支逻辑时不产真实 SIP。
+export interface SfGateView { master: boolean; global: boolean; schemes: Record<string, boolean>; deliveryPaused: boolean; receiptWindowSec: number }
+export interface SfOutcome { key: string; label: string; weight: number; defaultWeight: number; steps: number }
+export interface SfNode { nodeId: string; type: string; channel?: string | null; forcedOutcome?: string | null; baseDelayMs: number; outcomes: SfOutcome[] }
+export interface SfNodeConfig { weights?: Record<string, number>; forcedOutcome?: string | null; baseDelayMs?: number }
+export interface SfWorkflow { defCode: string; name: string; status: number; orgEnabled: boolean }
+export interface SfWorkflowDetail extends SfWorkflow { versionCode: string }
+export interface SfCollection { code: string; name: string; status: number; boundPlanCount: number; fieldCount: number; entryCount: number }
+export interface SfField { key: string; displayName: string; dataType: string; required: boolean; sort: number; maxLen?: number | null; format?: string | null }
+export interface SfBinding { defCode: string; defName: string; status: number }
+export interface SfRun { code: string; collectionCode: string; defCode: string; defName: string; versionCode: string; status: number; numberCount: number; reachedEndCount: number; terminalCount: number; expiredCount: number; canceledCount: number }
+export interface SfRunNode { nodeId: string; inflow: number; processed: number; processing: number; edgeFlow: Record<string, number> }
+export interface SfRunProgress { run: SfRun; nodes: SfRunNode[] }
+export interface SfMockStep { delayMs: number; status: string; failureReason?: string | null; data?: Record<string, unknown> }
+export interface SfActionPlan { actionCode: string; runCode: string; nodeId: string; entryCode: string; channel: string; outcomeKey: string; baseMs: number; idx: number; steps: SfMockStep[] }
+export interface SfImportPlan { defCode: string; versionCode: string; result: number; runCode: string; failFields?: string[] | null }
+export interface SfImportResult { code: string; batchCode: string; collectionCode: string; status: number; total: number; success: number; fail: number; plans: SfImportPlan[] }
+export interface SfImportRow { phone: string; bizFields?: Record<string, unknown> }
+// import result 码：1=已生成 run / 2=字段契约失败(failFields) / 3=无可用绑定
+export const SF_IMPORT_RUN_CREATED = 1
+export const SF_IMPORT_FIELD_FAIL = 2
+export const SF_IMPORT_NO_BINDING = 3

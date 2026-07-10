@@ -183,6 +183,25 @@ async function postJSON<T>(path: string, body: unknown): Promise<T> {
   }
   return r.json()
 }
+async function putJSON<T>(path: string, body?: unknown): Promise<T> {
+  const r = await fetch(`${base}${path}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}))
+    throw new Error((e as { error?: string }).error || `${path}: ${r.status}`)
+  }
+  return r.json()
+}
+async function delJSONBody<T>(path: string): Promise<T> {
+  const r = await fetch(`${base}${path}`, { method: 'DELETE' })
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}))
+    throw new Error((e as { error?: string }).error || `${path}: ${r.status}`)
+  }
+  return r.json()
+}
 
 export const listProfiles = () => getJSON<BehaviorProfile[]>('/cluster/profiles')
 export const upsertProfile = (p: BehaviorProfile) => postJSON<BehaviorProfile>('/cluster/profiles', p)
@@ -233,3 +252,45 @@ export const queryCallbacks = (f?: { source?: string; event?: string; orgCode?: 
   const q = new URLSearchParams(Object.entries(f || {}).filter(([, v]) => v) as [string, string][])
   return getJSON<{ callbacks: CallbackRecord[] }>(`/callbacks?${q}`)
 }
+
+// ===== 策略流应用层 mock 编排（透传 hermes-stratflow /openapi/mock）=====
+import type {
+  SfGateView, SfNode, SfNodeConfig, SfWorkflow, SfWorkflowDetail,
+  SfCollection, SfField, SfBinding, SfRun, SfRunProgress, SfActionPlan, SfImportResult, SfImportRow,
+} from './types'
+
+// ① gate
+export const sfGate = () => getJSON<SfGateView>('/stratflow/mock/gate')
+export const sfSetGlobalGate = (enabled: boolean) => putJSON<SfGateView>(`/stratflow/mock/gate/global?enabled=${enabled}`)
+export const sfSetSchemeGate = (defCode: string, enabled: boolean) => putJSON<SfGateView>(`/stratflow/mock/gate/scheme/${encodeURIComponent(defCode)}?enabled=${enabled}`)
+export const sfClearSchemeGate = (defCode: string) => delJSONBody<SfGateView>(`/stratflow/mock/gate/scheme/${encodeURIComponent(defCode)}`)
+export const sfSetDeliveryPaused = (paused: boolean) => putJSON<SfGateView>(`/stratflow/mock/delivery?paused=${paused}`)
+export const sfSetReceiptWindow = (seconds: number) => putJSON<SfGateView>(`/stratflow/mock/receipt-window?seconds=${seconds}`)
+// ② config
+export const sfListConfig = (versionCode: string) => getJSON<{ nodes: SfNode[] }>(`/stratflow/mock/config/${encodeURIComponent(versionCode)}`)
+export const sfPutConfig = (versionCode: string, nodeId: string, cfg: SfNodeConfig) =>
+  putJSON<{ ok: boolean }>(`/stratflow/mock/config/${encodeURIComponent(versionCode)}/${encodeURIComponent(nodeId)}`, cfg)
+export const sfDeleteConfig = (versionCode: string, nodeId: string) =>
+  delJSON(`/stratflow/mock/config/${encodeURIComponent(versionCode)}/${encodeURIComponent(nodeId)}`)
+// ③ 清空 / 在途计划
+export const sfClearMock = (scope: 'all' | 'plans' | 'config' = 'all') => delJSON(`/stratflow/mock/all?scope=${scope}`)
+export const sfListPlans = (runCode: string) => getJSON<{ plans: SfActionPlan[] }>(`/stratflow/mock/plans?runCode=${encodeURIComponent(runCode)}`)
+// ④ 发现
+export const sfWorkflows = () => getJSON<{ workflows: SfWorkflow[] }>('/stratflow/workflows')
+export const sfWorkflowDetail = (defCode: string) => getJSON<SfWorkflowDetail>(`/stratflow/workflows/${encodeURIComponent(defCode)}`)
+export const sfCollections = (name?: string, status?: string) => {
+  const q = new URLSearchParams()
+  if (name) q.set('name', name)
+  if (status) q.set('status', status)
+  return getJSON<{ collections: SfCollection[] }>(`/stratflow/collections${q.toString() ? `?${q}` : ''}`)
+}
+export const sfCollectionFields = (code: string) => getJSON<{ fields: SfField[] }>(`/stratflow/collections/${encodeURIComponent(code)}/fields`)
+export const sfCollectionBindings = (code: string) => getJSON<{ bindings: SfBinding[] }>(`/stratflow/collections/${encodeURIComponent(code)}/bindings`)
+export const sfRuns = (code: string) => getJSON<{ runs: SfRun[] }>(`/stratflow/collections/${encodeURIComponent(code)}/runs`)
+export const sfRunProgress = (code: string, runCode: string, uploadStartTime: string, uploadEndTime: string) => {
+  const q = new URLSearchParams({ uploadStartTime, uploadEndTime })
+  return getJSON<SfRunProgress>(`/stratflow/collections/${encodeURIComponent(code)}/runs/${encodeURIComponent(runCode)}/progress?${q}`)
+}
+// ⑤ 触发
+export const sfImport = (code: string, req: { rows: SfImportRow[]; idempotencyKey?: string }) =>
+  postJSON<SfImportResult>(`/stratflow/collections/${encodeURIComponent(code)}/import`, req)

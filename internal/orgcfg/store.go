@@ -24,6 +24,7 @@ func credOf(o OrgConfig) hermesopenapi.Cred {
 		OrgCode: o.OrgCode, OrgName: o.OrgName, UserCode: o.UserCode, Mode: o.Mode,
 		GatewayURL: o.GatewayURL, APIKey: o.APIKey,
 		BasicURL: o.BasicURL, CallCenterURL: o.CallCenterURL, CallBotURL: o.CallBotURL, OTPURL: o.OTPURL,
+		StratflowURL: o.StratflowURL,
 	}
 }
 
