@@ -35,10 +35,10 @@
 
 ## 3. 不变的坑（沿用手册）
 
-- **gate 默认关**：`MockGate.DEFAULT_GLOBAL_ON=false`（手册 §2.1 那句"缺省开"是过时的）。进编排台先 `GET /openapi/mock/gate` 探 `master`+`global`，`master=false` 整台只读，走 mock 须显式 `PUT /gate/scheme/{defCode}?enabled=true`。
+- **gate 为三态且缺配置 fail-safe PAUSED**：进编排台先 `GET /openapi/mock/gate` 探 `master`+`mode/schemeModes`；旧 `global/schemes` 仅兼容二态。REAL/MOCK 写请求同时携带 `mode+enabled` 兼容旧 Hermes，PAUSED 不允许降级。`master=false` 整台只读。
 - **两个 code 别混**：gate 按 `defCode`（方案）、config 按 `versionCode`（发布版本）；编排台经 `workflows/{defCode}` 把二者串起来。
 - **配置须先于 import**：采样在派发那刻一次定型落计划；先配 `forcedOutcome/weights` 再导名单。
-- **超时结局不写计划**：`GET /plans` 看不到该类动作，断言超时分支只能看 progress 漏斗，别把"计划空"误判成"没派发"。
+- **超时结局不写计划**：`GET /plans` 看不到该类动作，断言超时分支只能看 progress 漏斗，别把"计划空"误判成"没派发"。故障观测分别请求 `status=PENDING/DEAD`；DEAD 可经 `POST /plans/{actionCode}/requeue` 恢复。
 
 ## 4. hermes-mock 侧落地清单（据已落地契约收敛）
 

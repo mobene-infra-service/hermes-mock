@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Card, Select, Button, Space, Table, Tag, Typography, InputNumber, Input, Switch,
   message, Modal, Alert, Collapse, Descriptions, Empty, Divider,
@@ -6,17 +6,19 @@ import {
 import { ReloadOutlined, ThunderboltOutlined, ClearOutlined } from '@ant-design/icons'
 import {
   sfGate, sfSetGlobalGate, sfSetSchemeGate, sfClearSchemeGate, sfSetDeliveryPaused, sfSetReceiptWindow,
-  sfListConfig, sfPutConfig, sfDeleteConfig, sfClearMock, sfListPlans,
+  sfListConfig, sfPutConfig, sfDeleteConfig, sfClearMock, sfListPlans, sfRequeuePlan,
   sfWorkflows, sfWorkflowDetail, sfCollections, sfCollectionFields, sfCollectionBindings, sfRunProgress, sfImport,
+  CURRENT_ORG_STORAGE_KEY,
 } from '../api'
 import type {
   SfGateView, SfNode, SfNodeConfig, SfWorkflow, SfWorkflowDetail,
-  SfCollection, SfField, SfActionPlan, SfImportResult, SfRunProgress, SfRunNode, SfBinding, SfImportRow,
+  SfCollection, SfField, SfActionPlan, SfImportResult, SfRunProgress, SfRunNode, SfBinding, SfImportRow, SfDispatchMode,
 } from '../types'
 import { SF_IMPORT_RUN_CREATED, SF_IMPORT_FIELD_FAIL } from '../types'
 import { PageHeader } from '../components/layout/PageHeader'
 import { InfoBanner } from '../components/layout/InfoBanner'
 import { usePolling } from '../hooks/usePolling'
+import { ORG_CHANGED_EVENT } from '../components/layout/useCurrentOrg'
 
 const { Text, Paragraph } = Typography
 
@@ -32,6 +34,14 @@ function defaultWindow(): [string, string] {
 
 // 单节点的可编辑配置（本地态；初值来自 GET /config 返回的有效权重/强制/延迟）。
 type Edit = { forcedOutcome?: string; baseDelayMs: number; weights: Record<string, number> }
+
+const DISPATCH_MODE_OPTIONS: { value: SfDispatchMode; label: string }[] = [
+  { value: 'PAUSED', label: 'PAUSED · 暂停新派发' },
+  { value: 'MOCK', label: 'MOCK · 合成回执' },
+  { value: 'REAL', label: 'REAL · 真实下游' },
+]
+
+const isDispatchMode = (value: unknown): value is SfDispatchMode => value === 'REAL' || value === 'MOCK' || value === 'PAUSED'
 
 // 策略流应用层 mock 编排台：发现方案/版本/名单 → 配触达节点结局 → 导名单触发 run → 观测计划 + 断言分支落点。
 // 边界：这是「应用层 mock（stratflow 合成回执）」的编排，与 SIP 被叫腿正交——测策略图分支时**不产真实 SIP**。
@@ -59,41 +69,70 @@ export default function StratflowMockPage() {
 
   const [runCode, setRunCode] = useState('')
   const [plans, setPlans] = useState<SfActionPlan[]>([])
+  const [plansErr, setPlansErr] = useState('')
   const [progress, setProgress] = useState<SfRunProgress | null>(null)
   const [timeWin, setTimeWin] = useState<[string, string]>(defaultWindow())
   const [autoObserve, setAutoObserve] = useState(false)
+  const observingRef = useRef(false)
+  /** 各选择上下文独立代次；旧异步响应只能完成网络请求，禁止覆盖新上下文。 */
+  const orgGenerationRef = useRef(0)
+  const workflowGenerationRef = useRef(0)
+  const collectionGenerationRef = useRef(0)
+  const observeGenerationRef = useRef(0)
   const versionCode = detail?.versionCode
   const master = gate?.master ?? false
+  const globalMode: SfDispatchMode = isDispatchMode(gate?.mode) ? gate.mode : (gate?.global ? 'MOCK' : 'REAL')
   // 回执窗压缩(秒)本地态：从 gate 同步，避免逐键触发接口/中途校验；点「应用」才提交。
   const [winSec, setWinSec] = useState(0)
   useEffect(() => { setWinSec(gate?.receiptWindowSec ?? 0) }, [gate?.receiptWindowSec])
 
   // —— gate ——
   const loadGate = useCallback(async () => {
-    try { setGate(await sfGate()); setGateErr('') }
-    catch (e) { setGateErr(String(e)); setGate(null) }
+    const generation = orgGenerationRef.current
+    try {
+      const next = await sfGate()
+      if (generation !== orgGenerationRef.current) return
+      setGate(next); setGateErr('')
+    } catch (e) {
+      if (generation !== orgGenerationRef.current) return
+      setGateErr(String(e)); setGate(null)
+    }
   }, [])
 
   const loadWorkflows = useCallback(async () => {
-    try { setWorkflows((await sfWorkflows()).workflows || []) }
-    catch (e) { message.error(String(e)) }
+    const generation = orgGenerationRef.current
+    try {
+      const next = (await sfWorkflows()).workflows || []
+      if (generation === orgGenerationRef.current) setWorkflows(next)
+    } catch (e) { if (generation === orgGenerationRef.current) message.error(String(e)) }
   }, [])
+
+  const applyGate = async (operation: () => Promise<SfGateView>) => {
+    const generation = orgGenerationRef.current
+    try {
+      const next = await operation()
+      if (generation === orgGenerationRef.current) setGate(next)
+    } catch (e) { if (generation === orgGenerationRef.current) message.error(String(e)) }
+  }
 
   useEffect(() => { void loadGate(); void loadWorkflows() }, [loadGate, loadWorkflows])
 
   // —— 选方案 → 拿 versionCode + 配置 ——
   const pickWorkflow = async (dc: string) => {
+    const generation = ++workflowGenerationRef.current
     setDefCode(dc); setDetail(null); setNodes([]); setEdits({})
     try {
       const d = await sfWorkflowDetail(dc)
+      if (generation !== workflowGenerationRef.current) return
       setDetail(d)
-      if (d.versionCode) await loadConfig(d.versionCode)
+      if (d.versionCode) await loadConfig(d.versionCode, generation)
     } catch (e) { message.error(String(e)) }
   }
 
-  const loadConfig = async (ver: string) => {
+  const loadConfig = async (ver: string, generation = workflowGenerationRef.current) => {
     try {
       const list = (await sfListConfig(ver)).nodes || []
+      if (generation !== workflowGenerationRef.current) return
       setNodes(list)
       const init: Record<string, Edit> = {}
       list.forEach((n) => {
@@ -104,25 +143,41 @@ export default function StratflowMockPage() {
         }
       })
       setEdits(init)
-    } catch (e) { message.error(String(e)) }
+    } catch (e) { if (generation === workflowGenerationRef.current) message.error(String(e)) }
   }
 
   const saveNode = async (n: SfNode) => {
     if (!versionCode) return
+    const orgGeneration = orgGenerationRef.current
+    const workflowGeneration = workflowGenerationRef.current
     const ed = edits[n.nodeId]
     const cfg: SfNodeConfig = {
       forcedOutcome: ed.forcedOutcome || null,
       baseDelayMs: ed.baseDelayMs || 0,
       weights: ed.weights,
     }
-    try { await sfPutConfig(versionCode, n.nodeId, cfg); message.success(`已存 ${n.nodeId}`); await loadConfig(versionCode) }
-    catch (e) { message.error(String(e)) }
+    try {
+      await sfPutConfig(versionCode, n.nodeId, cfg)
+      if (orgGeneration !== orgGenerationRef.current || workflowGeneration !== workflowGenerationRef.current) return
+      message.success(`已存 ${n.nodeId}`)
+      await loadConfig(versionCode, workflowGeneration)
+    } catch (e) {
+      if (orgGeneration === orgGenerationRef.current && workflowGeneration === workflowGenerationRef.current) message.error(String(e))
+    }
   }
 
   const resetNode = async (n: SfNode) => {
     if (!versionCode) return
-    try { await sfDeleteConfig(versionCode, n.nodeId); message.success(`已重置 ${n.nodeId}`); await loadConfig(versionCode) }
-    catch (e) { message.error(String(e)) }
+    const orgGeneration = orgGenerationRef.current
+    const workflowGeneration = workflowGenerationRef.current
+    try {
+      await sfDeleteConfig(versionCode, n.nodeId)
+      if (orgGeneration !== orgGenerationRef.current || workflowGeneration !== workflowGenerationRef.current) return
+      message.success(`已重置 ${n.nodeId}`)
+      await loadConfig(versionCode, workflowGeneration)
+    } catch (e) {
+      if (orgGeneration === orgGenerationRef.current && workflowGeneration === workflowGenerationRef.current) message.error(String(e))
+    }
   }
 
   const patchEdit = (nodeId: string, patch: Partial<Edit>) =>
@@ -130,23 +185,57 @@ export default function StratflowMockPage() {
 
   // —— 名单 ——
   const loadCollections = useCallback(async () => {
-    try { setCollections((await sfCollections()).collections || []) }
-    catch (e) { message.error(String(e)) }
+    const generation = orgGenerationRef.current
+    try {
+      const next = (await sfCollections()).collections || []
+      if (generation === orgGenerationRef.current) setCollections(next)
+    } catch (e) { if (generation === orgGenerationRef.current) message.error(String(e)) }
   }, [])
   useEffect(() => { void loadCollections() }, [loadCollections])
 
+  useEffect(() => {
+    const onOrgChanged = () => {
+      orgGenerationRef.current++
+      workflowGenerationRef.current++
+      collectionGenerationRef.current++
+      observeGenerationRef.current++
+      observingRef.current = false
+      setGate(null); setGateErr(''); setWorkflows([]); setDefCode(undefined); setDetail(null)
+      setNodes([]); setEdits({}); setCollections([]); setCollCode(undefined); setFields([]); setBindings([])
+      setPhonesText(''); setBizText(''); setIdemKey(''); setImportRes(null); setImporting(false)
+      setRunCode(''); setPlans([]); setPlansErr(''); setProgress(null); setAutoObserve(false)
+      Modal.destroyAll()
+      void loadGate(); void loadWorkflows(); void loadCollections()
+    }
+    const onStorage = (event: StorageEvent) => { if (event.key === CURRENT_ORG_STORAGE_KEY) onOrgChanged() }
+    window.addEventListener(ORG_CHANGED_EVENT, onOrgChanged)
+    window.addEventListener('storage', onStorage)
+    return () => {
+      window.removeEventListener(ORG_CHANGED_EVENT, onOrgChanged)
+      window.removeEventListener('storage', onStorage)
+    }
+  }, [loadCollections, loadGate, loadWorkflows])
+
   const pickCollection = async (code: string) => {
+    const generation = ++collectionGenerationRef.current
+    observeGenerationRef.current++; observingRef.current = false
     setCollCode(code); setFields([]); setBindings([])
+    setRunCode(''); setPlans([]); setPlansErr(''); setProgress(null)
     try {
       const [f, b] = await Promise.all([sfCollectionFields(code), sfCollectionBindings(code)])
+      if (generation !== collectionGenerationRef.current) return
       setFields(f.fields || [])
       setBindings(b.bindings || [])
     } catch (e) { message.error(String(e)) }
   }
 
-  // 该方案本次导入是否有效走 mock：master 硬闸门 + 方案覆盖(无覆盖回落全局)。关=真实派发，不产 mock 回执。
-  const schemeMockOn = (dc: string) => master && (gate?.schemes?.[dc] ?? !!gate?.global)
-
+  // 新派发模式：三态方案覆盖优先；兼容旧后端 bool view；无覆盖回落当前机构 global。
+  const schemeModeOf = (dc: string): SfDispatchMode => {
+    const mode = gate?.schemeModes?.[dc]
+    if (isDispatchMode(mode)) return mode
+    if (gate?.schemes && Object.prototype.hasOwnProperty.call(gate.schemes, dc)) return gate.schemes[dc] ? 'MOCK' : 'REAL'
+    return globalMode
+  }
   // —— 触发 import ——
   // 导入前护栏：只读现有前端状态，列出会让"分支断言失真 / 根本没走 mock"的风险，交用户显式确认。
   // 纯前端，不改任何 stratflow 行为；采样在派发那刻定型 → 配置/门必须先于导入，故在此拦一道。
@@ -161,8 +250,13 @@ export default function StratflowMockPage() {
       w.push(`你在本页配置的是方案 ${defCode}，但该名单绑定的是 ${boundDefs.join('、')}：你的结局配置不会作用到本次导入。`)
     }
     boundDefs.forEach((dc) => {
-      if (!schemeMockOn(dc)) {
-        w.push(`方案 ${dc} 未开 mock（scheme 门=关${master ? '' : '；且本环境 master=关'}）：本次导入会走真实下游派发。`)
+      const mode = schemeModeOf(dc)
+      if (!master) {
+        w.push(`方案 ${dc} 所在环境未加载 Mock capability：本次导入会走真实下游。`)
+      } else if (mode === 'REAL') {
+        w.push(`方案 ${dc} 当前为 REAL：本次导入会调用真实下游。`)
+      } else if (mode === 'PAUSED') {
+        w.push(`方案 ${dc} 当前为 PAUSED：新动作不会真实发送也不会生成 Mock 计划，run 会停在待派发。`)
       }
     })
     if (defCode && boundDefs.includes(defCode) && nodes.length > 0) {
@@ -202,12 +296,15 @@ export default function StratflowMockPage() {
   }
 
   const runImport = async (code: string, rows: SfImportRow[]) => {
+    const orgGeneration = orgGenerationRef.current
+    const collectionGeneration = collectionGenerationRef.current
     setImporting(true)
     try {
       const res = await sfImport(code, {
         idempotencyKey: idemKey || undefined,
         rows,
       })
+      if (orgGeneration !== orgGenerationRef.current || collectionGeneration !== collectionGenerationRef.current) return
       setImportRes(res)
       // 多绑定名单会为每个绑定方案各返回一条 plan：优先取"本页选中并配置的方案 defCode"那条 run，
       // 否则回退首条成功——否则可能观测到别的方案的 run，令你为选中方案配的强制结局看似不生效。
@@ -215,45 +312,123 @@ export default function StratflowMockPage() {
       const ok = plans.find((p) => p.defCode === defCode && p.result === SF_IMPORT_RUN_CREATED && p.runCode)
         ?? plans.find((p) => p.result === SF_IMPORT_RUN_CREATED && p.runCode)
       if (ok) {
+        observeGenerationRef.current++; observingRef.current = false
         setRunCode(ok.runCode)
+        setPlans([]); setPlansErr(''); setProgress(null)
         message.success(`已生成 run ${ok.runCode}`)
         void observe(ok.runCode)
       } else {
         const fail = (res.plans || [])[0]
         message.warning(fail?.result === SF_IMPORT_FIELD_FAIL ? `字段契约失败：${(fail.failFields || []).join(', ')}` : '无可用绑定/未生成 run，看导入结果')
       }
-    } catch (e) { message.error(String(e)) }
-    finally { setImporting(false) }
+    } catch (e) {
+      if (orgGeneration === orgGenerationRef.current && collectionGeneration === collectionGenerationRef.current) message.error(String(e))
+    } finally {
+      if (orgGeneration === orgGenerationRef.current && collectionGeneration === collectionGenerationRef.current) setImporting(false)
+    }
   }
 
   // —— 观测 ——
   const observe = useCallback(async (rc?: string) => {
     const code = rc || runCode
-    if (!code || !collCode) return
+    if (!code || !collCode || observingRef.current) return
+    const generation = ++observeGenerationRef.current
+    observingRef.current = true
     try {
-      const [pl, pr] = await Promise.all([
-        sfListPlans(code).then((r) => r.plans || []).catch(() => [] as SfActionPlan[]),
-        sfRunProgress(collCode, code, timeWin[0], timeWin[1]).catch(() => null as SfRunProgress | null),
+      await Promise.allSettled([
+        Promise.all([sfListPlans(code, 'PENDING'), sfListPlans(code, 'DEAD')])
+          .then(([pending, dead]) => {
+            if (generation !== observeGenerationRef.current) return
+            const byAction = new Map<string, SfActionPlan>()
+            const merged = [...(pending.plans || []), ...(dead.plans || [])]
+            merged.forEach((p) => byAction.set(p.actionCode, p))
+            setPlans([...byAction.values()]); setPlansErr('')
+          })
+          .catch((e) => {
+            if (generation !== observeGenerationRef.current) return
+            setPlans([]); setPlansErr(`计划查询失败，进度数据仍有效：${String(e)}`)
+          }),
+        sfRunProgress(collCode, code, timeWin[0], timeWin[1])
+          .then((next) => { if (generation === observeGenerationRef.current) setProgress(next) })
+          .catch((e) => {
+            if (generation !== observeGenerationRef.current) return
+            setProgress(null); message.error(`进度查询失败：${String(e)}`)
+          }),
       ])
-      setPlans(pl); setProgress(pr)
-    } catch (e) { message.error(String(e)) }
+    } finally {
+      if (generation === observeGenerationRef.current) observingRef.current = false
+    }
   }, [runCode, collCode, timeWin])
 
   usePolling(() => { if (autoObserve && runCode) void observe() }, 3000, { immediate: false })
 
-  const clearMock = async (scope: 'all' | 'plans' | 'config') => {
-    try { await sfClearMock(scope); message.success(`已清空（${scope}）`); if (scope !== 'config') { setPlans([]); setProgress(null) } if (versionCode && scope !== 'plans') await loadConfig(versionCode) }
-    catch (e) { message.error(String(e)) }
+  const executeClearMock = async (scope: 'all' | 'plans' | 'config') => {
+    const orgGeneration = orgGenerationRef.current
+    const workflowGeneration = workflowGenerationRef.current
+    try {
+      await sfClearMock(scope)
+      if (orgGeneration !== orgGenerationRef.current || workflowGeneration !== workflowGenerationRef.current) return
+      message.success(`已清空（${scope}）`)
+      if (scope !== 'config') { setPlans([]); setProgress(null) }
+      if (versionCode && scope !== 'plans') await loadConfig(versionCode, workflowGeneration)
+    } catch (e) {
+      if (orgGeneration === orgGenerationRef.current && workflowGeneration === workflowGenerationRef.current) message.error(String(e))
+    }
   }
 
-  const schemeState = defCode ? gate?.schemes?.[defCode] : undefined
+  const clearMock = (scope: 'all' | 'plans' | 'config') => {
+    const orgGeneration = orgGenerationRef.current
+    if (scope === 'config') { void executeClearMock(scope); return }
+    Modal.confirm({
+      title: '确认清理在途 Mock 计划？',
+      content: '删除 plans 后，对应已派发动作不会再收到合成回执，只能等待回执超时。该操作仅作用于当前机构，但可能令正在执行的 run 变慢或走失败分支。',
+      okText: '确认清理',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      onOk: () => {
+        if (orgGeneration !== orgGenerationRef.current) {
+          message.error('机构已变化，本次清场已取消')
+          return
+        }
+        return executeClearMock(scope)
+      },
+    })
+  }
+
+  const requeuePlan = async (plan: SfActionPlan) => {
+    const orgGeneration = orgGenerationRef.current
+    const observeGeneration = observeGenerationRef.current
+    const selectedRun = runCode
+    if (plan.runCode !== runCode) {
+      message.error('页面上下文已变化，请刷新计划后再重新入队')
+      return
+    }
+    try {
+      await sfRequeuePlan(plan.actionCode)
+      if (
+        orgGeneration !== orgGenerationRef.current ||
+        observeGeneration !== observeGenerationRef.current ||
+        plan.runCode !== selectedRun
+      ) return
+      message.success('DEAD 计划已重新入队')
+      observeGenerationRef.current++; observingRef.current = false
+      await observe()
+    } catch (e) { message.error(String(e)) }
+  }
+
+  const rawSchemeState = defCode ? gate?.schemeModes?.[defCode] : undefined
+  const schemeState: SfDispatchMode | undefined = isDispatchMode(rawSchemeState)
+    ? rawSchemeState
+    : defCode && gate?.schemes && Object.prototype.hasOwnProperty.call(gate.schemes, defCode)
+      ? (gate.schemes[defCode] ? 'MOCK' : 'REAL')
+      : undefined
   const requiredFields = useMemo(() => fields.filter((f) => f.required), [fields])
 
   return (
     <div className="page-container">
       <PageHeader
         title="策略流 Mock 编排"
-        status={master ? { tone: 'success', text: `mock 可用 · global ${gate?.global ? '开' : '关'}` } : { tone: 'danger', text: '本环境不可 mock' }}
+        status={master ? { tone: globalMode === 'MOCK' ? 'success' : globalMode === 'PAUSED' ? 'warning' : 'neutral', text: `Mock capability 可用 · 当前机构 ${globalMode}` } : { tone: 'danger', text: '本环境不可 mock' }}
         onReload={() => { void loadGate(); void loadWorkflows() }}
       />
       <InfoBanner title="应用层 mock 编排（与 SIP 被叫腿正交）">
@@ -264,31 +439,35 @@ export default function StratflowMockPage() {
       {gateErr && <Alert type="error" showIcon style={{ marginBottom: 12 }} message="读取 gate 失败" description={gateErr} />}
       {gate && !master && (
         <Alert type="warning" showIcon style={{ marginBottom: 12 }}
-          message="本环境未启用 mock（stratflow.mock-downstream.enabled=false）"
-          description="master 硬闸门为关：所有 mock 写操作会被拒。请在 local/test 环境操作。" />
+          message="本环境未启用 Mock capability"
+          description="只有 local/test profile 且 stratflow.mock-capability.enabled=true 才加载控制面；其它环境恒 REAL。" />
       )}
 
       {/* ① gate 开关 */}
       <Card title="① 运行期开关" size="small" style={{ marginBottom: 12 }}>
         <Space size="large" wrap>
           <Space>
-            <Text>全局 mock：</Text>
-            <Switch disabled={!master} checked={!!gate?.global}
-              onChange={async (v) => { try { setGate(await sfSetGlobalGate(v)) } catch (e) { message.error(String(e)) } }} />
+            <Text>当前机构新派发模式：</Text>
+            <Select<SfDispatchMode> disabled={!master} style={{ width: 190 }} value={globalMode} options={DISPATCH_MODE_OPTIONS}
+              onChange={(v) => void applyGate(() => sfSetGlobalGate(v))} />
           </Space>
           <Space>
-            <Text>回放暂停（step-through）：</Text>
+            <Text>当前机构回放暂停（step-through）：</Text>
             <Switch disabled={!master} checked={!!gate?.deliveryPaused}
-              onChange={async (v) => { try { setGate(await sfSetDeliveryPaused(v)) } catch (e) { message.error(String(e)) } }} />
+              onChange={(v) => void applyGate(() => sfSetDeliveryPaused(v))} />
           </Space>
           <Space>
             <Text>回执窗压缩(秒)：</Text>
             <InputNumber min={0} step={30} style={{ width: 110 }} disabled={!master} value={winSec}
               onChange={(v) => setWinSec(Number(v) || 0)} />
             <Button size="small" disabled={!master}
-              onClick={async () => { try { setGate(await sfSetReceiptWindow(winSec)); message.success(winSec > 0 ? `回执窗压到 ${winSec}s（仅 mock 派发）` : '已恢复真实回执窗') } catch (e) { message.error(String(e)) } }}>应用</Button>
+              onClick={() => void applyGate(async () => {
+                const next = await sfSetReceiptWindow(winSec)
+                message.success(winSec > 0 ? `回执窗压到 ${winSec}s（仅 mock 派发）` : '已恢复真实回执窗')
+                return next
+              })}>应用</Button>
           </Space>
-          <Text type="secondary">默认全局关；不显式开就走真实下游。回执窗压缩(0=真实窗，非0须≥60)仅作用于 mock 派发，用于把小时级超时压到秒级实测超时分支。切换只影响之后的新派发。</Text>
+          <Text type="secondary">未配置或 Redis 读取异常时默认 PAUSED，避免误触真实下游。切换只影响尚未固化模式的新派发；在途 REAL/MOCK 重试继续沿用原模式。</Text>
         </Space>
       </Card>
 
@@ -300,12 +479,12 @@ export default function StratflowMockPage() {
           {detail && <Tag color="blue">versionCode: {detail.versionCode || '—（无启用发布版本）'}</Tag>}
           {defCode && (
             <>
-              <Text>本方案走 mock：</Text>
-              <Switch disabled={!master} checked={schemeState ?? !!gate?.global}
-                onChange={async (v) => { try { setGate(await sfSetSchemeGate(defCode, v)) } catch (e) { message.error(String(e)) } }} />
+              <Text>本方案新派发模式：</Text>
+              <Select<SfDispatchMode> disabled={!master} style={{ width: 190 }} value={schemeState ?? globalMode} options={DISPATCH_MODE_OPTIONS}
+                onChange={(v) => void applyGate(() => sfSetSchemeGate(defCode, v))} />
               {schemeState !== undefined && (
                 <Button size="small" disabled={!master}
-                  onClick={async () => { try { setGate(await sfClearSchemeGate(defCode)) } catch (e) { message.error(String(e)) } }}>清方案覆盖(回落全局)</Button>
+                  onClick={() => void applyGate(() => sfClearSchemeGate(defCode))}>清方案覆盖(回落当前机构全局)</Button>
               )}
             </>
           )}
@@ -372,8 +551,8 @@ export default function StratflowMockPage() {
               )}
               <Text type="secondary" style={{ fontSize: 12 }}>
                 绑定方案：{bindings.length === 0 ? '无（导入不会生成 run）' : bindings.map((b) => (
-                  <Tag key={b.defCode} color={schemeMockOn(b.defCode) ? 'green' : 'default'}>
-                    {(b.defName || b.defCode)} · {schemeMockOn(b.defCode) ? 'mock 开' : 'mock 关→真实派发'}
+                  <Tag key={b.defCode} color={schemeModeOf(b.defCode) === 'MOCK' ? 'green' : schemeModeOf(b.defCode) === 'PAUSED' ? 'gold' : 'default'}>
+                    {(b.defName || b.defCode)} · {schemeModeOf(b.defCode)}
                   </Tag>
                 ))}
               </Text>
@@ -422,20 +601,34 @@ export default function StratflowMockPage() {
         }>
         <Space wrap align="center" style={{ marginBottom: 8 }}>
           <Text>runCode：</Text>
-          <Input style={{ width: 240 }} value={runCode} onChange={(e) => setRunCode(e.target.value)} placeholder="import 后自动填，也可手填" />
+          <Input style={{ width: 240 }} value={runCode} onChange={(e) => {
+            observeGenerationRef.current++; observingRef.current = false
+            setRunCode(e.target.value); setPlans([]); setPlansErr(''); setProgress(null)
+          }} placeholder="import 后自动填，也可手填" />
           <Text type="secondary">进度窗口(UTC)：</Text>
-          <Input style={{ width: 170 }} value={timeWin[0]} onChange={(e) => setTimeWin([e.target.value, timeWin[1]])} />
+          <Input style={{ width: 170 }} value={timeWin[0]} onChange={(e) => {
+            observeGenerationRef.current++; observingRef.current = false; setProgress(null)
+            setTimeWin([e.target.value, timeWin[1]])
+          }} />
           <Text>~</Text>
-          <Input style={{ width: 170 }} value={timeWin[1]} onChange={(e) => setTimeWin([timeWin[0], e.target.value])} />
+          <Input style={{ width: 170 }} value={timeWin[1]} onChange={(e) => {
+            observeGenerationRef.current++; observingRef.current = false; setProgress(null)
+            setTimeWin([timeWin[0], e.target.value])
+          }} />
           <Text type="secondary">≤31天</Text>
         </Space>
-        <Divider style={{ margin: '8px 0' }} orientation="left" plain>在途 mock 计划（超时结局无计划）</Divider>
+        <Divider style={{ margin: '8px 0' }} orientation="left" plain>mock 计划（PENDING / DEAD；超时结局无计划）</Divider>
+        {plansErr && <Alert type="warning" showIcon message={plansErr} style={{ marginBottom: 8 }} />}
         <Table size="small" rowKey="actionCode" pagination={{ pageSize: 5 }} dataSource={plans} locale={{ emptyText: '无在途计划' }}
           columns={[
             { title: '节点', dataIndex: 'nodeId', width: 120 },
             { title: '结局', dataIndex: 'outcomeKey' },
             { title: '渠道', dataIndex: 'channel', width: 70 },
-            { title: '步', width: 70, render: (_: unknown, p: SfActionPlan) => `${p.idx + 1}/${p.steps.length}` },
+            { title: '状态', width: 90, render: (_: unknown, p: SfActionPlan) => <Tag color={p.status === 'DEAD' ? 'red' : 'processing'}>{p.status || 'PENDING'}</Tag> },
+            { title: '步', width: 70, render: (_: unknown, p: SfActionPlan) => p.idx == null || !p.steps ? '—' : `${p.idx + 1}/${p.steps.length}` },
+            { title: '重试', dataIndex: 'retryCount', width: 70 },
+            { title: '最近错误', dataIndex: 'lastError', ellipsis: true },
+            { title: '操作', width: 90, render: (_: unknown, p: SfActionPlan) => p.status === 'DEAD' ? <Button size="small" onClick={() => void requeuePlan(p)}>重新入队</Button> : null },
           ]} />
         <Divider style={{ margin: '8px 0' }} orientation="left" plain>run 进度（漏斗 + 边流量）</Divider>
         {progress ? (

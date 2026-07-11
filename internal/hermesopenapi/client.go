@@ -14,6 +14,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,6 +22,27 @@ import (
 	"strings"
 	"time"
 )
+
+// UpstreamError 保留 Hermes HTTP/业务包络语义，供 API 层正确映射 4xx/5xx/超时。
+type UpstreamError struct {
+	Kind         string
+	HTTPStatus   int
+	BusinessCode int
+	Message      string
+	Err          error
+}
+
+func (e *UpstreamError) Error() string {
+	if e.Message != "" {
+		return e.Message
+	}
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	return "Hermes upstream error"
+}
+
+func (e *UpstreamError) Unwrap() error { return e.Err }
 
 // Hermes 网关/服务的身份头（对照 common CommonConstant）。
 const (
@@ -143,19 +165,27 @@ func (c *Client) callWith(ctx context.Context, method, urlStr string, headers ma
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("调用 %s 失败: %w", urlStr, err)
+		kind := "transport"
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			kind = "timeout"
+		}
+		return nil, &UpstreamError{Kind: kind, Message: "调用 Hermes 失败", Err: err}
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, clip(string(raw), 200))
+		var env Resp
+		if json.Unmarshal(raw, &env) == nil && env.Code != 0 {
+			return nil, &UpstreamError{Kind: "http", HTTPStatus: resp.StatusCode, BusinessCode: env.Code, Message: env.Msg}
+		}
+		return nil, &UpstreamError{Kind: "http", HTTPStatus: resp.StatusCode, Message: clip(string(raw), 200)}
 	}
 	var env Resp
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return nil, fmt.Errorf("响应非标准包络: %s", clip(string(raw), 200))
 	}
 	if env.Code != 0 {
-		return nil, fmt.Errorf("业务失败 code=%d: %s", env.Code, env.Msg)
+		return nil, &UpstreamError{Kind: "business", BusinessCode: env.Code, Message: env.Msg}
 	}
 	return env.Data, nil
 }

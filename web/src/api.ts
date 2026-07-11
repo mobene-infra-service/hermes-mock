@@ -165,8 +165,16 @@ export const queryCallRecords = (f?: CallRecordFilter) => {
 export const saveAgentCallRecord = (r: AgentCallRecord) =>
   postJSON<{ ok: boolean; recordId: string }>('/call-records', r)
 
-async function getJSON<T>(path: string): Promise<T> {
-  const r = await fetch(`${base}${path}`)
+export const CURRENT_ORG_STORAGE_KEY = 'hm-current-org'
+const withOrgHeader = (headers?: HeadersInit): Headers => {
+  const next = new Headers(headers)
+  const orgCode = window.localStorage.getItem(CURRENT_ORG_STORAGE_KEY)
+  if (orgCode) next.set('X-Hermes-Mock-Org', orgCode)
+  return next
+}
+
+async function getJSON<T>(path: string, init?: RequestInit): Promise<T> {
+  const r = await fetch(`${base}${path}`, { ...init, headers: withOrgHeader(init?.headers) })
   if (!r.ok) {
     const e = await r.json().catch(() => ({}))
     throw new Error((e as { error?: string }).error || `${path}: ${r.status}`)
@@ -175,7 +183,7 @@ async function getJSON<T>(path: string): Promise<T> {
 }
 async function postJSON<T>(path: string, body: unknown): Promise<T> {
   const r = await fetch(`${base}${path}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    method: 'POST', headers: withOrgHeader({ 'Content-Type': 'application/json' }), body: JSON.stringify(body),
   })
   if (!r.ok) {
     const e = await r.json().catch(() => ({}))
@@ -185,7 +193,7 @@ async function postJSON<T>(path: string, body: unknown): Promise<T> {
 }
 async function putJSON<T>(path: string, body?: unknown): Promise<T> {
   const r = await fetch(`${base}${path}`, {
-    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    method: 'PUT', headers: withOrgHeader({ 'Content-Type': 'application/json' }),
     body: body === undefined ? undefined : JSON.stringify(body),
   })
   if (!r.ok) {
@@ -195,7 +203,7 @@ async function putJSON<T>(path: string, body?: unknown): Promise<T> {
   return r.json()
 }
 async function delJSONBody<T>(path: string): Promise<T> {
-  const r = await fetch(`${base}${path}`, { method: 'DELETE' })
+  const r = await fetch(`${base}${path}`, { method: 'DELETE', headers: withOrgHeader() })
   if (!r.ok) {
     const e = await r.json().catch(() => ({}))
     throw new Error((e as { error?: string }).error || `${path}: ${r.status}`)
@@ -215,7 +223,7 @@ export const upsertBinding = (b: LineBinding) => postJSON<LineBinding>('/cluster
 
 // 删除（DELETE /cluster/{profiles|groups|overrides|bindings}/:key）
 const delJSON = async (path: string): Promise<void> => {
-  const r = await fetch(`${base}${path}`, { method: 'DELETE' })
+  const r = await fetch(`${base}${path}`, { method: 'DELETE', headers: withOrgHeader() })
   if (!r.ok) {
     const e = await r.json().catch(() => ({}))
     throw new Error((e as { error?: string }).error || `${path}: ${r.status}`)
@@ -236,14 +244,28 @@ export const setGroupState = (code: string, state: string) =>
 export const setCustomerState = (number: string, groupCode: string, state: string) =>
   postJSON<{ ok: boolean; number: string; state: string }>('/cluster/customer/state', { number, groupCode, state })
 
-export const listOrgs = () => getJSON<OrgsResp>('/orgs')
+export const listOrgs = async () => {
+  const result = await getJSON<OrgsResp>('/orgs')
+  const stored = window.localStorage.getItem(CURRENT_ORG_STORAGE_KEY)
+  // 服务端 current 仍是非 StratFlow 业务的实际凭据来源；它存在时必须作为权威值，避免顶栏 A、业务实际操作 B。
+  const serverCurrent = result.current && result.orgs.some((org) => org.orgCode === result.current) ? result.current : ''
+  const effective = serverCurrent || (stored && result.orgs.some((org) => org.orgCode === stored) ? stored : '')
+  if (effective && stored !== effective) {
+    window.localStorage.setItem(CURRENT_ORG_STORAGE_KEY, effective)
+    window.dispatchEvent(new Event('hm-org-changed'))
+  }
+  return { ...result, current: effective }
+}
 export const upsertOrg = (o: OrgConfig) => postJSON<OrgConfig>('/orgs', o)
 export const deleteOrg = (orgCode: string) =>
   fetch(`/api/orgs/${encodeURIComponent(orgCode)}`, { method: 'DELETE' }).then((r) => r.json())
 export const pingOrg = (orgCode?: string) =>
   postJSON<{ ok: boolean; msg?: string; error?: string }>('/orgs/ping', { orgCode })
-export const setCurrentOrg = (orgCode: string) =>
-  postJSON<{ ok: boolean; current: string }>('/orgs/current', { orgCode })
+export const setCurrentOrg = async (orgCode: string) => {
+  const result = await postJSON<{ ok: boolean; current: string }>('/orgs/current', { orgCode })
+  window.localStorage.setItem(CURRENT_ORG_STORAGE_KEY, result.current)
+  return result
+}
 
 export const listOrgTts = () => getJSON<{ tts: TtsVoice[]; error?: string }>('/orgs/tts')
 export const listOrgAgentGroups = () => getJSON<{ groups: AgentGroupAgg[]; error?: string }>('/orgs/agent-groups')
@@ -256,13 +278,13 @@ export const queryCallbacks = (f?: { source?: string; event?: string; orgCode?: 
 // ===== 策略流应用层 mock 编排（透传 hermes-stratflow /openapi/mock）=====
 import type {
   SfGateView, SfNode, SfNodeConfig, SfWorkflow, SfWorkflowDetail,
-  SfCollection, SfField, SfBinding, SfRun, SfRunProgress, SfActionPlan, SfImportResult, SfImportRow,
+  SfCollection, SfField, SfBinding, SfRun, SfRunProgress, SfActionPlan, SfImportResult, SfImportRow, SfDispatchMode,
 } from './types'
 
 // ① gate
 export const sfGate = () => getJSON<SfGateView>('/stratflow/mock/gate')
-export const sfSetGlobalGate = (enabled: boolean) => putJSON<SfGateView>(`/stratflow/mock/gate/global?enabled=${enabled}`)
-export const sfSetSchemeGate = (defCode: string, enabled: boolean) => putJSON<SfGateView>(`/stratflow/mock/gate/scheme/${encodeURIComponent(defCode)}?enabled=${enabled}`)
+export const sfSetGlobalGate = (mode: SfDispatchMode) => putJSON<SfGateView>(`/stratflow/mock/gate/global?mode=${mode}`)
+export const sfSetSchemeGate = (defCode: string, mode: SfDispatchMode) => putJSON<SfGateView>(`/stratflow/mock/gate/scheme/${encodeURIComponent(defCode)}?mode=${mode}`)
 export const sfClearSchemeGate = (defCode: string) => delJSONBody<SfGateView>(`/stratflow/mock/gate/scheme/${encodeURIComponent(defCode)}`)
 export const sfSetDeliveryPaused = (paused: boolean) => putJSON<SfGateView>(`/stratflow/mock/delivery?paused=${paused}`)
 export const sfSetReceiptWindow = (seconds: number) => putJSON<SfGateView>(`/stratflow/mock/receipt-window?seconds=${seconds}`)
@@ -273,8 +295,18 @@ export const sfPutConfig = (versionCode: string, nodeId: string, cfg: SfNodeConf
 export const sfDeleteConfig = (versionCode: string, nodeId: string) =>
   delJSON(`/stratflow/mock/config/${encodeURIComponent(versionCode)}/${encodeURIComponent(nodeId)}`)
 // ③ 清空 / 在途计划
-export const sfClearMock = (scope: 'all' | 'plans' | 'config' = 'all') => delJSON(`/stratflow/mock/all?scope=${scope}`)
-export const sfListPlans = (runCode: string) => getJSON<{ plans: SfActionPlan[] }>(`/stratflow/mock/plans?runCode=${encodeURIComponent(runCode)}`)
+export const sfClearMock = (scope: 'all' | 'plans' | 'config' = 'all') =>
+  delJSON(`/stratflow/mock/all?scope=${scope}${scope === 'config' ? '' : '&confirm=true'}`)
+export const sfListPlans = (runCode: string, status?: 'PENDING' | 'DEAD') => {
+  const controller = new AbortController()
+  const timer = window.setTimeout(() => controller.abort(), 5000)
+  const q = new URLSearchParams({ runCode })
+  if (status) q.set('status', status)
+  return getJSON<{ plans: SfActionPlan[] }>(`/stratflow/mock/plans?${q}`, { signal: controller.signal })
+    .finally(() => window.clearTimeout(timer))
+}
+export const sfRequeuePlan = (actionCode: string) =>
+  postJSON<{ ok: boolean }>(`/stratflow/mock/plans/${encodeURIComponent(actionCode)}/requeue`, {})
 // ④ 发现
 export const sfWorkflows = () => getJSON<{ workflows: SfWorkflow[] }>('/stratflow/workflows')
 export const sfWorkflowDetail = (defCode: string) => getJSON<SfWorkflowDetail>(`/stratflow/workflows/${encodeURIComponent(defCode)}`)

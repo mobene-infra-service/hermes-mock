@@ -3,6 +3,38 @@
 > 本项目改动按主题记录（倒序，最新在上）。决策原因见 [DECISIONS.md](DECISIONS.md)，当前状态见 [STATUS.md](STATUS.md)。
 ---
 
+## 2026-07-11
+
+- **开发阶段删除 StratFlow Legacy 兼容并精简 plan schema**：不再迁移/回放旧 Redis plan，不再维护旧 pause marker、取消 tombstone和混合版本部署协议；MySQL plan 成为唯一事实源。删除未参与查询的 plan `shard`，PO 改用 `SfSlimPO` 并移除 `create_ts/modified_ts/created_by/modified_by`。部署方式收敛为停旧实例、清旧 `sf:mock:*`、部署单一新版本；全新 namespace 缺省即 PAUSED，无需手动初始化。已通过 IDEA `hermes-test` 数据源完成并复查 `stratflow` DDL，plan 表为 0 行。验证：Hermes 模块测试、Go 全量测试、前端构建及两仓 `git diff --check` 通过。
+- **第二轮对抗式 review 收口**：机构选择以服务端 current 为全站权威、localStorage 仅作显式请求头缓存，避免 StratFlow 显示机构与其它业务实际凭据分裂；requeue、清场、节点保存/重置均增加 generation 校验，机构/方案/run 切换后的旧异步 continuation 不再污染当前页面。Hermes 同步补 claim 丢失立即停批、Legacy 坏 JSON fail-fast/逐条隔离、取消 tombstone、防重复 pause 迁移 marker、schema 关键列语义校验及 SMS 错误文本长度收敛。
+- **独立 review 后的跨仓可靠性修复**：StratFlow API 请求新增显式机构头，页面机构切换全量清状态并以 generation 隔离旧响应；旧 Hermes 二态 gate 的 REAL/MOCK 写入改同时传 `mode+enabled`，空 mode 安全回退；plans 分别查询 PENDING/DEAD。Hermes 同步补消费重试与 ack DLT、回执/取消事务行锁、PAUSED 公平配额、claim 续租、独立 Mock 回放线程、Legacy plan 迁移和 schema 启动预检。
+- **StratFlow PAUSED/DEAD 可靠性补强**：Hermes 侧 PAUSED 改为 SMS attempt/CALL batch 5 秒持久化退避，避免每秒 claim/reset 或重复扫描；计划成功推进清零连续失败，DEAD 阈值延长到约一小时。控制台 plans 同时展示 PENDING/DEAD、重试次数和最近错误，并支持 DEAD 单条重新入队。
+
+- **StratFlow Mock 改为静态 capability + 运行时三态控制**：
+  - 控制台与代理接口支持 `REAL / MOCK / PAUSED`；保留 `enabled=true/false` 作为旧客户端兼容，但非法/缺失布尔值不再静默解释成 false。
+  - `PAUSED` 明确表示新动作既不真实发送也不生成 Mock plan；页面导入前会分别提示 REAL 的真实触达风险与 PAUSED 的停滞风险。
+  - 清理 `plans/all` 增加二次确认，代理与 Hermes 上游都要求 `confirm=true`，并明确提示动作将等待超时。
+  - 前端三态选择器、方案覆盖、绑定状态标签和 capability 文案同步更新；静态开关改为 `stratflow.mock-capability.enabled`。
+  - 验证：`go test ./internal/api ./internal/hermesopenapi`、`npm --prefix web run build` 通过（Vite 仅既有 chunk size warning）。
+
+- **完成 StratFlow 缺陷治理的 hermes-mock 侧改造**：
+  - OpenAPI 客户端新增结构化上游错误，保留 Hermes HTTP 与业务包络；认证→401、业务校验→400、上游 4xx 原样、timeout→504、网络/5xx→502，并补通用 HTTP 4xx 包络回归测试。
+  - StratFlow 生产与测试改为共用 `registerStratflowRoutes`，路由测试覆盖 20 条接口（含 receipt-window、DEAD requeue），防注册漂移。
+  - plans 前后端均加 5 秒超时；plans 与 progress 独立更新，计划查询失败只显示警告、不清空或阻断进度；自动观测防并发重入。
+  - gate/pause/clear 等页面文案明确作用于“当前机构”。
+  - 更新 [STRATFLOW-MOCK-E2E.md](STRATFLOW-MOCK-E2E.md) 为修复版机构隔离、仅按 key 幂等和 MySQL plan 断言口径。
+  - 验证：`go test ./...`、`npm --prefix web run build` 通过（Vite 仅既有 chunk size warning）。远端尚未部署，真实 E2E 待执行。
+  - 明确排除：匿名 `/api/orgs` 凭据字段 P0 本次未修改。
+
+## 2026-07-10
+
+- **完成 StratFlow Mock 真实测试环境 E2E，并新增可重复测试手册**：详见 [STRATFLOW-MOCK-E2E.md](STRATFLOW-MOCK-E2E.md)。
+  - 通过平台/机构/hermes-mock API 创建并保留 `test_xuhui` 专用 `[E2E]` 字段、五类方案、版本、六个集合与绑定，覆盖 SMS/CALL 全结局、混合分支、窗口、取消、在途 gate、幂等、权重分布、500 条负载和版本隔离。
+  - 分布结果：SMS 103/97、CALL 94/106；500 条 MIXED 中 499 条完整进入 CALL，1 条强制 DELIVERED 回执丢失并最终走 fail，按风险记录，未修改产品缺陷。
+  - 安全清场：逐节点 DELETE 配置，恢复全局 gate、回放、60 秒回执窗和原有 scheme overrides；因其他机构长期 BATCHING run，未执行全局 pause/clear。
+  - 记录风险：匿名 `/api/orgs` 暴露凭据字段、非空 `fieldContract` 使方案接口 500、plans 查询扫描 Redis 变慢、全局控制项无租户隔离、业务校验统一映射 502、超时精度偏差。
+  - 验证：`go test ./...` 全绿；Hermes `./gradlew :hermes-stratflow:test` 为 122 tests / 2 failed / 27 skipped，两项失败均为 baseDelay 测试夹具把回执窗计算为 0ms。
+
 ## 2026-07-08
 
 - **新增「策略流 Mock 编排」——对接 hermes-stratflow 应用层 mock**（详见 [DECISIONS.md](DECISIONS.md) 同日条目）：

@@ -2,11 +2,33 @@ package hermesopenapi
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+func TestCallWithPreservesHTTP4xxEnvelope(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"code":1000,"msg":"invalid request"}`))
+	}))
+	defer srv.Close()
+
+	client := New(Cred{Mode: "direct", OrgCode: "org001", BasicURL: srv.URL})
+	_, err := client.callWith(t.Context(), http.MethodPost, srv.URL+"/import", nil, map[string]string{"key": "value"})
+	if err == nil {
+		t.Fatal("expected upstream 4xx error")
+	}
+	var upstream *UpstreamError
+	if !errors.As(err, &upstream) {
+		t.Fatalf("error type = %T, want *UpstreamError", err)
+	}
+	if upstream.Kind != "http" || upstream.HTTPStatus != http.StatusUnprocessableEntity || upstream.BusinessCode != 1000 {
+		t.Fatalf("unexpected upstream error: %+v", upstream)
+	}
+}
 
 // direct 模式：URL=服务地址+path，注入 ORG_CODE_KEY/ORG_NAME_KEY 头（网关本会注入的）。
 func TestEndpointDirect(t *testing.T) {

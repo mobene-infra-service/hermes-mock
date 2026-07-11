@@ -20,13 +20,15 @@ import (
 
 // ===== DTO（JSON 驼峰对齐 stratflow 实现）=====
 
-// SfMockGateView 两层闸门视图（master 部署硬闸门 / global 运行期 / schemes 按方案覆盖 / deliveryPaused 回放暂停 / receiptWindowSec mock 回执窗压缩秒数）。
+// SfMockGateView 两层闸门视图。Mode/SchemeModes 是三态新契约；Global/Schemes 仅兼容旧客户端。
 type SfMockGateView struct {
-	Master           bool            `json:"master"`
-	Global           bool            `json:"global"`
-	Schemes          map[string]bool `json:"schemes"`
-	DeliveryPaused   bool            `json:"deliveryPaused"`
-	ReceiptWindowSec int64           `json:"receiptWindowSec"`
+	Master           bool              `json:"master"`
+	Mode             string            `json:"mode,omitempty"`
+	Global           bool              `json:"global"`
+	SchemeModes      map[string]string `json:"schemeModes,omitempty"`
+	Schemes          map[string]bool   `json:"schemes"`
+	DeliveryPaused   bool              `json:"deliveryPaused"`
+	ReceiptWindowSec int64             `json:"receiptWindowSec"`
 }
 
 // SfMockOutcomeView 某触达节点某结局的展示视图（有效权重 = 配置覆盖 > 默认；steps=0 表示超时不回执）。
@@ -63,7 +65,7 @@ type SfMockStep struct {
 	Data          map[string]any `json:"data"`
 }
 
-// SfMockActionPlan per-action 在途计划（双发闸门：计划存在=本动作由 mock 派发）。
+// SfMockActionPlan per-action 计划；DEAD 仍返回，便于观测和人工恢复。
 type SfMockActionPlan struct {
 	ActionCode string       `json:"actionCode"`
 	RunCode    string       `json:"runCode"`
@@ -72,9 +74,13 @@ type SfMockActionPlan struct {
 	Channel    string       `json:"channel"`
 	OrgCode    string       `json:"orgCode"`
 	OutcomeKey string       `json:"outcomeKey"`
-	BaseMs     int64        `json:"baseMs"`
-	Idx        int          `json:"idx"`
+	BaseMs     *int64       `json:"baseMs"`
+	Idx        *int         `json:"idx"`
 	Steps      []SfMockStep `json:"steps"`
+	Status     string       `json:"status"`
+	NextDueAt  string       `json:"nextDueAt"`
+	RetryCount int          `json:"retryCount"`
+	LastError  *string      `json:"lastError"`
 }
 
 // SfWorkflow 授权方案列表项。
@@ -223,17 +229,25 @@ func (c *Client) StratflowGate(ctx context.Context) (SfMockGateView, error) {
 	return v, err
 }
 
-// StratflowSetGlobalGate 全局 mock 开关（仅影响后续新派发）。
-func (c *Client) StratflowSetGlobalGate(ctx context.Context, enabled bool) (SfMockGateView, error) {
+// StratflowSetGlobalMode 设置全局 REAL/MOCK/PAUSED（仅影响尚未固化模式的新派发）。
+func (c *Client) StratflowSetGlobalMode(ctx context.Context, mode string) (SfMockGateView, error) {
 	var v SfMockGateView
-	err := c.sfCall(ctx, "PUT", "/openapi/mock/gate/global?enabled="+strconv.FormatBool(enabled), nil, &v)
+	q := url.Values{"mode": {mode}}
+	if mode == "REAL" || mode == "MOCK" {
+		q.Set("enabled", strconv.FormatBool(mode == "MOCK"))
+	}
+	err := c.sfCall(ctx, "PUT", "/openapi/mock/gate/global?"+q.Encode(), nil, &v)
 	return v, err
 }
 
-// StratflowSetSchemeGate 按方案覆盖 mock 开关（优先级高于 global）。
-func (c *Client) StratflowSetSchemeGate(ctx context.Context, defCode string, enabled bool) (SfMockGateView, error) {
+// StratflowSetSchemeMode 按方案覆盖三态模式（优先级高于 global）。
+func (c *Client) StratflowSetSchemeMode(ctx context.Context, defCode, mode string) (SfMockGateView, error) {
 	var v SfMockGateView
-	path := "/openapi/mock/gate/scheme/" + url.PathEscape(defCode) + "?enabled=" + strconv.FormatBool(enabled)
+	q := url.Values{"mode": {mode}}
+	if mode == "REAL" || mode == "MOCK" {
+		q.Set("enabled", strconv.FormatBool(mode == "MOCK"))
+	}
+	path := "/openapi/mock/gate/scheme/" + url.PathEscape(defCode) + "?" + q.Encode()
 	err := c.sfCall(ctx, "PUT", path, nil, &v)
 	return v, err
 }
@@ -279,19 +293,33 @@ func (c *Client) StratflowDeleteConfig(ctx context.Context, versionCode, nodeID 
 	return c.sfCall(ctx, "DELETE", path, nil, nil)
 }
 
-// StratflowClearMock 一键清空 mock 状态。scope: all|plans|config（不动 gate 开关）。
-func (c *Client) StratflowClearMock(ctx context.Context, scope string) error {
+// StratflowClearMock 一键清空 mock 状态。涉及 plans 时必须由上游显式确认。
+func (c *Client) StratflowClearMock(ctx context.Context, scope string, confirm bool) error {
 	if scope == "" {
 		scope = "all"
 	}
-	return c.sfCall(ctx, "DELETE", "/openapi/mock/all?scope="+url.QueryEscape(scope), nil, nil)
+	q := url.Values{"scope": {scope}, "confirm": {strconv.FormatBool(confirm)}}
+	return c.sfCall(ctx, "DELETE", "/openapi/mock/all?"+q.Encode(), nil, nil)
 }
 
-// StratflowListPlans 查某 run 的在途 mock 采样计划（最多 500 条）。
+// StratflowListPlans 查某 run 的 PENDING/DEAD mock 计划（最多 500 条）。
 func (c *Client) StratflowListPlans(ctx context.Context, runCode string) ([]SfMockActionPlan, error) {
+	return c.StratflowListPlansByStatus(ctx, runCode, "")
+}
+
+func (c *Client) StratflowListPlansByStatus(ctx context.Context, runCode, status string) ([]SfMockActionPlan, error) {
 	var out []SfMockActionPlan
-	err := c.sfCall(ctx, "GET", "/openapi/mock/plans?runCode="+url.QueryEscape(runCode), nil, &out)
+	q := url.Values{"runCode": {runCode}}
+	if status != "" {
+		q.Set("status", status)
+	}
+	err := c.sfCall(ctx, "GET", "/openapi/mock/plans?"+q.Encode(), nil, &out)
 	return out, err
+}
+
+// StratflowRequeuePlan 将一条 DEAD 计划重新入队。
+func (c *Client) StratflowRequeuePlan(ctx context.Context, actionCode string) error {
+	return c.sfCall(ctx, "POST", "/openapi/mock/plans/"+url.PathEscape(actionCode)+"/requeue", nil, nil)
 }
 
 // ===== ② 发现（方案 / 版本 / 名单 / 字段 / 绑定 / run）=====

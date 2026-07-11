@@ -1,12 +1,23 @@
 package hermesopenapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
+
+func TestLegacyGateOmitsEmptyTriStateFields(t *testing.T) {
+	raw, err := json.Marshal(SfMockGateView{Master: true, Global: false, Schemes: map[string]bool{"DEF": true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte(`"mode"`)) || bytes.Contains(raw, []byte(`"schemeModes"`)) {
+		t.Fatalf("旧 gate 不应被代理成空字符串三态字段: %s", raw)
+	}
+}
 
 // prodStratflow：gateway 模式 URL = 网关 + /stratflow + path；direct 模式 = StratflowURL + path。
 func TestEndpointStratflow(t *testing.T) {
@@ -87,26 +98,76 @@ func TestSfMockNodeViewParse(t *testing.T) {
 	}
 }
 
+func TestSfMockDeadPlanParse(t *testing.T) {
+	raw := `[{"actionCode":"A1","runCode":"R1","nodeId":"sms","entryCode":"E1","channel":"SMS","outcomeKey":"SMS_DELIVERED","baseMs":null,"idx":null,"steps":null,"status":"DEAD","nextDueAt":"2026-07-11T05:00:00","retryCount":120,"lastError":"broker down"}]`
+	var out []SfMockActionPlan
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 1 || out[0].Status != "DEAD" || out[0].RetryCount != 120 || out[0].LastError == nil || *out[0].LastError != "broker down" {
+		t.Fatalf("DEAD plan 解析错: %+v", out)
+	}
+}
+
 // —— 以下用 httptest 断请求形状（本机沙箱禁监听端口时跳过，CI 正常跑）——
 
-// gate 开关走 PUT + enabled query。
-func TestStratflowSetSchemeGateRequest(t *testing.T) {
+// gate 三态走 PUT + mode query。
+func TestStratflowSetSchemeModeRequest(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPut || r.URL.Path != "/openapi/mock/gate/scheme/DEF_x" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
-		if r.URL.Query().Get("enabled") != "true" {
-			t.Fatalf("enabled query 缺失: %s", r.URL.RawQuery)
+		if r.URL.Query().Get("mode") != "PAUSED" {
+			t.Fatalf("mode query 缺失: %s", r.URL.RawQuery)
 		}
-		_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":{"master":true,"global":false,"schemes":{"DEF_x":true},"deliveryPaused":false}}`))
+		_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":{"master":true,"mode":"MOCK","global":true,"schemeModes":{"DEF_x":"PAUSED"},"schemes":{"DEF_x":false},"deliveryPaused":false}}`))
 	}))
 	defer srv.Close()
-	v, err := New(Cred{Mode: "direct", OrgCode: "o1", StratflowURL: srv.URL}).StratflowSetSchemeGate(t.Context(), "DEF_x", true)
+	v, err := New(Cred{Mode: "direct", OrgCode: "o1", StratflowURL: srv.URL}).StratflowSetSchemeMode(t.Context(), "DEF_x", "PAUSED")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !v.Master || !v.Schemes["DEF_x"] {
+	if !v.Master || v.Mode != "MOCK" || v.SchemeModes["DEF_x"] != "PAUSED" {
 		t.Fatalf("gate view 解析错: %+v", v)
+	}
+}
+
+func TestStratflowSetRealCarriesLegacyEnabledFallback(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("mode") != "REAL" || r.URL.Query().Get("enabled") != "false" {
+			t.Fatalf("REAL 应同时携带新旧参数: %s", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":{"master":true,"global":false}}`))
+	}))
+	defer srv.Close()
+	if _, err := New(Cred{Mode: "direct", OrgCode: "o1", StratflowURL: srv.URL}).StratflowSetGlobalMode(t.Context(), "REAL"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStratflowListDeadPlansCarriesStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("runCode") != "RUN" || r.URL.Query().Get("status") != "DEAD" {
+			t.Fatalf("plans status 未透传: %s", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":[]}`))
+	}))
+	defer srv.Close()
+	if _, err := New(Cred{Mode: "direct", OrgCode: "o1", StratflowURL: srv.URL}).StratflowListPlansByStatus(t.Context(), "RUN", "DEAD"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStratflowRequeuePlanRequest(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.EscapedPath() != "/openapi/mock/plans/A%2F1/requeue" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.EscapedPath())
+		}
+		_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":null}`))
+	}))
+	defer srv.Close()
+	if err := New(Cred{Mode: "direct", OrgCode: "o1", StratflowURL: srv.URL}).StratflowRequeuePlan(t.Context(), "A/1"); err != nil {
+		t.Fatal(err)
 	}
 }
 

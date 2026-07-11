@@ -7,6 +7,49 @@
 
 ---
 
+## 2026-07-11 · 开发阶段不保留旧 Mock 数据，删除 Legacy 兼容
+
+- **背景**：当前尚处开发阶段，旧 Redis plan/config/pause 数据没有业务保留价值。为兼容旧实例引入的迁移锁、ready gate、旧回放、pause marker和取消 tombstone显著扩大了状态空间与测试成本。
+- **决策**：MySQL `t_sf_mock_action_plan` 作为唯一计划事实源；删除全部 Legacy Redis 迁移/回放/清理代码。部署前停止所有旧实例并一次性清理旧 `sf:mock:*`，之后只运行单一新版本。plan 表删除未使用 `shard`，改用 `SfSlimPO` 去掉四个完整审计列。
+- **影响**：不支持旧新 Hermes 实例混跑，也不自动保留旧 Mock 测试数据；换来更短的运行链路和更小的 schema/测试面。`REAL/MOCK/PAUSED`、claim lease、DEAD/requeue 和 Kafka ack 可靠性不变。
+- **部署要求**：全新/已清理 namespace 缺省即 PAUSED；首次导入前只需查询确认，无需手动写入 PAUSED。
+
+## 2026-07-11 · StratFlow 应用层 Mock 使用静态 capability + 运行时三态
+
+- **背景**：要求应用层 Mock 不新增独立部署，同时测试配置启用后可不重启切换。旧布尔 gate 只能表达“mock/非 mock”，其中 false 会直接落到真实下游；Redis 缺配置或控制台非法布尔也可能意外触发真实发送。重试若每次重新读 gate，还可能从 MOCK 切到 REAL。
+- **决策**：
+  1. Mock 实现仍内嵌 `hermes-stratflow`；只在 `local/test profile + stratflow.mock-capability.enabled=true` 时加载。静态 capability 变化允许重启。
+  2. 运行时模式改为 `REAL / MOCK / PAUSED`，按机构和方案存 Redis、无需重启；缺配置或读取异常 fail-safe `PAUSED`。
+  3. 首次派发把 REAL/MOCK 固化到动作/执行批次，后续重试不再读取新 gate。PAUSED 不落库，只让新动作保持待派发。
+  4. hermes-mock 只做控制台/代理：前端使用三态选择器，旧 enabled query 仅兼容；清理在途计划要求显式确认。
+- **影响**：三态切换只影响尚未固化的新派发；在途 Mock plan 继续回放，真实派发继续等待真实回执。静态 capability 关闭前必须先排空已固化为 MOCK 的待派发批次，否则它们会安全停住，绝不降级成 REAL。
+- **状态**：本地 Go 定向测试与前端构建通过；Hermes 模块测试通过后仍需部署测试环境执行切换竞态和连续 500×3 复测。
+
+## 2026-07-11 · StratFlow 控制请求显式携带机构，旧接口仅保留请求级兼容
+
+- **背景**：进程级 current 在机构切换与旧请求并发时会造成“显示旧机构、请求使用新机构凭据”；旧 Hermes gate 缺少 `mode/schemeModes`，空字符串会绕过前端 REAL 风险提示；固定 500 条 plans 可能遮住 DEAD。
+- **决策**：浏览器 API 请求从 localStorage 携带 `X-Hermes-Mock-Org`，StratFlow 代理按显式机构取凭据；但服务端 process current 仍是全站机构权威，`listOrgs` 必须把它同步回 localStorage，因为其它业务 handler 尚使用 current。机构切换清空全页状态，各异步请求按独立 generation 只提交当前上下文结果。REAL/MOCK 同时发送 `mode` 和旧 `enabled`，PAUSED 不向旧后端降级。plans 分别按 PENDING/DEAD 请求并按 actionCode 合并。
+- **影响**：StratFlow 请求具备显式机构上下文，同时不会出现顶栏显示 A、坐席/TTS/业务测试实际操作 B 的全站分裂。`mode+enabled` 只用于单次请求契约兼容，不代表支持旧新实例混跑或旧数据迁移。若未来要支持多用户各自独立 current，必须把所有机构敏感 handler 改为 request-scoped，不能仅靠前端 localStorage。
+- **状态**：Go 全量测试、TypeScript/Vite 构建通过；浏览器真实双机构快速切换仍需部署验证。
+
+## 2026-07-11 · PAUSED 使用持久化短退避，DEAD 必须可见且可恢复
+
+- **背景**：动态 PAUSED 已能阻止真实/模拟派发，但 SMS 会每秒 claim→reset→重标 Redis 信号，CALL 会每秒重复扫同一 PENDING batch；长时间暂停会持续放大 DB/Redis 负载。计划连续失败 10 次即 DEAD，且旧 plans API 只返回 PENDING，短暂 Kafka 故障可能造成计划永久消失。
+- **决策**：SMS 复用 attempt `next_retry_at` 作为 PENDING 控制态的 5 秒重查时间；CALL 新增 `next_dispatch_at`，两者到期自动重读 gate，保证无需重启。计划成功推进清零 retryCount；120 次连续失败才 DEAD；plans 默认返回 PENDING/DEAD，坏 JSON 也返回索引元数据；仅 DEAD 可按 actionCode、当前机构重新入队。
+- **影响**：PAUSED→REAL/MOCK 恢复最多增加约 5 秒延迟；新增一列 DDL 和 CALL 扫描索引变更。DEAD 不再是不可见终点，但人工 requeue 后仍会再次验证 plan JSON/Kafka 状态。
+- **验证**：Hermes `PausedDispatchTest`/`MockPlanStoreTest`、Go DTO/请求/路由测试、前端构建通过；远端负载、Kafka 长故障和 requeue E2E 待部署。
+
+## 2026-07-11 · StratFlow 控制按机构隔离，计划以 Hermes MySQL 为事实源
+
+- **背景**：2026-07-10 E2E 暴露三个相互关联的问题：Redis plans 需要扫描全库且负载下可能丢回执；global/pause/window/config/clear 跨机构共享；hermes-mock 把所有上游失败统一包装成 502，导致控制台无法区分请求错误和基础设施故障。
+- **决策**：
+  1. mock plan 的唯一事实源是 Hermes StratFlow MySQL，与 SMS/CALL 派发状态在同一事务提交；回放采用 CAS claim、stale reclaim、退避重试和 at-least-once 语义。开发阶段不迁移旧 Redis plans。
+  2. mock master 仍是环境部署硬闸门；global、scheme、delivery pause、receipt window、config、plans、clear 全部按 `orgCode` 隔离。控制器从认证上下文取机构并验证 def/version/run 归属。
+  3. hermes-mock 只做薄编排与观测：保留 Hermes 的 HTTP/业务错误语义，不发明第二套业务码；plans 观测可超时降级，但 progress 事实不能被其阻断或清空。
+- **幂等契约**：只以 `idempotencyKey` 去重；同 key 始终返回首次 batch/run，payload 一致性由调用方保证，不引入请求指纹或专用冲突错误码。
+- **影响**：“全局”从整个测试环境收敛为当前机构；计划查询从 Redis 扫描变为 `orgCode + runCode` 索引查询；Kafka/事件发布仍是 at-least-once，消费侧终态 CAS 继续承担幂等。旧版共享状态规则仅适用于尚未部署修复的环境。
+- **状态**：本地 `go test ./...`、`npm --prefix web run build`、Hermes `./gradlew :hermes-stratflow:test` 全绿；`hermes-test` DDL 已就绪，应用部署与连续 3 轮 500/500、跨机构、重试故障注入 E2E 待完成。匿名 `/api/orgs` P0 明确不在本次决策范围。
+
 ## 2026-07-08 · 纳入 stratflow「应用层 mock」编排台：与 SIP 被叫腿正交的第二类 mock
 
 - **背景**：Hermes 新增策略流引擎 `hermes-stratflow`，其触达节点（VOICEBOT_CALL/SMS_SEND）自带一套**应用层 mock 下游**（`MockAdminController` + `MockDownstream`）：派发那刻按结局词表采样 → 写 Redis 计划 → 定时器合成回执事件投 Kafka，交真实消费者落地。**关键事实**：它与 hermes-mock 是**同一通触达的互斥 mock**——`BatchFlusher.kt` 派发分叉 `if mockGate.enabledFor(defCode) { 合成假 taskCode+写计划 } else { 调 call-bot 真实外呼 }`。开 stratflow mock 就不打真实电话、不经 FS、不经被叫腿；要用 hermes-mock 被叫腿就得关 stratflow mock。二者层不同（应用/事件层 vs SIP/媒体层）。用户明确要接的是**场景 A：测策略图分支/回执逻辑**（用 stratflow 自带 mock，不产真实 SIP）。

@@ -130,27 +130,7 @@ func Register(r *gin.Engine, cfg *config.Config, repo model.Repository, clu *clu
 	g.DELETE("/cluster/overrides/:number", d.deleteOverride)
 	g.DELETE("/cluster/bindings/:listenPort", d.deleteBinding)
 
-	// 策略流应用层 mock 编排台（透传 hermes-stratflow OpenAPI）：发现→配结局→触发→观测断言。
-	// 与 SIP 被叫腿正交，测策略图分支逻辑时不产真实 SIP（见 docs/SCOPE.md / DECISIONS）。
-	g.GET("/stratflow/mock/gate", d.sfGate)
-	g.PUT("/stratflow/mock/gate/global", d.sfSetGlobalGate)
-	g.PUT("/stratflow/mock/gate/scheme/:defCode", d.sfSetSchemeGate)
-	g.DELETE("/stratflow/mock/gate/scheme/:defCode", d.sfClearSchemeGate)
-	g.PUT("/stratflow/mock/delivery", d.sfSetDeliveryPaused)
-	g.PUT("/stratflow/mock/receipt-window", d.sfSetReceiptWindow)
-	g.GET("/stratflow/mock/config/:versionCode", d.sfListConfig)
-	g.PUT("/stratflow/mock/config/:versionCode/:nodeId", d.sfPutConfig)
-	g.DELETE("/stratflow/mock/config/:versionCode/:nodeId", d.sfDeleteConfig)
-	g.DELETE("/stratflow/mock/all", d.sfClearMock)
-	g.GET("/stratflow/mock/plans", d.sfListPlans)
-	g.GET("/stratflow/workflows", d.sfWorkflows)
-	g.GET("/stratflow/workflows/:defCode", d.sfWorkflowDetail)
-	g.GET("/stratflow/collections", d.sfCollections)
-	g.GET("/stratflow/collections/:code/fields", d.sfCollectionFields)
-	g.GET("/stratflow/collections/:code/bindings", d.sfCollectionBindings)
-	g.GET("/stratflow/collections/:code/runs", d.sfRuns)
-	g.GET("/stratflow/collections/:code/runs/:rid/progress", d.sfRunProgress)
-	g.POST("/stratflow/collections/:code/import", d.sfImport)
+	registerStratflowRoutes(g, d)
 
 	// 浏览器→Hermes 反向代理：让 mock 前端里的 jssip 坐席软电话同源调到 call-center / hermes-ws
 	//（免 CORS、免自签证书）；直连模式下注入网关本会注入的身份头。

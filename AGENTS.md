@@ -61,4 +61,5 @@ make build   # 交叉编译 Linux 二进制
 | [docs/STATUS.md](docs/STATUS.md) | 当前焦点 / feature 进度 / 已知 bug / 本地栈速查（**最常更新**） |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | 关键决策日志（为什么这么定，倒序） |
 | [docs/CHANGELOG.md](docs/CHANGELOG.md) | 改动记录（改了什么 + 验证状态，倒序） |
+| [docs/STRATFLOW-MOCK-E2E.md](docs/STRATFLOW-MOCK-E2E.md) | StratFlow 应用层 mock 的可重复 E2E 流程、专用资产、数据库断言、安全清场与基线风险 |
 | [docs/hermes/](docs/hermes/) | **被测系统 Hermes 代码梳理**专区（前端通话 SDK / 后端总览 / 坐席外呼链路…） |
