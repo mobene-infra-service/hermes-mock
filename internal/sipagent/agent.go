@@ -26,6 +26,7 @@ import (
 	"hermes-mock/internal/calltrace"
 	"hermes-mock/internal/cluster"
 	"hermes-mock/internal/config"
+	"hermes-mock/internal/sipguard"
 	"hermes-mock/internal/tracelog"
 )
 
@@ -38,15 +39,16 @@ type Agent struct {
 	tracker    *calltrace.Tracker
 	bus        *tracelog.Bus
 	dg         *diago.Diago
+	guard      *sipguard.Guard // SIP 入口守卫：白名单/UA 指纹/自动封禁；nil=不设防（单测）
 }
 
 // New 初始化入站 UAS（被叫端）：只监听一个端口接收 FreeSWITCH 发来的 INVITE。
 func New(cfg *config.Config, clu *cluster.Store, tracker *calltrace.Tracker, bus *tracelog.Bus) (*Agent, error) {
-	return NewOnPort(cfg, cfg.SIPListenPort, clu, tracker, bus)
+	return NewOnPort(cfg, cfg.SIPListenPort, clu, tracker, bus, nil)
 }
 
-// NewOnPort 初始化指定入口端口的入站 UAS。
-func NewOnPort(cfg *config.Config, listenPort int, clu *cluster.Store, tracker *calltrace.Tracker, bus *tracelog.Bus) (*Agent, error) {
+// NewOnPort 初始化指定入口端口的入站 UAS。guard 为共享的 SIP 入口守卫（可 nil）。
+func NewOnPort(cfg *config.Config, listenPort int, clu *cluster.Store, tracker *calltrace.Tracker, bus *tracelog.Bus, guard *sipguard.Guard) (*Agent, error) {
 	uaOptions := []sipgo.UserAgentOption{sipgo.WithUserAgent("hermes-mock")}
 	if cfg.SIPResponseToSource {
 		uaOptions = append(uaOptions, sipgo.WithUserAgentTransportLayerOptions(
@@ -68,6 +70,7 @@ func NewOnPort(cfg *config.Config, listenPort int, clu *cluster.Store, tracker *
 	)
 	return &Agent{
 		cfg: cfg, listenPort: listenPort, cluster: clu, tracker: tracker, bus: bus, dg: dg,
+		guard: guard,
 	}, nil
 }
 
@@ -157,6 +160,38 @@ func clusterToRule(res *cluster.Resolved) behavior.Rule {
 
 // handleInbound 处理一通入站通话：按行为规则决定应答/拒接/放音/DTMF/挂断。
 func (a *Agent) handleInbound(in *diago.DialogServerSession) {
+	// SIP 入口守卫（三层，命中即丢弃：不应答、不放音、不落 mock_call/链路）。
+	// diago 会在 handler 返回后自行结束该 dialog。逐包日志用 Debug 级，避免高频扫描刷爆日志
+	// （需排查时调 LOG_LEVEL=debug；触发自动封禁时 guard 会落一条 WARN）。
+	if req := in.InviteRequest; req != nil {
+		src := req.Source()
+		if a.guard != nil {
+			// ① 来源白名单（配置了才限制）+ 自动封禁表
+			if !a.guard.SourceAllowed(src) {
+				logrus.WithFields(logrus.Fields{"source": src, "listenPort": a.listenPort}).
+					Debug("丢弃非白名单/封禁中来源的 INVITE（疑似公网扫描）")
+				return
+			}
+			// ② 扫描器 UA 指纹
+			if ua := requestUserAgent(req); a.guard.DeniedUA(ua) {
+				a.guard.Strike(src, "deny-ua:"+ua)
+				logrus.WithFields(logrus.Fields{"source": src, "userAgent": ua, "listenPort": a.listenPort}).
+					Debug("丢弃扫描器 UA 指纹命中的 INVITE")
+				return
+			}
+		}
+		// ③ 严格被叫校验：号不在集群配置内 → 丢弃并记违规（「配置即白名单」，不依赖 IP 清单）
+		if a.cfg.SIPStrictCallee {
+			if callee := dialogCallee(in); a.cluster == nil || !a.cluster.KnownNumber(a.listenPort, callee) {
+				if a.guard != nil {
+					a.guard.Strike(src, "unknown-callee:"+callee)
+				}
+				logrus.WithFields(logrus.Fields{"source": src, "callee": callee, "listenPort": a.listenPort}).
+					Debug("丢弃被叫号不在集群配置内的 INVITE（SIP_STRICT_CALLEE）")
+				return
+			}
+		}
+	}
 	callee := dialogCallee(in)
 	caller := dialogCaller(in)
 	line := dialogLine(in)
@@ -830,6 +865,14 @@ func inviteBusinessID(req *sip.Request) string {
 				return h.Value()
 			}
 		}
+	}
+	return ""
+}
+
+// requestUserAgent 取请求的 User-Agent 头值（无则空）。
+func requestUserAgent(req *sip.Request) string {
+	if h := req.GetHeader("User-Agent"); h != nil {
+		return h.Value()
 	}
 	return ""
 }

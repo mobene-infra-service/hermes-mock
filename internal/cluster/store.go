@@ -257,6 +257,37 @@ func (s *Store) ListBindings() []LineBinding {
 	return values(s.bindings)
 }
 
+// KnownNumber 报告被叫号是否落在集群配置内——严格被叫校验（SIP_STRICT_CALLEE）用：
+// 扫描器拨的随机分机号不会命中任何配置，据此在不维护 IP 白名单的情况下识别非法呼叫。
+//   - 入口端口有启用绑定：号须在绑定组的号段内，或存在（组内/全局）个例；
+//     绑定组缺失视为未知（配置残缺不应给扫描器放行）。
+//   - 无绑定：任一号段组包含该号、或存在任一同号个例即为已知。
+func (s *Store) KnownNumber(listenPort int, number string) bool {
+	if number == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if listenPort > 0 {
+		if b := s.bindings[listenPort]; b != nil && b.Enabled != 0 {
+			if s.overrides[overrideKey(b.GroupCode, number)] != nil || s.overrides[overrideKey("", number)] != nil {
+				return true
+			}
+			g := s.groups[b.GroupCode]
+			return g != nil && g.Contains(number)
+		}
+	}
+	if s.findOverrideByNumberLocked(number) != nil {
+		return true
+	}
+	for _, g := range s.groups {
+		if g.Contains(number) {
+			return true
+		}
+	}
+	return false
+}
+
 // HasBinding 报告某入口端口是否配置了**启用**的绑定。
 // 用于区分「该端口无绑定 → 回退按号解析」与「该端口已绑定 → 绑定权威」，避免端口绑定被号段静默覆盖。
 func (s *Store) HasBinding(listenPort int) bool {

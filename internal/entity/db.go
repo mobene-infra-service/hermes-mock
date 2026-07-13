@@ -227,7 +227,7 @@ type TraceEvent struct {
 	ID          int64     `gorm:"column:id;primaryKey;autoIncrement"`
 	SessionID   string    `gorm:"column:session_id;size:64;index:idx_event_session_seq"`
 	Seq         int64     `gorm:"column:seq;index:idx_event_session_seq"`
-	TS          time.Time `gorm:"column:ts"`
+	TS          time.Time `gorm:"column:ts;index:idx_event_ts"` // 加索引：TTL 清理按 ts 删，无索引会全表扫致删不动
 	Leg         string    `gorm:"column:leg;size:64"`
 	Channel     string    `gorm:"column:channel;size:8"`
 	Dir         string    `gorm:"column:dir;size:4"`

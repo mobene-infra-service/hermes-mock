@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 
@@ -22,6 +23,20 @@ type Config struct {
 	SIPTransport   string `env:"SIP_TRANSPORT" envDefault:"udp"` // udp/tcp/tls
 	// 开启后给 UDP 入站请求顶层 Via 补 received/rport，使 sipgo/diago 的响应回到实际包源地址。
 	SIPResponseToSource bool `env:"SIP_RESPONSE_TO_SOURCE" envDefault:"false"`
+	// SIP 来源白名单：逗号分隔的 CIDR 或裸 IP（如 "172.16.0.0/12,10.0.0.0/8,127.0.0.1"）。
+	// 只处理来自这些来源的 SIP 报文（应答 + 落库）；其余（公网 SIP 扫描器等）直接丢弃、不应答、不落库。
+	// 空=不限制（向后兼容）；**公网可达部署务必配置**，否则会被扫描器刷爆 mock_trace_event。
+	SIPAllowedSources string `env:"SIP_ALLOWED_SOURCES" envDefault:""`
+	// 严格被叫校验：true 时，被叫号码不在客户集群配置内（端口绑定组的号段/个例、或任一号段组/个例）
+	// 的 INVITE 直接丢弃（不应答、不落库）并对来源记一次违规。扫描器拨的随机分机号几乎不可能命中
+	// 配置的测试号段——这是不需要维护 IP 清单的「配置即白名单」。false=保持默认兜底应答（向后兼容）。
+	SIPStrictCallee bool `env:"SIP_STRICT_CALLEE" envDefault:"false"`
+	// 扫描器 User-Agent 指纹（逗号分隔、大小写不敏感子串匹配）：INVITE 的 UA 命中即丢弃并记违规。空=不启用。
+	SIPDenyUserAgents string `env:"SIP_DENY_USER_AGENTS" envDefault:"friendly-scanner,sipvicious,sipcli,sipsak,sundayddr,VaxSIPUserAgent,pplsip"`
+	// 自动临时封禁（fail2ban 思路）：同一 IP 在 10 分钟窗口内累计违规达阈值 → 封禁 SIP_BAN_MINUTES 分钟，
+	// 期间其 SIP 报文在最早入口丢弃且不落库。<=0 禁用。白名单内来源永不被封禁。
+	SIPBanThreshold int `env:"SIP_BAN_THRESHOLD" envDefault:"10"`
+	SIPBanMinutes   int `env:"SIP_BAN_MINUTES" envDefault:"30"`
 	// 提供给 SDP 协商的音频编解码列表（逗号分隔，按优先级）：PCMU,PCMA,opus。
 	Codecs string `env:"CODECS" envDefault:"PCMU,PCMA"`
 	// agent 对 FreeSWITCH 暴露的可达 IP（写入 SDP / Contact）。为空时由 diago 尝试按网卡自动探测。
@@ -58,6 +73,10 @@ type Config struct {
 	// 观测数据（呼叫记录 / 链路 / 回调）保留天数：后台周期清理早于此的行，防长期膨胀。
 	// <=0 表示不清理（永久保留）。
 	ObserveTTLDays int `env:"OBSERVE_TTL_DAYS" envDefault:"7"`
+
+	// 通话链路是否落库（mock_trace_leg / mock_trace_event）。false=只在内存观测、不写 DB（重启即失），
+	// 适合不需要持久 SIP 报文、且要彻底杜绝该表膨胀的部署。
+	TracePersist bool `env:"TRACE_PERSIST" envDefault:"true"`
 
 	// ---- 日志 ----
 	LogLevel string `env:"LOG_LEVEL" envDefault:"info"`
@@ -100,4 +119,64 @@ func (c *Config) ListenPorts() ([]int, error) {
 		return nil, fmt.Errorf("SIP_LISTEN_PORTS is empty")
 	}
 	return ports, nil
+}
+
+// AllowedSourceMatcher 把 SIP_ALLOWED_SOURCES（逗号分隔的 CIDR 或裸 IP）解析成来源判定函数。
+// 返回 (matcher, restricted, err)：
+//   - restricted=false：未配置白名单 → matcher 恒为 true（放行所有，向后兼容）；
+//   - restricted=true：matcher 仅对落在白名单内的来源返回 true。
+//
+// matcher 入参可带端口（"ip:port"）也可为纯 IP——内部会先尝试 SplitHostPort，
+// 这样 SIP handler（req.Source()）与 tracer（raddr）都能直接传入。
+func (c *Config) AllowedSourceMatcher() (matcher func(addr string) bool, restricted bool, err error) {
+	raw := strings.TrimSpace(c.SIPAllowedSources)
+	if raw == "" {
+		return func(string) bool { return true }, false, nil
+	}
+	var nets []*net.IPNet
+	var ips []net.IP
+	for _, tok := range strings.Split(raw, ",") {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue
+		}
+		if strings.Contains(tok, "/") {
+			_, n, e := net.ParseCIDR(tok)
+			if e != nil {
+				return nil, false, fmt.Errorf("invalid SIP_ALLOWED_SOURCES CIDR %q: %w", tok, e)
+			}
+			nets = append(nets, n)
+			continue
+		}
+		ip := net.ParseIP(tok)
+		if ip == nil {
+			return nil, false, fmt.Errorf("invalid SIP_ALLOWED_SOURCES IP %q", tok)
+		}
+		ips = append(ips, ip)
+	}
+	if len(nets) == 0 && len(ips) == 0 {
+		return func(string) bool { return true }, false, nil
+	}
+	matcher = func(addr string) bool {
+		host := addr
+		if h, _, e := net.SplitHostPort(addr); e == nil {
+			host = h
+		}
+		ip := net.ParseIP(host)
+		if ip == nil {
+			return false
+		}
+		for _, n := range nets {
+			if n.Contains(ip) {
+				return true
+			}
+		}
+		for _, x := range ips {
+			if x.Equal(ip) {
+				return true
+			}
+		}
+		return false
+	}
+	return matcher, true, nil
 }

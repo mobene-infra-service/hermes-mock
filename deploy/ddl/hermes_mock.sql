@@ -175,7 +175,8 @@ CREATE TABLE `mock_trace_event` (
   `headers_json`  json         NULL                      COMMENT '结构化 SIP 头（含 X- 业务头）',
   `raw_message`   mediumtext   NULL                      COMMENT '原始 SIP 报文（req.String()）',
   PRIMARY KEY (`id`),
-  KEY `idx_event_session_seq` (`session_id`, `seq`)
+  KEY `idx_event_session_seq` (`session_id`, `seq`),
+  KEY `idx_event_ts` (`ts`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='mock 通话链路事件（含原始 SIP 报文）';
 
 -- ---------------------------------------------------------------------

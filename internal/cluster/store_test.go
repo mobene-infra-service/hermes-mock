@@ -180,3 +180,37 @@ func TestNumbersExpand(t *testing.T) {
 		}
 	}
 }
+
+func TestKnownNumber(t *testing.T) {
+	s := NewMemory()
+	s.UpsertProfile(BehaviorProfile{Code: "answer", Outcome: "ANSWER", AnswerRatio: 100})
+	s.UpsertGroup(CustomerGroup{Code: "g1", NumberPrefix: "8613800", NumberStart: 1000, Count: 100, BehaviorCode: "answer"})
+	s.UpsertGroup(CustomerGroup{Code: "g2", NumberPrefix: "8613900", NumberStart: 1000, Count: 100, BehaviorCode: "answer"})
+	s.UpsertOverride(CustomerOverride{Number: "999", GroupCode: "g1"})
+	s.UpsertOverride(CustomerOverride{Number: "888"}) // 全局个例
+	s.UpsertBinding(LineBinding{ListenPort: 15061, GroupCode: "g1", Enabled: 1})
+	s.UpsertBinding(LineBinding{ListenPort: 15062, GroupCode: "missing", Enabled: 1})
+
+	cases := []struct {
+		name  string
+		port  int
+		num   string
+		known bool
+	}{
+		{"绑定口·组号段内", 15061, "86138001005", true},
+		{"绑定口·组内个例", 15061, "999", true},
+		{"绑定口·全局个例", 15061, "888", true},
+		{"绑定口·别组的号不放行", 15061, "86139001005", false},
+		{"绑定口·随机分机号（扫描器）", 15061, "1000", false},
+		{"绑定组缺失视为未知", 15062, "86138001005", false},
+		{"无绑定口·任一号段命中", 15070, "86139001005", true},
+		{"无绑定口·个例命中", 15070, "999", true},
+		{"无绑定口·未命中", 15070, "100", false},
+		{"空号", 15061, "", false},
+	}
+	for _, c := range cases {
+		if got := s.KnownNumber(c.port, c.num); got != c.known {
+			t.Errorf("%s: KnownNumber(%d,%q)=%v want %v", c.name, c.port, c.num, got, c.known)
+		}
+	}
+}

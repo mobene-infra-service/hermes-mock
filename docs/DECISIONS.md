@@ -7,6 +7,17 @@
 
 ---
 
+## 2026-07-13 · SIP 守卫升级：白名单之外的三层纵深防御（不依赖 IP 清单）
+
+- **背景**：2026-06-29 的来源白名单能挡扫描，但要人工维护 FS/Kamailio 网段，网络一变就漏；用户明确「不想只靠白名单」。且原实现只挡 INVITE 业务处理，UA 指纹、非法被叫等扫描特征未利用。
+- **决策**：新增 `internal/sipguard.Guard` 统一守卫（sipagent 应答决策 + siptrace 落库过滤共用一个实例，保证丢弃的请求不进 DB），三层叠加、各自独立开关：
+  1. **来源白名单**（`SIP_ALLOWED_SOURCES`）：保持**没配置就不限制 IP**（向后兼容）；配置了则白名单内来源为「可信」，永不被自动封禁。
+  2. **扫描器 UA 指纹**（`SIP_DENY_USER_AGENTS`，默认 friendly-scanner/sipvicious/sipcli/sipsak/sundayddr/VaxSIPUserAgent/pplsip）：INVITE 的 User-Agent 大小写不敏感子串命中即丢弃 + 记违规。
+  3. **严格被叫校验**（`SIP_STRICT_CALLEE`，默认 false）：被叫号不在集群配置内（绑定口=绑定组号段/个例；无绑定口=任一号段/个例）即丢弃 + 记违规——「配置即白名单」，扫描器拨的随机分机号几乎不可能命中测试号段。开启后默认兜底应答对未配置号码失效，故默认关。
+  4. **违规计数自动临时封禁**（`SIP_BAN_THRESHOLD`=10 次/10min 窗口 → 封 `SIP_BAN_MINUTES`=30 分钟）：**按违规计数而非原始速率**——批量压测时 FS 单 IP 高速率发合法 INVITE 是常态，按速率限流会误伤；封禁期报文最早入口丢弃且不落库；strikes/bans 表设 8192 上限防伪造源 IP 撑爆内存。
+- **影响**：`internal/sipguard`（新包）、`internal/config`（+4 env）、`internal/cluster`（+`KnownNumber`）、`internal/sipagent`（`NewOnPort` 加 guard 参数，入口三层检查）、`cmd/hermes-mock/main.go`（装配 + 启动日志）、`.env.example`。已知残余风险：diago/sipgo 事务层对被丢弃 INVITE 仍可能自动回 100/最终响应、对 OPTIONS/REGISTER 自动回 405——应用层无法做到完全静默，公网部署仍需安全组收口 SIP 端口。
+- **状态**：`go build`/`go vet`/`gofmt`/`go test ./...` 全绿（新增 sipguard 表驱动测试 + cluster.KnownNumber 测试）。线上生效待配置 env 后观察封禁 WARN 日志与 trace 表增量。
+
 ## 2026-07-11 · 开发阶段不保留旧 Mock 数据，删除 Legacy 兼容
 
 - **背景**：当前尚处开发阶段，旧 Redis plan/config/pause 数据没有业务保留价值。为兼容旧实例引入的迁移锁、ready gate、旧回放、pause marker和取消 tombstone显著扩大了状态空间与测试成本。
@@ -60,6 +71,16 @@
   4. **不做**：不把 stratflow 完整管理台（结局词表编辑、图编排）搬进来；配置项只读 stratflow 下发词表。断言用 `edgeFlow` 漏斗（stratflow 不返回 entry 级 phase）。
 - **影响**：为什么这不算 SCOPE 越界——SCOPE §五非目标清单是针对「SIP 被叫腿」维度（不主动 UAC/不 B2BUA/不模拟坐席话路/不重型可观测/不录音回放），本能力是「经 OpenAPI 触发 Hermes 业务 + 测试编排」的延伸（与「群呼/callbot/OTP 触发」同类），不触碰被叫腿定位。但它确是**第二类 mock 的控制台**，故 SCOPE 补一句边界注、此处留档，防止以后误当核心能力膨胀。涉及：`internal/hermesopenapi/{client,stratflow}.go`、`internal/api/stratflow.go`、`internal/entity/db.go`(+`stratflow_url`)、`internal/orgcfg/store.go`、`deploy/ddl/hermes_mock.sql`、`web/src/{pages/StratflowMockPage.tsx,api.ts,types,App.tsx,components/layout/nav.tsx,pages/OrgsPage.tsx}`。
 - **状态**：`go build ./...`/`go vet`/`gofmt`/`go test ./...`（含新增 stratflow client 表驱动测试 + api 路由注册冒烟）全绿；`tsc -b`/`vite build`/`make sync-web`/`make verify-embed` 通过（仅既有 chunk size 警告）。**端到端待接真实 stratflow 环境**（`mock-downstream.enabled=true` + 授权方案/名单）跑一遍「配→触发→edgeFlow 断言」闭环；`npm run lint` 因本机缺 eslint 未跑。
+
+## 2026-06-29 · SIP 来源白名单 + 观测数据治理：杜绝公网扫描刷爆 trace 表
+- **背景**：线上发现持续有非 Hermes 发起的外部呼叫，`mock_trace_event` 涨到 6 千万行/6G+、`mock_trace_leg` 近 40 万行。根因三连：① `sipagent.handleInbound` 对**任意来源** INVITE 都照常应答/放音/落库，SIP 端口公网可达即被 sipvicious 类扫描器高频探测；② `siptrace` 用 `SIPDebug=true` 抓**所有**收发原始报文，每包落一行（`raw_message` mediumtext），扫描重发 + 内存会话环淘汰重建双重放大；③ `mock_trace_event.ts` **无索引**，`pruneLoop` 的 `DELETE WHERE ts<?` 在千万行表上全表扫 + 30s ctx 超时报错，TTL 形同虚设、越积越多。
+- **决策**：
+  1. **SIP 来源白名单**（`SIP_ALLOWED_SOURCES`，逗号分隔 CIDR/裸 IP）：`config.AllowedSourceMatcher` 解析；`sipagent.handleInbound` 入口对非白名单来源**直接丢弃**（不应答/不放音/不落 mock_call/不进链路，Debug 级日志）；`siptrace.handle` 对非白名单对端**不落库**。空=不限制（向后兼容），但**公网部署务必配置**（启动 WARN 提示）。
+  2. **prune 分批删 + 索引**：`PruneObservations` 改 `DELETE ... LIMIT 5000` 循环、ctx 到期则本轮删多少算多少（余量下轮续，不算失败）；`mock_trace_event.ts` 补 `idx_event_ts`，TTL 清理走索引。
+  3. **落库总开关**：`TRACE_PERSIST=false` 时通话链路只在内存观测、不写 mock_trace_*，给「不需要持久 SIP 报文」的部署一个彻底止膨胀选项。
+  4. **边界**：白名单/落库治理只影响**观测与是否应答**，不改 mock「只演被叫客户腿」的定位。已堆积的 6 千万行由运维 `TRUNCATE` 清（配置表不动）。
+- **影响**：`internal/config`（新增 2 项 env + matcher）、`internal/sipagent`、`internal/siptrace`（`Install` 加白名单参数）、`internal/model/sql/repo_sql_prune.go`（分批）、`internal/entity`（ts 索引）、`deploy/ddl/hermes_mock.sql`、`.env.example`、`cmd/hermes-mock/main.go`。
+- **状态**：`go build ./...`、`go vet`、`go test ./...` 全绿（新增 `config.AllowedSourceMatcher` 表驱动测试）。现网清理 SQL 与网络封堵步骤已交付，待部署侧配置 `SIP_ALLOWED_SOURCES` + 收口 SIP 端口公网暴露后观察增量。
 
 ## 2026-06-18 · FS Docker 部署：Hermes 线路目标使用内网 mock 入口，SIP 响应按包源回 Kamailio
 - **背景**：将 mock 从 K8s PodIP 迁到 `hermes-freeswitch-test` Docker 后，FS/Kamailio 同机存在两类地址：内网 `172.16.7.27` 和公网 `47.251.74.116`。Kamailio 配置 `listen=udp:172.16.7.27:5060 advertise 47.251.74.116:5060` 且 `alias="47.251.74.116"`，所以转发出去的顶层 Via 会写公网 `47.251.74.116:5060`，但 Docker mock 实际收到包的来源应是内网 `172.16.7.27:5060`。实测 Hermes 线路目标配置为 `47.251.74.116:15060` 时，mock 无 `收到 INVITE` 日志；改为 `172.16.7.27:15060` 后 INVITE 正常进入 mock。

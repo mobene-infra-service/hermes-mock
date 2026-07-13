@@ -3,6 +3,10 @@
 > 本项目改动按主题记录（倒序，最新在上）。决策原因见 [DECISIONS.md](DECISIONS.md)，当前状态见 [STATUS.md](STATUS.md)。
 ---
 
+## 2026-07-13
+
+- **SIP 入口守卫升级（不依赖 IP 清单的纵深防御）**：新增 `internal/sipguard.Guard`，在原来源白名单之外叠加三层，供 sipagent 应答决策与 siptrace 落库过滤共用（丢弃的请求也不进 DB）：① 扫描器 UA 指纹拒收（`SIP_DENY_USER_AGENTS`，默认含 friendly-scanner/sipvicious/sipcli 等）；② 严格被叫校验（`SIP_STRICT_CALLEE`，被叫号不在集群配置内即丢弃，「配置即白名单」）；③ 违规计数自动临时封禁（`SIP_BAN_THRESHOLD`/`SIP_BAN_MINUTES`，按违规计数而非速率，白名单内来源永不被封）。来源白名单保持「没配置就不限制 IP」。新增 `cluster.KnownNumber`。验证：`go build`/`go vet`/`gofmt`/`go test ./...` 全绿（新增 sipguard 表驱动测试 + KnownNumber 测试）。残余风险：diago/sipgo 事务层对被丢弃请求仍可能自动回响应，公网部署仍需安全组收口 SIP 端口。
+
 ## 2026-07-11
 
 - **开发阶段删除 StratFlow Legacy 兼容并精简 plan schema**：不再迁移/回放旧 Redis plan，不再维护旧 pause marker、取消 tombstone和混合版本部署协议；MySQL plan 成为唯一事实源。删除未参与查询的 plan `shard`，PO 改用 `SfSlimPO` 并移除 `create_ts/modified_ts/created_by/modified_by`。部署方式收敛为停旧实例、清旧 `sf:mock:*`、部署单一新版本；全新 namespace 缺省即 PAUSED，无需手动初始化。已通过 IDEA `hermes-test` 数据源完成并复查 `stratflow` DDL，plan 表为 0 行。验证：Hermes 模块测试、Go 全量测试、前端构建及两仓 `git diff --check` 通过。
@@ -44,6 +48,15 @@
   - schema：`OrgConfig.StratflowURL`（direct 模式）+ DDL 快照 `mock_org_config.stratflow_url`。
   - 边界：应用层 mock 编排台，与 SIP 被叫腿正交、互斥（见 SCOPE §六补注）。
   - 验证：`go build ./...`、`go vet`、`gofmt`、`go test ./...`（含 stratflow client 表驱动 + api 路由注册冒烟）全绿；`tsc -b`、`vite build`、`make sync-web`、`make verify-embed` 通过（仅既有 chunk size 警告）。端到端待真实 stratflow 环境；`npm run lint` 因本机缺 eslint 未跑。
+
+## 2026-06-29
+
+- **SIP 来源白名单 + 观测数据治理（防公网扫描刷爆 trace）**：详见 [DECISIONS.md](DECISIONS.md) 同日条目。
+  - 新增 `SIP_ALLOWED_SOURCES`（逗号分隔 CIDR/IP）：非白名单来源的 INVITE 直接丢弃（不应答/不放音/不落库），`siptrace` 对非白名单对端也不落库。空=不限制，启动 WARN 提示公网部署务必配置。
+  - 新增 `TRACE_PERSIST`（默认 true）：设 false 则通话链路只在内存观测、不写 mock_trace_*。
+  - `PruneObservations` 改分批 `DELETE ... LIMIT 5000` 循环 + ctx 到期优雅退出（余量下轮续）；`mock_trace_event` 补 `idx_event_ts` 索引（修「TTL 清理按 ts 全表扫删不动」）。DDL 同步。
+  - 运维：现网 6 千万行用 `TRUNCATE mock_trace_event; TRUNCATE mock_trace_leg;` 清（配置表不受影响）；并收口 SIP 端口公网暴露、安全组限到 FreeSWITCH 网段。
+  - 验证：`go build ./...`、`go vet`、`go test ./...` 全绿（新增 `config.AllowedSourceMatcher` 表驱动测试）。
 
 ## 2026-06-18
 

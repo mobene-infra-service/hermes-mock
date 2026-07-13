@@ -22,7 +22,9 @@ const maxCID = 4096
 // Tracer 实现 sip.SIPTracer，把收发报文喂给 tracelog。
 type Tracer struct {
 	bus *tracelog.Bus
-	mu  sync.Mutex
+	// allow 来源白名单：返回 false 的对端地址（公网扫描等）其报文不落库。nil=不限制。
+	allow func(addr string) bool
+	mu    sync.Mutex
 	// callID → bizUUID 映射：INVITE 携带 x-call-uuid，但其响应/ACK/BYE 不回显该业务头，
 	// 这里记住同一 SIP 对话(Call-ID)首次见到的 bizUUID，让后续报文聚合到同一业务会话，
 	// 避免「200/ACK/BYE 因无业务头而另起一条 Call-ID 会话」的分裂（实测踩坑）。
@@ -56,9 +58,11 @@ func (t *Tracer) rememberCIDLocked(callID string) {
 }
 
 // Install 注册 tracer 到 sipgo 并开启 SIPDebug（传输层据此调用 tracer）。
-func Install(bus *tracelog.Bus) {
+// allow 为 SIP 来源白名单（见 config.AllowedSourceMatcher）：非白名单对端的报文不落库，
+// 杜绝公网扫描器把 mock_trace_event 刷爆。传 nil 表示不过滤（向后兼容）。
+func Install(bus *tracelog.Bus, allow func(addr string) bool) {
 	sip.SIPDebug = true
-	sip.SIPDebugTracer(&Tracer{bus: bus, cid2biz: map[string]string{}, cid2leg: map[string]string{}})
+	sip.SIPDebugTracer(&Tracer{bus: bus, allow: allow, cid2biz: map[string]string{}, cid2leg: map[string]string{}})
 }
 
 // SIPTraceRead mock 收到的报文（IN）。
@@ -72,6 +76,10 @@ func (t *Tracer) SIPTraceWrite(transport, laddr, raddr string, msg []byte) {
 }
 
 func (t *Tracer) handle(dir tracelog.Dir, transport, laddr, raddr string, msg []byte) {
+	// 来源白名单：非可信对端（公网扫描等）的报文不落库。raddr 即对端地址（IN=来源，OUT=目的）。
+	if t.allow != nil && !t.allow(raddr) {
+		return
+	}
 	p := parse(msg)
 	if p == nil || p.callID == "" {
 		return // 非 SIP / 无 Call-ID（如 keepalive ping）忽略

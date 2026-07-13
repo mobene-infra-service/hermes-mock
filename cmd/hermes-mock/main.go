@@ -20,6 +20,7 @@ import (
 	"hermes-mock/internal/orchestrator"
 	"hermes-mock/internal/orgcfg"
 	"hermes-mock/internal/sipagent"
+	"hermes-mock/internal/sipguard"
 	"hermes-mock/internal/siptrace"
 	"hermes-mock/internal/testkit"
 	"hermes-mock/internal/tracelog"
@@ -75,9 +76,22 @@ func main() {
 	tracker := calltrace.New(repo)
 	// 通话链路事件总线（SIP/媒体/WS 统一时间线，可观测核心）
 	bus := tracelog.New()
+	// SIP 入口守卫：来源白名单（没配置就不限制 IP）+ 扫描器 UA 指纹 + 违规自动临时封禁 + 严格被叫校验。
+	// 被丢弃的来源同时不落库（tracer 共用同一 guard）。
+	guard, err := sipguard.New(cfg)
+	if err != nil {
+		logrus.Fatalf("init sip guard: %v", err)
+	}
+	if guard.Restricted() {
+		logrus.Infof("SIP 来源白名单已启用：仅处理 SIP_ALLOWED_SOURCES=%q 内来源的报文，其余丢弃不落库", cfg.SIPAllowedSources)
+	} else {
+		logrus.Warn("⚠️ 未配置 SIP_ALLOWED_SOURCES：不按来源 IP 限制。公网可达部署建议叠加 SIP_STRICT_CALLEE=true（被叫不在集群配置内即丢弃）并收口安全组")
+	}
+	logrus.Infof("SIP 守卫：strictCallee=%v denyUA=%q 自动封禁=%v(阈值 %d 次/10min → 封 %d 分钟)",
+		cfg.SIPStrictCallee, cfg.SIPDenyUserAgents, guard.BanEnabled(), cfg.SIPBanThreshold, cfg.SIPBanMinutes)
 	// 在 sipgo 传输层注册 SIP tracer：自动捕获**所有收发的原始 SIP 报文**（含业务头），
-	// 按 Call-ID 聚合进 tracelog。必须在创建 SIP agent（建 UA/传输）之前安装。
-	siptrace.Install(bus)
+	// 按 Call-ID 聚合进 tracelog；非白名单/封禁中来源不落库。必须在创建 SIP agent（建 UA/传输）之前安装。
+	siptrace.Install(bus, guard.SourceAllowed)
 	// 针对性测试编排
 	kit := testkit.New(cfg, bus, clu)
 	kit.SetRepo(repo)
@@ -94,7 +108,7 @@ func main() {
 		logrus.Fatalf("parse SIP listen ports: %v", err)
 	}
 	for _, port := range sipPorts {
-		agent, err := sipagent.NewOnPort(cfg, port, clu, tracker, bus)
+		agent, err := sipagent.NewOnPort(cfg, port, clu, tracker, bus, guard)
 		if err != nil {
 			logrus.Fatalf("init sip agent on %d: %v", port, err)
 		}
@@ -108,8 +122,8 @@ func main() {
 	// 和「未绑定的监听口」（该口来话会回退按号/默认兜底），直击「在 cluster 页绑了端口却不按行为处理」。
 	warnBindingPortMismatch(clu, sipPorts)
 
-	// 通话链路常态落库：定期把会话+事件刷到 mock_trace_*。
-	go traceFlushLoop(repo, bus)
+	// 通话链路常态落库：定期把会话+事件刷到 mock_trace_*。TRACE_PERSIST=false 时只在内存观测、不落库。
+	go traceFlushLoop(repo, bus, cfg.TracePersist)
 
 	// 观测数据治理：周期清理早于 TTL 的呼叫记录/链路/回调，防长期膨胀。
 	go pruneLoop(repo, cfg.ObserveTTLDays)
@@ -158,7 +172,12 @@ func warnBindingPortMismatch(clu *cluster.Store, listenPorts []int) {
 }
 
 // traceFlushLoop 周期把 tracelog 会话与事件落到 hermes_mock 库（已落过的按 seq 跳过）。
-func traceFlushLoop(repo model.Repository, bus *tracelog.Bus) {
+// persist=false 时直接跳过落库（只保留内存观测，重启即失），用于彻底杜绝 mock_trace_* 膨胀。
+func traceFlushLoop(repo model.Repository, bus *tracelog.Bus, persist bool) {
+	if !persist {
+		logrus.Info("TRACE_PERSIST=false：通话链路不落库（仅内存观测，重启即失）")
+		return
+	}
 	flushed := map[string]int64{} // session_id -> 已落库的最大 seq
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
