@@ -30,7 +30,7 @@ type Config struct {
 	// 严格被叫校验：true 时，被叫号码不在客户集群配置内（端口绑定组的号段/个例、或任一号段组/个例）
 	// 的 INVITE 直接丢弃（不应答、不落库）并对来源记一次违规。扫描器拨的随机分机号几乎不可能命中
 	// 配置的测试号段——这是不需要维护 IP 清单的「配置即白名单」。false=保持默认兜底应答（向后兼容）。
-	SIPStrictCallee bool `env:"SIP_STRICT_CALLEE" envDefault:"false"`
+	SIPStrictCallee bool `env:"SIP_STRICT_CALLEE" envDefault:"true"`
 	// 扫描器 User-Agent 指纹（逗号分隔、大小写不敏感子串匹配）：INVITE 的 UA 命中即丢弃并记违规。空=不启用。
 	SIPDenyUserAgents string `env:"SIP_DENY_USER_AGENTS" envDefault:"friendly-scanner,sipvicious,sipcli,sipsak,sundayddr,VaxSIPUserAgent,pplsip"`
 	// 自动临时封禁（fail2ban 思路）：同一 IP 在 10 分钟窗口内累计违规达阈值 → 封禁 SIP_BAN_MINUTES 分钟，
