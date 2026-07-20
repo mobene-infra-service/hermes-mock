@@ -40,11 +40,12 @@ func (o *Orchestrator) client() (*hermesopenapi.Client, error) {
 
 // CallBotScenario 一次 call-bot 任务场景。
 type CallBotScenario struct {
-	Name     string   `json:"name"`
-	TaskType int      `json:"taskType"` // 1=IVR 2=AI_CALL
-	Numbers  []string `json:"numbers"`
-	Robot    string   `json:"robotCode,omitempty"`
-	Script   string   `json:"salesScriptCode,omitempty"`
+	Name                 string   `json:"name"`
+	TaskType             int      `json:"taskType"` // 1=IVR 2=AI_CALL
+	Numbers              []string `json:"numbers"`
+	Robot                string   `json:"robotCode,omitempty"`
+	Script               string   `json:"salesScriptCode,omitempty"`
+	ConfirmURLBeforeDial string   `json:"confirmUrlBeforeDial,omitempty"`
 }
 
 // RunCallBot 经 OpenAPI 建 call-bot 任务并导入号码。
@@ -55,10 +56,14 @@ func (o *Orchestrator) RunCallBot(s CallBotScenario) ([]byte, error) {
 	}
 	ctx, cancel := o.ctx()
 	defer cancel()
-	raw, err := cli.CreateCallBotTask(ctx, map[string]any{
+	body := map[string]any{
 		"name": s.Name, "taskType": s.TaskType, "numbers": numberInfos(s.Numbers),
 		"robotCode": s.Robot, "salesScriptCode": s.Script,
-	})
+	}
+	if s.ConfirmURLBeforeDial != "" {
+		body["confirmUrlBeforeDial"] = s.ConfirmURLBeforeDial
+	}
+	raw, err := cli.CreateCallBotTask(ctx, body)
 	return raw, err
 }
 
@@ -189,6 +194,9 @@ func (o *Orchestrator) RunCallCenterTask(s CallCenterTaskScenario) ([]byte, erro
 	if s.LineType != "" {
 		body["lineType"] = s.LineType // 7cbb285：任务期间仅用该 type 线路（含重试换线锁同 type）
 	}
+	if s.ConfirmURLBeforeDial != "" {
+		body["confirmUrlBeforeDial"] = s.ConfirmURLBeforeDial
+	}
 	// createAndImport 建任务后 Hermes 即异步拨号（NotifyDialJob），状态按日期判定为 IN_PROGRESS，
 	// **无需再调 status/start**——start 仅用于恢复 PAUSE 态任务（证据 Hermes CallTaskService.startTask）。
 	return cli.CreateCallCenterTask(ctx, body)
@@ -246,8 +254,11 @@ func (o *Orchestrator) CallCenterTask(req entity.CallCenterTaskReq) ([]byte, err
 }
 
 // CallBotTask 适配 BizCaller。
-func (o *Orchestrator) CallBotTask(name string, taskType int, numbers []string, robot, script string) ([]byte, error) {
-	return o.RunCallBot(CallBotScenario{Name: name, TaskType: taskType, Numbers: numbers, Robot: robot, Script: script})
+func (o *Orchestrator) CallBotTask(name string, taskType int, numbers []string, robot, script, confirmURLBeforeDial string) ([]byte, error) {
+	return o.RunCallBot(CallBotScenario{
+		Name: name, TaskType: taskType, Numbers: numbers, Robot: robot, Script: script,
+		ConfirmURLBeforeDial: confirmURLBeforeDial,
+	})
 }
 
 // AutoCall 适配 BizCaller。

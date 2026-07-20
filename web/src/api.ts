@@ -8,6 +8,7 @@ import type {
   CallRecordPage, CallRecordFilter, AgentCallRecord,
   BehaviorProfile, CustomerGroup, CustomerOverride, LineBinding,
   OrgConfig, OrgsResp, TtsVoice, AgentGroupAgg, CallbackRecord,
+  HTTPMockEndpoint, HTTPMockRequestRecord,
 } from './types'
 
 const base = '/api'
@@ -94,6 +95,7 @@ export async function runCallCenterTask(p: {
   maxRedialTimes?: number; redialInterval?: number; bestRingDuration?: number; agentMaxRingDuration?: number
   assignDelaySeconds?: number; transferType?: string; description?: string
   startDate?: string; endDate?: string; dialTimePeriod?: string[]; lineType?: string; waitSec?: number
+  confirmUrlBeforeDial?: string
 }): Promise<TestRun> {
   const r = await fetch(`${base}/tests/callcenter-task`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(p),
@@ -120,6 +122,7 @@ export const getCallCenterTaskStatus = async (taskCode: string): Promise<TaskAct
 export async function runCallBotTask(p: {
   name: string; taskType?: number; robotCode?: string; salesScriptCode?: string
   customerGroup?: string; customerLimit?: number; numbers?: string[]; waitSec?: number
+  confirmUrlBeforeDial?: string
 }): Promise<TestRun> {
   const r = await fetch(`${base}/tests/callbot`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(p),
@@ -274,6 +277,20 @@ export const queryCallbacks = (f?: { source?: string; event?: string; orgCode?: 
   const q = new URLSearchParams(Object.entries(f || {}).filter(([, v]) => v) as [string, string][])
   return getJSON<{ callbacks: CallbackRecord[] }>(`/callbacks?${q}`)
 }
+
+// ===== 通用 HTTP Mock =====
+export const listHTTPMocks = () => getJSON<{ endpoints: HTTPMockEndpoint[] }>('/http-mocks')
+export const getHTTPMock = (id: number) => getJSON<HTTPMockEndpoint>(`/http-mocks/${id}`)
+export const createHTTPMock = (endpoint: HTTPMockEndpoint) => postJSON<HTTPMockEndpoint>('/http-mocks', endpoint)
+export const updateHTTPMock = (id: number, endpoint: HTTPMockEndpoint) => putJSON<HTTPMockEndpoint>(`/http-mocks/${id}`, endpoint)
+export const deleteHTTPMock = (id: number) => delJSONBody<{ ok: boolean }>(`/http-mocks/${id}`)
+export const listHTTPMockRequests = (id: number, f?: { method?: string; matchedRule?: string; selectedCase?: string; keyword?: string; limit?: number }) => {
+  const q = new URLSearchParams()
+  Object.entries(f || {}).forEach(([k, v]) => { if (v !== undefined && v !== '') q.set(k, String(v)) })
+  return getJSON<{ requests: HTTPMockRequestRecord[] }>(`/http-mocks/${id}/requests${q.toString() ? `?${q}` : ''}`)
+}
+export const clearHTTPMockRequests = (id: number) =>
+  delJSONBody<{ ok: boolean; deleted: number }>(`/http-mocks/${id}/requests?confirm=true`)
 
 // ===== 策略流应用层 mock 编排（透传 hermes-stratflow /openapi/mock）=====
 import type {

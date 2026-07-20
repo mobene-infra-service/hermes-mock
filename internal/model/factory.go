@@ -130,6 +130,8 @@ func (f *RepositoryFactory) migrateSchema(db *gorm.DB) error {
 		&entity.TraceLeg{},
 		&entity.TraceEvent{},
 		&entity.Callback{},
+		&entity.HTTPMockEndpoint{},
+		&entity.HTTPMockRequest{},
 		&entity.OrgConfig{},
 	); err != nil {
 		return err

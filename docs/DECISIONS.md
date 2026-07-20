@@ -7,6 +7,30 @@
 
 ---
 
+## 2026-07-17 · HTTP Mock 概率响应复用命名 Case 权重池
+
+- **背景**：首版后端已经能按 method/query/header/jsonBody/rawBody 分流，但前端只在列表突出 Allowed Methods，并把 Cases/Rules 暴露成大段 JSON；使用者无法直观看出“什么参数命中什么响应”，也不知道显式 Case、FULL 覆盖等调用方式。另需在同一请求条件下模拟放行/阻断/错误/超时的概率分布。
+- **决策**：
+  1. Allowed Methods 只定义准入，不承担结果分流；页面用结构化条件编辑器明确展示 Query/Header/JSON Body/Raw Body/Method 五类来源、六种操作符、AND 条件和 priority 首条命中语义。
+  2. 概率结果不复制响应体，统一复用命名 Case。Endpoint 新增 `defaultWeightedCases`，Rule 新增与旧 `case` 二选一的 `weightedCases`；权重是相对值（8:2 即 80%:20%），不强制合计 100，避免修改一项时必须同步重算全部百分比。
+  3. 最终优先级保持兼容：FULL 字段覆盖 ＞ 显式 Case ＞ 首条规则（固定/概率）＞ 未命中策略（固定默认/概率）。显式 Case 可把随机场景固定下来，保证问题复现和自动化测试稳定。
+  4. 调用记录新增 `selection_mode/selected_weight/total_weight`，与既有 `selected_case` 一起记录本次随机事实；仍属于 `OBSERVE_TTL_DAYS` 观测域并支持 Endpoint 级手工清空。
+  5. 前端 Endpoint 行可展开查看完整“条件 → 结果”，并提供带实际调用 URL 的直接调用、参数匹配、概率、显式 Case、FULL 覆盖示例；不再要求使用者先读代码或手写 Rules JSON 才能理解能力。
+  6. 群呼/call-bot 表单选择内置 Endpoint/Case 时直接回填控制面返回的完整 `invokeUrl`，使用者在提交前即可确认最终域名。手工输入 `/mock/{token}` 时，任务 API 服务端仍兜底补成完整 URL，优先显式 `HTTP_MOCK_PUBLIC_BASE_URL`，否则取当前请求的 forwarded proto/host，保证非前端调用同样生效。
+- **边界影响**：仍是单 Endpoint 的可控测试桩，不做跨请求状态机、粘性分桶、录制回放或流量代理。每次概率选择独立随机；需要确定结果时使用显式 Case。
+
+## 2026-07-17 · 通用 HTTP Mock 使用「短 Token 数据面 + 内存规则 + 异步观测」
+
+- **背景**：call-center 与 call-bot 已有 `confirmUrlBeforeDial`，但 Hermes 只在 HTTP 200 且响应体**精确等于裸文本 `false`**时阻断；超时、非 200、异常和其它响应全部 fail-open。需求不是再造一个拨打前确认专用业务域，而是提供一个可复用、能按调用参数定制响应/超时的通用 HTTP 测试桩。
+- **决策**：
+  1. 数据面统一为短地址 `ANY /mock/{token}`；控制面 `/api/http-mocks/**` 管理 Endpoint、查询/清理调用记录。短 token 避免 call-bot `confirm_url_before_dial` 150 字符限制，并降低被随意枚举概率。
+  2. Endpoint 支持默认响应 + 命名 case + 按 method/query/header/jsonBody/rawBody 的有序规则；本次控制权限分 `NONE / CASE_ONLY / FULL`，最终优先级为 FULL 标量覆盖 ＞ 显式 `__mock_case`/`X-Mock-Case` ＞ 首条参数规则 ＞ 默认响应。Body 始终原样写出，不做 JSON 二次序列化。
+  3. 配置持久化到 `mock_http_endpoint`，启动加载并常驻内存，数据面不查库；调用记录写 `mock_http_request`，通过 4096 有界队列异步落库。队列满宁可丢观测并告警，也不阻塞/改变实际响应。
+  4. 调用记录纳入 `OBSERVE_TTL_DAYS` 分批清理，并支持按 Endpoint 显式 `confirm=true` 手工清空；删除 Endpoint 级联删除其记录。Authorization/Cookie/API Key 类 Header 落库前脱敏，请求体限制 1 MiB，响应配置 body 限 512 KiB，延迟/超时上限 30 秒，禁止自定义 Content-Length/Transfer-Encoding 等传输层 Header。
+  5. 群呼/call-bot 表单只做薄接入：可选已有 Endpoint 或手填 `confirmUrlBeforeDial`，原样透传 Hermes；通用 HTTP Mock 不理解或代理 Hermes 业务。配置确认 URL 的 call-bot 任务不再把「未出现 SIP 腿」直接判失败，因为 `false` 阻断本身可能就是预期，确认事实看 HTTP Mock 记录、放行事实看 SIP 记录。
+- **边界影响**：这是测试控制面辅助能力，与 SIP 被叫腿正交；不改变「后端只演客户被叫腿」铁律，也不扩张为 API 网关、流量代理或生产服务虚拟化平台。`HTTP_MOCK_PUBLIC_BASE_URL` 可显式给出 Hermes 服务可达基地址；空时仅按当前 HTTP 请求 host 推导。
+- **验证**：规则/case/FULL 覆盖、JSON path/Query/Header/RawBody 匹配、危险响应 Header 拒绝、运行接口原始 `false`、敏感 Header 脱敏、异步记录及 TTL 旧删新留均有 Go 测试；Go 全量测试/vet/build 与前端 TypeScript/Vite 构建通过。真实 call-center/call-bot Pod 到 mock 的网络可达性仍需部署环境 E2E。
+
 ## 2026-07-13 · SIP 守卫升级：白名单之外的三层纵深防御（不依赖 IP 清单）
 
 - **背景**：2026-06-29 的来源白名单能挡扫描，但要人工维护 FS/Kamailio 网段，网络一变就漏；用户明确「不想只靠白名单」。且原实现只挡 INVITE 业务处理，UA 指纹、非法被叫等扫描特征未利用。

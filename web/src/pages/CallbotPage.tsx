@@ -5,6 +5,7 @@ import { ScenarioHeader } from '../components/scenario/ScenarioHeader'
 import { CallRows, ResultBanner, callsOf, parseKV, parseList, type BannerVerdict } from '../components/scenario/utils'
 import ScenarioRecords from '../components/scenario/ScenarioRecords'
 import { InfoBanner } from '../components/layout/InfoBanner'
+import { HttpMockURLInput } from '../components/HttpMockURLInput'
 import { useScenarioMeta } from '../hooks/useScenarioMeta'
 import { runAutoCall, runCallBotTask, testRuns } from '../api'
 import type { TestRun } from '../api'
@@ -51,7 +52,7 @@ export default function CallbotPage() {
   const runBot = async () => {
     let v: {
       name: string; taskType?: number; robotCode?: string; salesScriptCode?: string
-      waitSec?: number; customerGroup?: string; customerLimit?: number; numbers?: string
+      waitSec?: number; customerGroup?: string; customerLimit?: number; numbers?: string; confirmUrlBeforeDial?: string
     }
     try {
       v = await botForm.validateFields()
@@ -63,7 +64,9 @@ export default function CallbotPage() {
       const r = await runCallBotTask({ ...v, numbers: parseList(v.numbers) })
       setBotRun(r)
       setDrawerOpen(false)
-      message[r.ok ? 'success' : 'error'](r.ok ? 'call-bot 任务已观测到客户腿' : 'call-bot 任务未通过')
+      message[r.ok ? 'success' : 'error'](r.ok
+        ? (v.confirmUrlBeforeDial ? 'call-bot 任务已受理；确认结果请查看 HTTP Mock 调用记录' : 'call-bot 任务已观测到客户腿')
+        : 'call-bot 任务未通过')
     } catch (e) {
       message.error(String(e))
     } finally {
@@ -141,6 +144,16 @@ export default function CallbotPage() {
             <TextArea rows={3} />
           </Form.Item>
         </Col>
+        <Col span={24}>
+          <Form.Item
+            name="confirmUrlBeforeDial"
+            label="拨打前确认（通用 HTTP Mock / 自定义 URL）"
+            tooltip="可直接选择「HTTP Mock」页创建的 Endpoint，也可手填完整 URL 或 /mock/{token} 相对路径。若 Mock 返回裸 false 阻断，本次任务不会产生 SIP 客户腿。"
+            rules={[{ max: 150, message: 'call-bot confirm_url_before_dial 输入值最长 150 字符' }]}
+          >
+            <HttpMockURLInput placeholder="可空；选择 Mock 结果或手输 URL / /mock/{token}" />
+          </Form.Item>
+        </Col>
       </Row>
     </Form>
   )
@@ -178,6 +191,7 @@ export default function CallbotPage() {
   const latest = [botRun, autoRun].filter(Boolean).sort((a, b) =>
     new Date(b!.startedAt).getTime() - new Date(a!.startedAt).getTime())[0] || null
   const latestLabel = latest && latest === autoRun ? '自动外呼' : 'call-bot 任务'
+  const latestConfirmUrl = (latest?.artifacts?.confirmUrlBeforeDial as string | undefined) || ''
   const v = runVerdict(latest, latestLabel)
 
   return (
@@ -234,6 +248,11 @@ export default function CallbotPage() {
           <Text type="secondary" style={{ fontSize: 12, display: 'block', margin: '10px 0' }}>
             展开任一通看协商编解码 / RTP 收发·丢包 / DTMF 采集 / 挂断码
           </Text>
+          {latestConfirmUrl && (
+            <InfoBanner title="本任务启用了拨打前确认">
+              确认请求、参数命中与最终响应请到「HTTP Mock」页面查看；返回裸 false 时不会产生 SIP 客户腿。URL：<Text code copyable>{latestConfirmUrl}</Text>
+            </InfoBanner>
+          )}
           <CallRows calls={v.cs} />
         </>
       ) : (

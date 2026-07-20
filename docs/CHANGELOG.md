@@ -3,6 +3,17 @@
 > 本项目改动按主题记录（倒序，最新在上）。决策原因见 [DECISIONS.md](DECISIONS.md)，当前状态见 [STATUS.md](STATUS.md)。
 ---
 
+## 2026-07-17
+
+- **HTTP Mock 可理解性与概率响应改造**：Endpoint 编辑器由 Cases/Rules 原始 JSON 改为结构化表单；Allowed Method 明确仅做准入，规则可视化配置 Query/Header/JSON Body/Raw Body/Method、AND 条件和优先级。列表展开直接展示“请求条件 → 固定/概率结果”，每个 Endpoint 新增带真实 URL 的直接调用、参数匹配、显式 Case、FULL 覆盖和概率说明。
+- **默认/规则级概率池**：命名 Case 可按相对权重参与未命中默认分流或某条规则命中后的分流，allow/deny/error/timeout/延迟均可组合；显式 Case 仍优先以便稳定复测。调用记录新增选择模式和命中权重，继续随 `OBSERVE_TTL_DAYS` 自动清理并支持手工清空。
+- **群呼/call-bot 拨打前确认联动**：两处创建任务表单在原有位置使用可选可输的通用 HTTP Mock 下拉输入；选择 Endpoint/Case 后直接回填完整 `invokeUrl`，下拉文案不再显示「当前域名」。手填 `/mock/{token}` 相对路径时，服务端仍在任务入口统一补全：优先 `HTTP_MOCK_PUBLIC_BASE_URL`，否则使用当前请求的 `X-Forwarded-Proto/X-Forwarded-Host` 或 Host。
+- **概率改造验证**：`go test ./...`、`go vet ./...`、Go build、`go test -race ./internal/{httpmock,api,model}`、TypeScript/Vite build、embed 一致性与 `git diff --check` 通过。本地 SQLite 真实 HTTP 跑 200 次默认 3:1 得到 149/51、200 次规则级 1:1 得到 101/99；显式 Case 稳定返回 `E|503`，调用记录正确保存 `DEFAULT_WEIGHTED/RULE_WEIGHTED/EXPLICIT_CASE` 和权重。验证数据已通过 Endpoint 级清理并删除临时实例；当前无可连接浏览器实例，未做页面点击截图。
+- **新增通用 HTTP Mock**：数据面 `ANY /mock/{token}`，控制面 `/api/http-mocks/**`；支持默认响应、命名 case、method/query/header/jsonBody/rawBody 参数规则，以及 `NONE/CASE_ONLY/FULL` 调用方覆盖。可自定义原始 body、状态码、Content-Type、安全响应 Header、延迟和保持连接超时；内置 allow/deny/timeout/error 示例。配置常驻内存，调用记录通过有界队列异步落 `mock_http_request`，敏感 Header 脱敏，队列拥塞不影响真实响应。
+- **调用记录治理**：新增 `mock_http_endpoint`/`mock_http_request`，调用记录接入既有 `OBSERVE_TTL_DAYS` 分批清理；页面支持按 Endpoint 手工确认清空，删除 Endpoint 同步删除记录。DDL 快照、AutoMigrate 实体与 TTL 回归测试已同步。
+- **拨打前确认接入**：call-center 群呼和 call-bot 任务表单可选择已有 HTTP Mock Endpoint 或手填 URL，`confirmUrlBeforeDial` 原样透传；call-bot 配置确认 URL 后不再把无 SIP 腿直接判失败。新增 `/http-mock` 页面管理 Endpoint 和展开查看每次请求/命中规则/最终响应。
+- **验证**：`go test ./...`、`go vet ./...`、`go build ./cmd/hermes-mock`、`go test -race ./internal/{httpmock,api,model}`、`npm --prefix web run build`、embed 一致性与 `git diff --check` 通过；本地 SQLite 实例经真实 HTTP 完成 create→规则 deny(`false|200`)→默认 allow(`true|200`)→error case(`busy|503`)→3s timeout 被 1s 客户端取消→4 条调用记录落库→手工清空剩 0。Vite 仅保留既有 chunk size warning；当前会话无可用浏览器实例，页面点击/截图未验；`npm run lint` 因仓库未安装 `eslint` 命令无法执行。真实 Hermes 服务到 `HTTP_MOCK_PUBLIC_BASE_URL` 的网络连通与 allow/deny/timeout E2E 待部署验证。
+
 ## 2026-07-13
 
 - **SIP 入口守卫升级（不依赖 IP 清单的纵深防御）**：新增 `internal/sipguard.Guard`，在原来源白名单之外叠加三层，供 sipagent 应答决策与 siptrace 落库过滤共用（丢弃的请求也不进 DB）：① 扫描器 UA 指纹拒收（`SIP_DENY_USER_AGENTS`，默认含 friendly-scanner/sipvicious/sipcli 等）；② 严格被叫校验（`SIP_STRICT_CALLEE`，被叫号不在集群配置内即丢弃，「配置即白名单」）；③ 违规计数自动临时封禁（`SIP_BAN_THRESHOLD`/`SIP_BAN_MINUTES`，按违规计数而非速率，白名单内来源永不被封）。来源白名单保持「没配置就不限制 IP」。新增 `cluster.KnownNumber`。验证：`go build`/`go vet`/`gofmt`/`go test ./...` 全绿（新增 sipguard 表驱动测试 + KnownNumber 测试）。残余风险：diago/sipgo 事务层对被丢弃请求仍可能自动回响应，公网部署仍需安全组收口 SIP 端口。

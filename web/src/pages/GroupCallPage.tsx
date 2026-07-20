@@ -4,11 +4,13 @@ import {
 } from 'antd'
 import { PlusOutlined } from '@ant-design/icons'
 import { ScenarioHeader } from '../components/scenario/ScenarioHeader'
+import { InfoBanner } from '../components/layout/InfoBanner'
 import { CallRows, ResultBanner, callsOf, parseList, type BannerVerdict } from '../components/scenario/utils'
 import ScenarioRecords from '../components/scenario/ScenarioRecords'
 import { useScenarioMeta } from '../hooks/useScenarioMeta'
 import { useReadyAgents } from '../hooks/useReadyAgents'
 import { usePolling } from '../hooks/usePolling'
+import { HttpMockURLInput } from '../components/HttpMockURLInput'
 import { LINE_TYPE_OPTIONS, MODE_STRATEGY_OPTIONS, SORT_METHOD_OPTIONS, TRANSFER_TYPE_OPTIONS } from '../constants/enums'
 import {
   cancelCallCenterTask, getCallCenterTaskStatus, listManagedAgents, pauseCallCenterTask, queryCallRecords,
@@ -43,6 +45,7 @@ interface GroupCallForm {
   endDate?: string
   dialTimePeriod?: string
   lineType?: string
+  confirmUrlBeforeDial?: string
   waitSec?: number
   observeAgent?: string
   numbers?: string
@@ -68,6 +71,7 @@ export default function GroupCallPage() {
   const [liveCalls, setLiveCalls] = useState<CallView[] | null>(null) // 轮询刷新的实时通话状态（覆盖 run 快照）
   const [taskBusy, setTaskBusy] = useState(false) // 暂停/恢复/取消任务请求中
   const taskCode = (ccRun?.artifacts?.taskCode as string | undefined) || '' // Hermes 任务 code（暂停/取消用）
+  const confirmUrlBeforeDial = (ccRun?.artifacts?.confirmUrlBeforeDial as string | undefined) || ''
   const [assignMode, setAssignMode] = useState<'group' | 'numbers'>('group') // 坐席分配二选一
   const [drawerOpen, setDrawerOpen] = useState(false) // 新建任务配置抽屉
   const [managedAgents, setManagedAgents] = useState<ManagedAgent[]>([]) // 坐席号数据源
@@ -464,6 +468,16 @@ export default function GroupCallPage() {
                               <Input.TextArea rows={1} maxLength={300} />
                             </Form.Item>
                           </Col>
+                          <Col span={24}>
+                            <Form.Item
+                              name="confirmUrlBeforeDial"
+                              label="拨打前确认（通用 HTTP Mock / 自定义 URL）"
+                              tooltip="可直接选择「HTTP Mock」页创建的 Endpoint，也可手填完整 URL 或 /mock/{token} 相对路径。Hermes 仅在 HTTP 200 且响应体精确为 false 时阻断。"
+                              rules={[{ max: 150, message: '为兼容 call-bot 数据库字段，输入值最长 150 字符' }]}
+                            >
+                              <HttpMockURLInput placeholder="可空；选择 Mock 结果或手输 URL / /mock/{token}" />
+                            </Form.Item>
+                          </Col>
                         </Row>
                       ),
                     }]}
@@ -513,6 +527,11 @@ export default function GroupCallPage() {
               {taskCode ? <>任务 <Text code copyable style={{ fontSize: 12 }}>{taskCode}</Text> · </> : null}
               预测式分批拨号{pending > 0 ? '，每 3s 刷新被叫腿进展' : '（已全部出结果，停止刷新）'}（展开任一通看协商编解码 / RTP 收发·丢包 / DTMF / 挂断码）
             </Text>
+            {confirmUrlBeforeDial && (
+              <InfoBanner title="本任务启用了拨打前确认">
+                被 HTTP Mock 返回裸 false 阻断的号码不会产生 SIP 客户腿，因此可能保持“等待呼入”；确认请求、命中规则和响应结果请到「HTTP Mock」页面查看。URL：<Text code copyable>{confirmUrlBeforeDial}</Text>
+              </InfoBanner>
+            )}
             <div style={{ maxHeight: 560, overflowY: 'auto' }}>
               <CallRows calls={cs} />
             </div>

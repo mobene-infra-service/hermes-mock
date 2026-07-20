@@ -95,6 +95,9 @@ type CallCenterTaskReq struct {
 	DialTimePeriod []string `json:"dialTimePeriod"`
 	// LineType 线路类型（Hermes 7cbb285：任务期间仅用该 type 线路选号；空=默认 base）。
 	LineType string `json:"lineType"`
+
+	// ConfirmURLBeforeDial 拨打前确认完整 URL；API 层已将 /mock/{token} 相对路径按公开基地址/当前域名补全。
+	ConfirmURLBeforeDial string `json:"confirmUrlBeforeDial"`
 }
 
 // CallbackFilter 回调查询过滤器。
@@ -105,4 +108,15 @@ type CallbackFilter struct {
 	CallUUID string
 	Keyword  string
 	Limit    int
+}
+
+// HTTPMockRequestFilter 通用 HTTP Mock 调用记录筛选。
+type HTTPMockRequestFilter struct {
+	EndpointID   int64
+	Token        string
+	Method       string
+	MatchedRule  string
+	SelectedCase string
+	Keyword      string
+	Limit        int
 }

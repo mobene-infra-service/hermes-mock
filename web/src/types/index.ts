@@ -29,6 +29,90 @@ export interface AudioFile {
   size: number
 }
 
+// ===== 通用 HTTP Mock =====
+export type HTTPMockAction = 'RESPOND' | 'TIMEOUT'
+export type HTTPMockOverridePolicy = 'NONE' | 'CASE_ONLY' | 'FULL'
+export type HTTPMockConditionSource = 'method' | 'query' | 'header' | 'jsonBody' | 'rawBody'
+export type HTTPMockConditionOperator = 'EQ' | 'NE' | 'IN' | 'CONTAINS' | 'PREFIX' | 'EXISTS'
+
+export interface HTTPMockResponseSpec {
+  action?: HTTPMockAction
+  status?: number
+  contentType?: string
+  headers?: Record<string, string>
+  body?: string
+  delayMs?: number
+  timeoutMs?: number
+}
+
+export interface HTTPMockCondition {
+  source: HTTPMockConditionSource
+  field?: string
+  operator: HTTPMockConditionOperator
+  value?: unknown
+}
+
+export interface HTTPMockWeightedCase {
+  case: string
+  weight: number
+}
+
+export interface HTTPMockRule {
+  name: string
+  priority?: number
+  conditions: HTTPMockCondition[]
+  case?: string
+  weightedCases?: HTTPMockWeightedCase[]
+}
+
+export interface HTTPMockEndpointConfig {
+  allowedMethods?: string[]
+  overridePolicy?: HTTPMockOverridePolicy
+  defaultResponse: HTTPMockResponseSpec
+  defaultWeightedCases?: HTTPMockWeightedCase[]
+  cases?: Record<string, HTTPMockResponseSpec>
+  rules?: HTTPMockRule[]
+}
+
+export interface HTTPMockEndpoint {
+  id?: number
+  token?: string
+  name: string
+  enabled: boolean
+  config: HTTPMockEndpointConfig
+  remark?: string
+  gmtCreate?: string
+  gmtModified?: string
+  invokePath?: string
+  invokeUrl?: string
+}
+
+export interface HTTPMockRequestRecord {
+  id: number
+  endpointId: number
+  token: string
+  receivedAt: string
+  remote: string
+  method: string
+  path: string
+  queryJson: string
+  headersJson: string
+  requestBody: string
+  matchedRule: string
+  selectedCase: string
+  selectionMode: string
+  selectedWeight: number
+  totalWeight: number
+  overrideJson: string
+  responseAction: string
+  responseStatus: number
+  responseHeadersJson: string
+  responseBody: string
+  delayMs: number
+  durationMs: number
+  clientCanceled: boolean
+}
+
 // ===== 通话链路可观测（SIP 信令 / ESL / WS / 桥接 时间线）=====
 export type TraceChannel = 'SIP' | 'ESL' | 'WS' | 'BRIDGE' | 'FLOW'
 

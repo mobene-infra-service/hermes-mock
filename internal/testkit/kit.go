@@ -86,7 +86,7 @@ type Kit struct {
 // 用接口解耦，避免 testkit 硬依赖 orchestrator 的全部类型。
 type BizCaller interface {
 	CallCenterTask(req entity.CallCenterTaskReq) ([]byte, error)
-	CallBotTask(name string, taskType int, numbers []string, robot, script string) ([]byte, error)
+	CallBotTask(name string, taskType int, numbers []string, robot, script, confirmURLBeforeDial string) ([]byte, error)
 	AutoCall(templateCode string, numbers []string) ([]byte, error)
 	OTP(to, templateCode string, params map[string]string) ([]byte, error)
 }
@@ -368,7 +368,9 @@ type CallCenterTaskParams struct {
 	DialTimePeriod           []string `json:"dialTimePeriod"`
 	// LineType 线路类型（Hermes 7cbb285：任务期间仅用该 type 线路选号；空=默认 base）。
 	LineType string `json:"lineType"`
-	WaitSec  int    `json:"waitSec"` // 已不再同步等待（建任务即返回，客户腿/坐席腿进展交前端轮询）；保留字段兼容前端传参
+	// ConfirmURLBeforeDial 拨打前确认完整 URL（API 层会补全通用 /mock/{token} 相对路径）。
+	ConfirmURLBeforeDial string `json:"confirmUrlBeforeDial"`
+	WaitSec              int    `json:"waitSec"` // 已不再同步等待（建任务即返回，客户腿/坐席腿进展交前端轮询）；保留字段兼容前端传参
 }
 
 // toReq 把测试用例参数装配成 Hermes 群呼请求（号码已在调用前 resolve 好）。
@@ -384,6 +386,7 @@ func (p CallCenterTaskParams) toReq() entity.CallCenterTaskReq {
 		BestRingDuration: p.BestRingDuration, AgentMaxRingDuration: p.AgentMaxRingDuration,
 		AssignDelaySeconds: p.AssignDelaySeconds, TransferType: p.TransferType, Description: p.Description,
 		StartDate: p.StartDate, EndDate: p.EndDate, DialTimePeriod: p.DialTimePeriod, LineType: p.LineType,
+		ConfirmURLBeforeDial: p.ConfirmURLBeforeDial,
 	}
 }
 
@@ -410,6 +413,9 @@ func (k *Kit) RunCallCenterTaskObserved(p CallCenterTaskParams) Run {
 	r.Artifacts["customerGroup"] = p.CustomerGroup
 	r.Artifacts["taskName"] = p.Name
 	r.Artifacts["orgCode"] = p.OrgCode
+	if p.ConfirmURLBeforeDial != "" {
+		r.Artifacts["confirmUrlBeforeDial"] = p.ConfirmURLBeforeDial
+	}
 
 	// Step 1: 经业务接口建任务并启动
 	k.bus.Emit(sess, "", tracelog.ChanFlow, tracelog.DirOut, "群呼任务",
@@ -689,14 +695,15 @@ func (k *Kit) RunAutoCallObserved(p AutoCallParams) Run {
 
 // CallBotTaskParams call-bot 任务用例：建机器人任务并导入客户号，断言客户腿进 mock。
 type CallBotTaskParams struct {
-	Name          string   `json:"name"`
-	TaskType      int      `json:"taskType"` // 1=IVR 2=AI_CALL
-	Robot         string   `json:"robotCode"`
-	Script        string   `json:"salesScriptCode"`
-	CustomerGroup string   `json:"customerGroup"`
-	CustomerLimit int      `json:"customerLimit"`
-	Numbers       []string `json:"numbers"`
-	WaitSec       int      `json:"waitSec"`
+	Name                 string   `json:"name"`
+	TaskType             int      `json:"taskType"` // 1=IVR 2=AI_CALL
+	Robot                string   `json:"robotCode"`
+	Script               string   `json:"salesScriptCode"`
+	CustomerGroup        string   `json:"customerGroup"`
+	CustomerLimit        int      `json:"customerLimit"`
+	Numbers              []string `json:"numbers"`
+	ConfirmURLBeforeDial string   `json:"confirmUrlBeforeDial"`
+	WaitSec              int      `json:"waitSec"`
 }
 
 // RunCallBotTaskObserved 触发 call-bot 任务并断言客户腿进 mock。
@@ -724,16 +731,27 @@ func (k *Kit) RunCallBotTaskObserved(p CallBotTaskParams) Run {
 	r.Artifacts["customerGroup"] = p.CustomerGroup
 	r.Artifacts["taskName"] = p.Name
 	r.Artifacts["taskCode"] = p.Robot
+	if p.ConfirmURLBeforeDial != "" {
+		r.Artifacts["confirmUrlBeforeDial"] = p.ConfirmURLBeforeDial
+	}
 
 	k.bus.Emit(sess, "", tracelog.ChanFlow, tracelog.DirOut, "call-bot任务",
 		fmt.Sprintf("建 call-bot 任务 %s：%d 客户号", p.Name, len(p.Numbers)), nil)
-	out, err := k.orch.CallBotTask(p.Name, p.TaskType, p.Numbers, p.Robot, p.Script)
+	out, err := k.orch.CallBotTask(p.Name, p.TaskType, p.Numbers, p.Robot, p.Script, p.ConfirmURLBeforeDial)
 	if err != nil {
 		r.Steps = append(r.Steps, Step{Name: "创建 call-bot 任务", OK: false, Detail: err.Error() + " " + clip(string(out), 200)})
-		r.Calls = k.callViewsForCustomers(start, p.Numbers, "callbot-task", "", "")
 		return k.finish(r, start)
 	}
 	r.Steps = append(r.Steps, Step{Name: "创建 call-bot 任务", OK: true, Detail: "Hermes 已受理：" + clip(string(out), 160)})
+	if p.ConfirmURLBeforeDial != "" {
+		// 通用 HTTP Mock 可能按规则返回 false/超时/错误；此时“没有 SIP 腿”本身可能正是预期。
+		// 不再把 60s 内未见 200 OK 武断判失败，后续在 HTTP Mock 调用记录与 SIP 记录中分别观测。
+		r.Steps = append(r.Steps, Step{
+			Name: "观测拨打前确认", OK: true,
+			Detail: "已配置 confirmUrlBeforeDial；确认请求/响应看 HTTP Mock 调用记录，放行后的客户腿看 SIP 通话记录",
+		})
+		return k.finish(r, start)
+	}
 
 	if hit, ev := k.waitAnyLegInviteOK(start, p.Numbers, time.Duration(p.WaitSec)*time.Second); !ev.Answered {
 		r.Steps = append(r.Steps, Step{Name: "断言 客户腿接通", OK: false,

@@ -16,17 +16,18 @@ const pruneBatch = 5000
 
 // PruneObservations 删除 started_at/ts 早于 before 的观测行，返回删除总行数。
 // 每张表分批循环删，直到删完或 ctx 到期（到期则本轮删多少算多少，余量下轮继续，不算失败）。
-// 删除顺序：先事件（量最大）→ 呼叫记录 → 链路腿 → 回调。
+// 删除顺序：先事件（量最大）→ HTTP Mock 调用记录 → 呼叫记录 → 链路腿 → 回调。
 func (r *GormRepository) PruneObservations(ctx context.Context, before time.Time) (int64, error) {
 	var total int64
 	steps := []struct {
 		model any
 		cond  string
 	}{
-		{&entity.TraceEvent{}, "ts < ?"},       // 按 ts（已加 idx_event_ts，走索引）
-		{&entity.MockCall{}, "started_at < ?"}, // 按 started_at（有复合索引含 started_at）
-		{&entity.TraceLeg{}, "started_at < ?"}, // 按 started_at（idx_leg_time）
-		{&entity.Callback{}, "ts < ?"},         // 按 ts（idx_cb_ts）
+		{&entity.TraceEvent{}, "ts < ?"},               // 按 ts（已加 idx_event_ts，走索引）
+		{&entity.HTTPMockRequest{}, "received_at < ?"}, // 按 received_at（idx_http_req_received）
+		{&entity.MockCall{}, "started_at < ?"},         // 按 started_at（有复合索引含 started_at）
+		{&entity.TraceLeg{}, "started_at < ?"},         // 按 started_at（idx_leg_time）
+		{&entity.Callback{}, "ts < ?"},                 // 按 ts（idx_cb_ts）
 	}
 	for _, s := range steps {
 		n, err := r.pruneTable(ctx, s.model, s.cond, before)

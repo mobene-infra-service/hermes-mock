@@ -113,15 +113,19 @@ type fakeBiz struct {
 	cbCalled  bool
 	acCalled  bool
 	otpCalled bool
+	ccConfirm string
+	cbConfirm string
 }
 
 func (f *fakeBiz) CallCenterTask(req entity.CallCenterTaskReq) ([]byte, error) {
 	f.ccCalled = true
+	f.ccConfirm = req.ConfirmURLBeforeDial
 	f.inject(req.Numbers)
 	return []byte(`{"data":"TASK1"}`), nil
 }
-func (f *fakeBiz) CallBotTask(name string, taskType int, numbers []string, robot, script string) ([]byte, error) {
+func (f *fakeBiz) CallBotTask(name string, taskType int, numbers []string, robot, script, confirmURLBeforeDial string) ([]byte, error) {
 	f.cbCalled = true
+	f.cbConfirm = confirmURLBeforeDial
 	f.inject(numbers)
 	return []byte(`{"data":"BOT1"}`), nil
 }
@@ -180,9 +184,13 @@ func TestRunCallCenterTaskObserved(t *testing.T) {
 	k.SetBizCaller(fb)
 	r := k.RunCallCenterTaskObserved(CallCenterTaskParams{
 		OrgCode: "ORG1", Name: "t1", Numbers: []string{"8613800000001"}, AgentGroups: []string{"agA"}, WaitSec: 3,
+		ConfirmURLBeforeDial: "http://mock/mock/cc",
 	})
 	if !fb.ccCalled {
 		t.Error("应调用业务群呼接口")
+	}
+	if fb.ccConfirm != "http://mock/mock/cc" {
+		t.Errorf("群呼 confirmUrlBeforeDial 未透传: %q", fb.ccConfirm)
 	}
 	if !r.OK {
 		t.Errorf("观测到客户腿应通过, steps=%+v", r.Steps)
@@ -225,6 +233,23 @@ func TestRunCallBotTaskObserved(t *testing.T) {
 	}
 	if !r.OK || len(r.Calls) == 0 {
 		t.Errorf("观测到客户腿应通过并返回 calls, run=%+v", r)
+	}
+}
+
+func TestRunCallBotTaskWithConfirmURLDoesNotRequireSIPLeg(t *testing.T) {
+	bus := tracelog.New()
+	k := New(&config.Config{}, bus, nil)
+	fb := &fakeBiz{bus: bus} // 故意不注入 SIP 腿：false 阻断时这是正常结果。
+	k.SetBizCaller(fb)
+	r := k.RunCallBotTaskObserved(CallBotTaskParams{
+		Name: "bot-confirm", TaskType: 2, Numbers: []string{"8613900000005"},
+		ConfirmURLBeforeDial: "http://mock/mock/cb", WaitSec: 1,
+	})
+	if !r.OK || fb.cbConfirm != "http://mock/mock/cb" {
+		t.Fatalf("confirmUrl 应透传且不强制 SIP 断言: run=%+v confirm=%q", r, fb.cbConfirm)
+	}
+	if len(r.Calls) != 0 {
+		t.Fatalf("未确定 allow/deny 前不应伪造 SIP 结果: %+v", r.Calls)
 	}
 }
 

@@ -23,6 +23,7 @@
  │ orchestrator: 经 Hermes OpenAPI 让 Hermes 业务侧发起外呼（call-center/bot/OTP） │
  │ siptrace+tracelog: 传输层抓真实 SIP 报文，按 Call-ID 聚合成链路时间线（落库）     │
  │ calltrace/callbacks: 每通被叫 / Hermes 回调 落库（mock_call_record / mock_callback）│
+│ httpmock: 通用 /mock/{token}，按请求参数/概率返回 status/header/body/延迟/超时 │
  └────────────────────────▲───────────────────────────────────────────────┘
               真实 SIP/RTP │（Hermes 线路 t_line.address 指向 mock）
  ┌────────────────────────┴───────────────────────────────────────────────┐
@@ -32,7 +33,7 @@
 
 一通业务测试的主线：**配客户行为（DB）→ 在「重点通话场景」页选场景触发 → Hermes 业务侧外呼到 mock 线路 → mock 按行为应答 → 采集真实 SIP + 落 mock_call_record → 断言通过/失败**。
 
-## 前端（6 个页面）
+## 前端页面
 
 | 页面 | 作用 |
 |---|---|
@@ -43,12 +44,13 @@
 | **重点通话场景** | 由 Hermes 业务侧发起、mock 扮客户被叫：call-center 群呼 / call-bot 任务 / OTP / 呼叫记录 + **坐席外呼（前端 jssip）**，另含 line-call 底层 SIP 冒烟 |
 | **通话链路** | 会话列表 + 事件时间线（可展开真实 SIP 报文 + 业务头），多腿按 callUuid 合并 |
 | **Hermes回调** | 接收并查询 Hermes webhook（回调地址需在 Hermes 侧配置指向 mock） |
+| **HTTP Mock** | 通用 HTTP Endpoint：结构化配置 Query/Header/JSON Body 等参数规则、固定/概率 Case、单次覆盖和调用记录；群呼/call-bot 可选择 Endpoint/Case 或手输，`/mock/{token}` 会按公开基地址/当前域名自动补全 |
 
 ## 技术栈
 
 - 后端：Go 1.24 + [emiago/sipgo](https://github.com/emiago/sipgo)（SIP）+ [emiago/diago](https://github.com/emiago/diago)（UAS/SDP/RTP/RFC4733 DTMF/playback）+ Gin + GORM
 - 前端：React 18 + Vite + Ant Design，`//go:embed` 进单二进制
-- 持久化：独立库 `hermes_mock`（客户集群 / 呼叫记录 / 链路 / 回调 / 机构配置），**不含任何 Hermes 业务表**
+- 持久化：独立库 `hermes_mock`（客户集群 / 呼叫记录 / 链路 / 回调 / HTTP Mock / 机构配置），**不含任何 Hermes 业务表**
 
 ## 目录结构
 
@@ -70,6 +72,7 @@ DDL：`deploy/ddl/hermes_mock.sql`（建 `hermes_mock` 库及各表）。
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `HTTP_PORT` | 18080 | 配置后台 / API 端口 |
+| `HTTP_MOCK_PUBLIC_BASE_URL` | 空（按请求 host 推导） | `/mock/{token}` 提供给 Hermes/其它服务访问的基地址；跨网络部署建议显式配可达内网/公网地址 |
 | `SIP_LISTEN_IP` / `SIP_LISTEN_PORT` / `SIP_LISTEN_PORTS` | 0.0.0.0 / 15060 / 15060,15061,...,15069 | 被叫 SIP 监听；多端口用逗号分隔，默认监听 10 个入口端口，为空时兼容单端口 `SIP_LISTEN_PORT` |
 | `SIP_TRANSPORT` / `CODECS` | udp / PCMU,PCMA | SIP 传输 / SDP 编解码 |
 | `EXTERNAL_IP` | 自动 | 对 FS 暴露的可达 IP（写入 SDP/Contact）；多网卡/host network 部署建议显式设置，如 `172.16.7.27` |

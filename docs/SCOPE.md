@@ -70,3 +70,12 @@ mock 按预设的"客户行为档"应答，并采集真实 SIP 报文 + 落库�
 要点：stratflow 应用层 mock 与 hermes-mock 被叫腿是**同一通触达的互斥 mock**——开 stratflow mock 则**不产真实 SIP**（走事件层合成回执），
 用 hermes-mock 被叫腿则须关 stratflow mock。故本能力测的是**策略图分支/回执逻辑**，不测 SIP/媒体。它是控制台、不是被叫腿核心，
 **不得**长成 stratflow 完整管理台。详见 [DECISIONS.md](DECISIONS.md) 2026-07-08 条 + [hermes/stratflow-mock-openapi-spec.md](hermes/stratflow-mock-openapi-spec.md)。
+
+## 七、边界注：通用 HTTP Mock（测试控制面辅助）
+
+`/http-mock` 页 + `ANY /mock/{token}` 提供一个可编程 HTTP 测试桩：按 method/query/header/jsonBody/rawBody 参数选择固定响应或命名 Case 权重池，
+也可对未命中规则的请求按权重随机 Case，或通过显式 Case / FULL 覆盖控制 status、headers、原始 body、延迟与超时。首个用途是给 call-center/call-bot 的
+`confirmUrlBeforeDial` 提供拨打前确认，但接口本身不绑定 Hermes 业务模型，可供其它 webhook/HTTP 联调用例复用。
+
+这项能力属于「测试控制面/外部依赖桩」，不改变两条 SIP 铁律：mock 后端仍不主动发起通话、不做 B2BUA、不模拟坐席话路。
+它也**不是**通用 API 网关、流量代理、录制回放平台或生产服务虚拟化平台；只做命名 Endpoint 的可控响应（固定/条件规则/权重随机）与轻量调用记录。

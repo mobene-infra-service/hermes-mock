@@ -2,6 +2,7 @@ import {
   DashboardOutlined, NodeIndexOutlined, ClusterOutlined, CustomerServiceOutlined,
   BankOutlined, BellOutlined, TeamOutlined, RobotOutlined, SafetyCertificateOutlined,
   PhoneOutlined, ApiOutlined, PartitionOutlined,
+  CodeOutlined,
 } from '@ant-design/icons'
 import type { ReactNode } from 'react'
 
@@ -43,6 +44,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       { key: '/trace', label: '通话链路', icon: <NodeIndexOutlined />, group: '观测' },
       { key: '/callbacks', label: 'Hermes 回调', icon: <BellOutlined />, group: '观测' },
+      { key: '/http-mock', label: 'HTTP Mock', icon: <CodeOutlined />, group: '观测' },
     ],
   },
 ]

@@ -27,6 +27,7 @@ import (
 	"hermes-mock/internal/config"
 	"hermes-mock/internal/entity"
 	"hermes-mock/internal/hermesopenapi"
+	"hermes-mock/internal/httpmock"
 	"hermes-mock/internal/model"
 	"hermes-mock/internal/orchestrator"
 	"hermes-mock/internal/orgcfg"
@@ -37,20 +38,21 @@ import (
 
 // Deps 聚合 HTTP 层依赖。mock 只演被叫客户线路：不主动呼出、不模拟坐席。
 type Deps struct {
-	Cfg     *config.Config
-	Repo    model.Repository
-	Cluster *cluster.Store
-	Tracker *calltrace.Tracker
-	Kit     *testkit.Kit
-	Bus     *tracelog.Bus
-	Orgs    *orgcfg.Store
-	CB      *callbacks.Store
-	Orch    *orchestrator.Orchestrator
+	Cfg      *config.Config
+	Repo     model.Repository
+	Cluster  *cluster.Store
+	Tracker  *calltrace.Tracker
+	Kit      *testkit.Kit
+	Bus      *tracelog.Bus
+	Orgs     *orgcfg.Store
+	CB       *callbacks.Store
+	HTTPMock *httpmock.Store
+	Orch     *orchestrator.Orchestrator
 }
 
 // Register 注册 REST 路由。
-func Register(r *gin.Engine, cfg *config.Config, repo model.Repository, clu *cluster.Store, tracker *calltrace.Tracker, kit *testkit.Kit, bus *tracelog.Bus, orgs *orgcfg.Store, cb *callbacks.Store, orch *orchestrator.Orchestrator) {
-	d := &Deps{Cfg: cfg, Repo: repo, Cluster: clu, Tracker: tracker, Kit: kit, Bus: bus, Orgs: orgs, CB: cb, Orch: orch}
+func Register(r *gin.Engine, cfg *config.Config, repo model.Repository, clu *cluster.Store, tracker *calltrace.Tracker, kit *testkit.Kit, bus *tracelog.Bus, orgs *orgcfg.Store, cb *callbacks.Store, hm *httpmock.Store, orch *orchestrator.Orchestrator) {
+	d := &Deps{Cfg: cfg, Repo: repo, Cluster: clu, Tracker: tracker, Kit: kit, Bus: bus, Orgs: orgs, CB: cb, HTTPMock: hm, Orch: orch}
 	g := r.Group("/api")
 	g.GET("/health", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ok", "mode": cfg.Mode}) })
 
@@ -76,6 +78,16 @@ func Register(r *gin.Engine, cfg *config.Config, repo model.Repository, clu *clu
 	// Hermes 回调接收（webhook）+ 查询筛选。回调地址需在 Hermes 侧配置指向 mock。
 	g.POST("/callbacks/:source", d.receiveCallback)
 	g.GET("/callbacks", d.queryCallbacks)
+
+	// 通用 HTTP Mock 控制面；数据面是短地址 ANY /mock/:token。
+	g.GET("/http-mocks", d.listHTTPMocks)
+	g.POST("/http-mocks", d.createHTTPMock)
+	g.GET("/http-mocks/:id", d.getHTTPMock)
+	g.PUT("/http-mocks/:id", d.updateHTTPMock)
+	g.DELETE("/http-mocks/:id", d.deleteHTTPMock)
+	g.GET("/http-mocks/:id/requests", d.listHTTPMockRequests)
+	g.DELETE("/http-mocks/:id/requests", d.deleteHTTPMockRequests)
+	r.Any("/mock/:token", d.invokeHTTPMock)
 	// mock 自有呼叫记录（任务预期 + 真实 SIP 观测聚合），不从 Hermes 拉记录。
 	g.GET("/call-records", d.queryCallRecords)
 	g.POST("/call-records", d.saveCallRecord) // 前端坐席软电话外呼结束回存坐席侧记录 + 断言
@@ -627,6 +639,12 @@ func (d *Deps) runCallBot(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	confirmURL, err := d.resolveConfirmURL(c, s.ConfirmURLBeforeDial)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	s.ConfirmURLBeforeDial = confirmURL
 	c.JSON(http.StatusOK, d.Kit.RunCallBotTaskObserved(s))
 }
 
@@ -647,6 +665,12 @@ func (d *Deps) runCallCenterTask(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	confirmURL, err := d.resolveConfirmURL(c, s.ConfirmURLBeforeDial)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	s.ConfirmURLBeforeDial = confirmURL
 	c.JSON(http.StatusOK, d.Kit.RunCallCenterTaskObserved(s))
 }
 

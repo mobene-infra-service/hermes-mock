@@ -53,6 +53,35 @@ func TestBehaviorProfileUpsertIdempotent(t *testing.T) {
 	}
 }
 
+func TestHTTPMockEndpointCRUDAndRequestCascade(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := context.Background()
+	endpoint := entity.HTTPMockEndpoint{
+		Token: "tok-crud", Name: "HTTP Mock", Enabled: true,
+		ConfigJSON: `{"defaultResponse":{"status":200,"body":"true"}}`,
+	}
+	if err := repo.UpsertHTTPMockEndpoint(ctx, &endpoint); err != nil {
+		t.Fatal(err)
+	}
+	if endpoint.ID == 0 {
+		t.Fatal("endpoint ID 未回填")
+	}
+	if err := repo.CreateHTTPMockRequest(ctx, &entity.HTTPMockRequest{
+		EndpointID: endpoint.ID, Token: endpoint.Token, ReceivedAt: time.Now(), Method: "POST",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.DeleteHTTPMockEndpoint(ctx, endpoint.ID); err != nil {
+		t.Fatal(err)
+	}
+	if endpoints, _ := repo.ListHTTPMockEndpoints(ctx); len(endpoints) != 0 {
+		t.Fatalf("endpoint 未删除: %+v", endpoints)
+	}
+	if requests, _ := repo.ListHTTPMockRequests(ctx, entity.HTTPMockRequestFilter{EndpointID: endpoint.ID}); len(requests) != 0 {
+		t.Fatalf("调用记录未级联删除: %+v", requests)
+	}
+}
+
 // 通话记录：按 record_id upsert + 字段合并（状态只进不退）；过滤查询分页。
 func TestCallRecordSaveMergeAndList(t *testing.T) {
 	repo := newTestRepo(t)
@@ -249,15 +278,26 @@ func TestPruneObservations(t *testing.T) {
 	if err := repo.UpsertBehaviorProfile(ctx, &entity.BehaviorProfile{Code: "keep", Outcome: "ANSWER", AnswerRatio: 100}); err != nil {
 		t.Fatal(err)
 	}
+	// HTTP Mock endpoint 是配置不清理；调用记录旧删新留。
+	hm := entity.HTTPMockEndpoint{Token: "tok-keep", Name: "keep", Enabled: true, ConfigJSON: `{"defaultResponse":{"status":200,"body":"ok"}}`}
+	if err := repo.UpsertHTTPMockEndpoint(ctx, &hm); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateHTTPMockRequest(ctx, &entity.HTTPMockRequest{EndpointID: hm.ID, Token: hm.Token, ReceivedAt: old, Method: "POST"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateHTTPMockRequest(ctx, &entity.HTTPMockRequest{EndpointID: hm.ID, Token: hm.Token, ReceivedAt: fresh, Method: "POST"}); err != nil {
+		t.Fatal(err)
+	}
 
 	before := now.Add(-7 * 24 * time.Hour)
 	n, err := repo.PruneObservations(ctx, before)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 删除：oldCall + oldLeg + oldLeg 的事件 = 3 行
-	if n != 3 {
-		t.Errorf("应删 3 行（旧呼叫+旧腿+旧事件），got %d", n)
+	// 删除：oldCall + oldLeg + oldLeg 的事件 + old HTTP Mock request = 4 行
+	if n != 4 {
+		t.Errorf("应删 4 行（旧呼叫+旧腿+旧事件+旧 HTTP Mock 调用），got %d", n)
 	}
 	calls, _, _ := repo.ListCallRecords(ctx, entity.CallRecordFilter{PageSize: 10})
 	if len(calls) != 1 || calls[0].RecordID != "freshCall" {
@@ -271,5 +311,11 @@ func TestPruneObservations(t *testing.T) {
 	}
 	if profs, _ := repo.ListBehaviorProfiles(ctx); len(profs) != 1 {
 		t.Errorf("配置表不应被清理, got %d", len(profs))
+	}
+	if endpoints, _ := repo.ListHTTPMockEndpoints(ctx); len(endpoints) != 1 {
+		t.Errorf("HTTP Mock 配置表不应被清理, got %d", len(endpoints))
+	}
+	if requests, _ := repo.ListHTTPMockRequests(ctx, entity.HTTPMockRequestFilter{EndpointID: hm.ID}); len(requests) != 1 || !requests[0].ReceivedAt.Equal(fresh) {
+		t.Errorf("HTTP Mock 调用记录应只剩新记录: %+v", requests)
 	}
 }

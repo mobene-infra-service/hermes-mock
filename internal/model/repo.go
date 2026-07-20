@@ -53,13 +53,21 @@ type Repository interface {
 	CreateCallback(ctx context.Context, row *entity.Callback) error
 	ListCallbacks(ctx context.Context, f entity.CallbackFilter) ([]entity.Callback, error)
 
+	// ---- 通用 HTTP Mock ----
+	ListHTTPMockEndpoints(ctx context.Context) ([]entity.HTTPMockEndpoint, error)
+	UpsertHTTPMockEndpoint(ctx context.Context, row *entity.HTTPMockEndpoint) error
+	DeleteHTTPMockEndpoint(ctx context.Context, id int64) error
+	CreateHTTPMockRequest(ctx context.Context, row *entity.HTTPMockRequest) error
+	ListHTTPMockRequests(ctx context.Context, f entity.HTTPMockRequestFilter) ([]entity.HTTPMockRequest, error)
+	DeleteHTTPMockRequests(ctx context.Context, endpointID int64) (int64, error)
+
 	// ---- 机构 OpenAPI 接入配置 ----
 	ListOrgConfigs(ctx context.Context) ([]entity.OrgConfig, error)
 	UpsertOrgConfig(ctx context.Context, c *entity.OrgConfig) error
 	DeleteOrgConfig(ctx context.Context, orgCode string) error
 
 	// ---- 观测数据治理 ----
-	// PruneObservations 删除 started_at/ts 早于 before 的观测行（mock_call / mock_trace_leg / mock_trace_event / mock_callback），
+	// PruneObservations 删除 started_at/ts 早于 before 的观测行（mock_call / mock_trace_* / mock_callback / mock_http_request），
 	// 防长期膨胀。返回各表删除行数之和。配置表不受影响。
 	PruneObservations(ctx context.Context, before time.Time) (int64, error)
 }

@@ -300,3 +300,61 @@ CREATE TABLE `mock_callback` (
   KEY `idx_cb_call_uuid` (`call_uuid`),
   KEY `idx_cb_source_event` (`source`, `event`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='mock 收到的 Hermes 回调';
+
+-- ============================================================
+-- mock_http_endpoint：通用 HTTP Mock 配置。
+-- /mock/{token} 数据面只读内存快照；config_json 存 method/规则/case/响应定义。
+-- ============================================================
+DROP TABLE IF EXISTS `mock_http_endpoint`;
+CREATE TABLE `mock_http_endpoint` (
+  `id`           bigint unsigned NOT NULL AUTO_INCREMENT,
+  `token`        varchar(32)  NOT NULL                    COMMENT '数据面短 token（/mock/{token}）',
+  `name`         varchar(128) NOT NULL DEFAULT ''         COMMENT 'Endpoint 名称',
+  `enabled`      tinyint      NOT NULL DEFAULT 1,
+  `config_json`  json         NOT NULL                    COMMENT 'allowedMethods/overridePolicy/defaultResponse/defaultWeightedCases/cases/rules',
+  `remark`       varchar(255) NOT NULL DEFAULT '',
+  `gmt_create`   datetime     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `gmt_modified` datetime     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_http_mock_token` (`token`),
+  KEY `idx_http_mock_name` (`name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='通用 HTTP Mock Endpoint 配置';
+
+-- ============================================================
+-- mock_http_request：通用 HTTP Mock 调用观测记录。
+-- 数据面通过有界异步队列写入；属于观测域，随 OBSERVE_TTL_DAYS 分批清理。
+-- ============================================================
+DROP TABLE IF EXISTS `mock_http_request`;
+CREATE TABLE `mock_http_request` (
+  `id`                    bigint unsigned NOT NULL AUTO_INCREMENT,
+  `endpoint_id`           bigint       NOT NULL DEFAULT 0,
+  `token`                 varchar(32)  NOT NULL DEFAULT '',
+  `received_at`           datetime(3)  NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  `remote`                varchar(64)  NOT NULL DEFAULT '',
+  `method`                varchar(16)  NOT NULL DEFAULT '',
+  `path`                  varchar(255) NOT NULL DEFAULT '',
+  `query_json`            mediumtext   NULL,
+  `headers_json`          mediumtext   NULL,
+  `request_body`          mediumtext   NULL,
+  `matched_rule`          varchar(128) NOT NULL DEFAULT '',
+  `selected_case`         varchar(64)  NOT NULL DEFAULT '',
+  `selection_mode`        varchar(24)  NOT NULL DEFAULT '' COMMENT 'DEFAULT/RULE_FIXED/DEFAULT_WEIGHTED/RULE_WEIGHTED/EXPLICIT_CASE',
+  `selected_weight`       int          NOT NULL DEFAULT 0,
+  `total_weight`          int          NOT NULL DEFAULT 0,
+  `override_json`         text         NULL,
+  `response_action`       varchar(16)  NOT NULL DEFAULT 'RESPOND',
+  `response_status`       int          NOT NULL DEFAULT 200,
+  `response_headers_json` text         NULL,
+  `response_body`         mediumtext   NULL,
+  `delay_ms`              int          NOT NULL DEFAULT 0,
+  `duration_ms`           bigint       NOT NULL DEFAULT 0,
+  `client_canceled`       tinyint      NOT NULL DEFAULT 0,
+  PRIMARY KEY (`id`),
+  KEY `idx_http_req_received` (`received_at`),
+  KEY `idx_http_req_endpoint_time` (`endpoint_id`, `received_at`),
+  KEY `idx_http_req_token_time` (`token`, `received_at`),
+  KEY `idx_http_req_method` (`method`),
+  KEY `idx_http_req_rule` (`matched_rule`),
+  KEY `idx_http_req_case` (`selected_case`),
+  KEY `idx_http_req_selection` (`selection_mode`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='通用 HTTP Mock 调用记录';

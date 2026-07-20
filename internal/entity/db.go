@@ -256,6 +256,54 @@ type Callback struct {
 
 func (Callback) TableName() string { return "mock_callback" }
 
+// ---- 通用 HTTP Mock ----
+
+// HTTPMockEndpoint 一条可编程 HTTP Mock 配置。
+// 运行时通过短 token 暴露 /mock/{token}；具体 method/规则/响应配置整体存 config_json，
+// 由 internal/httpmock 做强类型校验与内存快照，避免每次调用查库。
+type HTTPMockEndpoint struct {
+	ID          int64     `json:"id" gorm:"column:id;primaryKey;autoIncrement"`
+	Token       string    `json:"token" gorm:"column:token;size:32;uniqueIndex:uk_http_mock_token"`
+	Name        string    `json:"name" gorm:"column:name;size:128;index:idx_http_mock_name"`
+	Enabled     bool      `json:"enabled" gorm:"column:enabled"`
+	ConfigJSON  string    `json:"-" gorm:"column:config_json;type:json"`
+	Remark      string    `json:"remark" gorm:"column:remark;size:255"`
+	GmtCreate   time.Time `json:"gmtCreate" gorm:"column:gmt_create;autoCreateTime"`
+	GmtModified time.Time `json:"gmtModified" gorm:"column:gmt_modified;autoUpdateTime"`
+}
+
+func (HTTPMockEndpoint) TableName() string { return "mock_http_endpoint" }
+
+// HTTPMockRequest 一次 /mock/{token} 调用的观测记录。
+// 写入通过有界异步队列完成，绝不能阻塞数据面响应；记录属于观测域，随 OBSERVE_TTL_DAYS 清理。
+type HTTPMockRequest struct {
+	ID                  int64     `json:"id" gorm:"column:id;primaryKey;autoIncrement"`
+	EndpointID          int64     `json:"endpointId" gorm:"column:endpoint_id;index:idx_http_req_endpoint_time"`
+	Token               string    `json:"token" gorm:"column:token;size:32;index:idx_http_req_token_time"`
+	ReceivedAt          time.Time `json:"receivedAt" gorm:"column:received_at;index:idx_http_req_received;index:idx_http_req_endpoint_time;index:idx_http_req_token_time"`
+	Remote              string    `json:"remote" gorm:"column:remote;size:64"`
+	Method              string    `json:"method" gorm:"column:method;size:16;index:idx_http_req_method"`
+	Path                string    `json:"path" gorm:"column:path;size:255"`
+	QueryJSON           string    `json:"queryJson" gorm:"column:query_json;type:mediumtext"`
+	HeadersJSON         string    `json:"headersJson" gorm:"column:headers_json;type:mediumtext"`
+	RequestBody         string    `json:"requestBody" gorm:"column:request_body;type:mediumtext"`
+	MatchedRule         string    `json:"matchedRule" gorm:"column:matched_rule;size:128;index:idx_http_req_rule"`
+	SelectedCase        string    `json:"selectedCase" gorm:"column:selected_case;size:64;index:idx_http_req_case"`
+	SelectionMode       string    `json:"selectionMode" gorm:"column:selection_mode;size:24;index:idx_http_req_selection"`
+	SelectedWeight      int       `json:"selectedWeight" gorm:"column:selected_weight"`
+	TotalWeight         int       `json:"totalWeight" gorm:"column:total_weight"`
+	OverrideJSON        string    `json:"overrideJson" gorm:"column:override_json;type:text"`
+	ResponseAction      string    `json:"responseAction" gorm:"column:response_action;size:16"`
+	ResponseStatus      int       `json:"responseStatus" gorm:"column:response_status"`
+	ResponseHeadersJSON string    `json:"responseHeadersJson" gorm:"column:response_headers_json;type:text"`
+	ResponseBody        string    `json:"responseBody" gorm:"column:response_body;type:mediumtext"`
+	DelayMs             int       `json:"delayMs" gorm:"column:delay_ms"`
+	DurationMs          int64     `json:"durationMs" gorm:"column:duration_ms"`
+	ClientCanceled      bool      `json:"clientCanceled" gorm:"column:client_canceled"`
+}
+
+func (HTTPMockRequest) TableName() string { return "mock_http_request" }
+
 // ---- 机构 OpenAPI 接入配置 ----
 
 // OrgConfig 一个机构的接入配置（对应 mock_org_config）。

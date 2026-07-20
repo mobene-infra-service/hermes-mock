@@ -16,6 +16,7 @@ import (
 	"hermes-mock/internal/calltrace"
 	"hermes-mock/internal/cluster"
 	"hermes-mock/internal/config"
+	"hermes-mock/internal/httpmock"
 	"hermes-mock/internal/model"
 	"hermes-mock/internal/orchestrator"
 	"hermes-mock/internal/orgcfg"
@@ -101,6 +102,13 @@ func main() {
 	kit.SetBizCaller(orch) // 让 testkit 能触发群呼/自动外呼任务并观测链路
 	// Hermes 回调接收（webhook）：回调地址需在 Hermes 侧配置指向 mock。
 	cbStore := callbacks.New(repo)
+	// 通用 HTTP Mock：配置常驻内存，调用记录有界异步落库（随 OBSERVE_TTL_DAYS 清理）。
+	httpMockStore, err := httpmock.New(repo)
+	if err != nil {
+		logrus.Fatalf("init HTTP mock store: %v", err)
+	}
+	defer httpMockStore.Close()
+	logrus.Infof("httpmock: 已载入 %d 个 Endpoint", len(httpMockStore.List()))
 
 	// 6. 启动 SIP agent（diago）：接收 FreeSWITCH 的 INVITE，按入口端口对应的客户集群行为应答（只演客户被叫腿）
 	sipPorts, err := cfg.ListenPorts()
@@ -125,7 +133,7 @@ func main() {
 	// 通话链路常态落库：定期把会话+事件刷到 mock_trace_*。TRACE_PERSIST=false 时只在内存观测、不落库。
 	go traceFlushLoop(repo, bus, cfg.TracePersist)
 
-	// 观测数据治理：周期清理早于 TTL 的呼叫记录/链路/回调，防长期膨胀。
+	// 观测数据治理：周期清理早于 TTL 的呼叫记录/链路/回调/HTTP Mock 调用记录，防长期膨胀。
 	go pruneLoop(repo, cfg.ObserveTTLDays)
 
 	// 7. HTTP：配置后台 + REST + 前端
@@ -134,7 +142,7 @@ func main() {
 	// RequestLogger 在外层：统一记录每个请求结果（含错误响应体），根治「接口报错却没日志」。
 	// Recovery 在内层：就地恢复 panic（带堆栈落 Error），恢复后外层 RequestLogger 仍能记到最终 500。
 	r.Use(api.RequestLogger(), api.Recovery())
-	api.Register(r, cfg, repo, clu, tracker, kit, bus, orgStore, cbStore, orch)
+	api.Register(r, cfg, repo, clu, tracker, kit, bus, orgStore, cbStore, httpMockStore, orch)
 
 	distFS, _ := fs.Sub(webDist, "web/dist")
 	api.MountFrontend(r, distFS)
@@ -213,7 +221,7 @@ func traceFlushLoop(repo model.Repository, bus *tracelog.Bus, persist bool) {
 	}
 }
 
-// pruneLoop 周期清理早于 TTL 的观测数据（呼叫记录/链路/回调）。ttlDays<=0 表示不清理。
+// pruneLoop 周期清理早于 TTL 的观测数据（呼叫记录/链路/回调/HTTP Mock 调用记录）。ttlDays<=0 表示不清理。
 func pruneLoop(repo model.Repository, ttlDays int) {
 	if ttlDays <= 0 {
 		logrus.Info("观测数据保留无上限（OBSERVE_TTL_DAYS<=0），跳过周期清理")

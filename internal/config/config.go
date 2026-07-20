@@ -14,6 +14,9 @@ import (
 type Config struct {
 	// ---- HTTP / Web 配置后台 ----
 	HTTPPort int `env:"HTTP_PORT" envDefault:"18080"`
+	// HTTP Mock 数据面给外部服务访问的基地址（如 http://172.16.7.27:18080）。
+	// 空时管理 API 按当前请求的 forwarded proto/host 推导；跨网络部署建议显式配置。
+	HTTPMockPublicBaseURL string `env:"HTTP_MOCK_PUBLIC_BASE_URL" envDefault:""`
 
 	// ---- SIP agent（diago，被叫 UAS）----
 	// FS 把 INVITE 发到这里；mock 作被叫按客户集群行为应答。
