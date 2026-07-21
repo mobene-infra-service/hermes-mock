@@ -27,8 +27,8 @@ func TestStratflowRoutesRegister(t *testing.T) {
 			got++
 		}
 	}
-	if got != 20 {
-		t.Fatalf("期望 20 条 stratflow 路由，实际 %d", got)
+	if got != 21 {
+		t.Fatalf("期望 21 条 stratflow 路由，实际 %d", got)
 	}
 }
 
@@ -96,6 +96,9 @@ func TestSfControlRejectsInvalidInputBeforeResolvingClient(t *testing.T) {
 		{"delivery invalid bool", http.MethodPut, "/delivery?paused=maybe", func(d *Deps, c *gin.Context) { d.sfSetDeliveryPaused(c) }},
 		{"clear missing confirm", http.MethodDelete, "/all?scope=all", func(d *Deps, c *gin.Context) { d.sfClearMock(c) }},
 		{"clear invalid scope", http.MethodDelete, "/all?scope=unknown", func(d *Deps, c *gin.Context) { d.sfClearMock(c) }},
+		{"decisions missing run", http.MethodGet, "/decisions", func(d *Deps, c *gin.Context) { d.sfListDecisions(c) }},
+		{"decisions invalid page", http.MethodGet, "/decisions?runCode=R1&pageNo=0", func(d *Deps, c *gin.Context) { d.sfListDecisions(c) }},
+		{"decisions invalid status", http.MethodGet, "/decisions?runCode=R1&status=UNKNOWN", func(d *Deps, c *gin.Context) { d.sfListDecisions(c) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

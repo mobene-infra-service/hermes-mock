@@ -80,12 +80,13 @@ func TestSfRunProgressParse(t *testing.T) {
 	}
 }
 
-// config 视图解析：steps=0 表示超时不回执；channel/forcedOutcome 可空。
+// config 视图解析：完整 Case、Schema 与逐 Case 预览须原样透传。
 func TestSfMockNodeViewParse(t *testing.T) {
-	raw := `[{"nodeId":"voicebot_1","type":"VOICEBOT_CALL","channel":"CALL","forcedOutcome":null,"baseDelayMs":0,
-	  "outcomes":[
-	    {"key":"CALL_ANSWERED_A","label":"接通·高意向","weight":70,"defaultWeight":50,"steps":1},
-	    {"key":"CALL_TIMEOUT_NO_RECEIPT","label":"超时无回执","weight":0,"defaultWeight":0,"steps":0}]}]`
+	raw := `[{"nodeId":"voicebot_1","type":"VoicebotCall","channel":"CALL","configured":true,
+	  "resultSchema":{"type":"CALL","statuses":["CONNECTED","NO_RECEIPT"],"ringStatuses":["answered"],"intentions":["A","Z"],"maxAttemptNo":3,"retryStepGapMs":800},
+	  "matchSchema":{"fields":[{"key":"segment","type":"string"}],"operators":{"string":["eq"]}},
+	  "config":{"forcedCaseKey":null,"cases":[{"key":"connected_z","name":"接通-Z","delayMs":1000,"result":{"type":"CALL","status":"CONNECTED","intention":"Z"}}],"defaultSelection":{"mode":"FIXED","caseKey":"connected_z"},"rules":[]},
+	  "previews":{"connected_z":{"steps":[{"delayMs":1000,"status":"CONNECTED","data":{"intention":"Z"}}],"actionFinal":"SUCCESS","nodePort":"out","expectedVars":{"intention":"Z"},"dynamicVars":[]}}}]`
 	var out []SfMockNodeView
 	if err := json.Unmarshal([]byte(raw), &out); err != nil {
 		t.Fatal(err)
@@ -93,8 +94,26 @@ func TestSfMockNodeViewParse(t *testing.T) {
 	if len(out) != 1 || out[0].NodeID != "voicebot_1" || out[0].Channel == nil || *out[0].Channel != "CALL" {
 		t.Fatalf("node 解析错: %+v", out)
 	}
-	if out[0].Outcomes[0].Weight != 70 || out[0].Outcomes[1].Steps != 0 {
-		t.Fatalf("outcome 解析错: %+v", out[0].Outcomes)
+	if !out[0].Configured || len(out[0].Config.Cases) != 1 || out[0].Config.Cases[0].Result.Intention == nil || *out[0].Config.Cases[0].Result.Intention != "Z" {
+		t.Fatalf("Case 解析错: %+v", out[0].Config)
+	}
+	if out[0].Previews["connected_z"].NodePort != "out" || out[0].ResultSchema.MaxAttemptNo == nil || *out[0].ResultSchema.MaxAttemptNo != 3 {
+		t.Fatalf("Schema/preview 解析错: %+v", out[0])
+	}
+	if err := validateTypedMockNode(out[0]); err != nil {
+		t.Fatalf("完整类型化响应不应被判为旧协议: %v", err)
+	}
+}
+
+func TestStratflowListConfigRejectsLegacyContract(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":[{"nodeId":"sms_1","type":"SmsSend","channel":"SMS","forcedOutcome":null,"baseDelayMs":0,"outcomes":[]}]}`))
+	}))
+	defer srv.Close()
+
+	_, err := New(Cred{Mode: "direct", OrgCode: "o1", StratflowURL: srv.URL}).StratflowListConfig(t.Context(), "V1")
+	if err == nil || !strings.Contains(err.Error(), "配置协议不兼容") || !strings.Contains(err.Error(), "cases/defaultSelection") {
+		t.Fatalf("旧协议应返回明确兼容错误，got %v", err)
 	}
 }
 
@@ -154,6 +173,64 @@ func TestStratflowListDeadPlansCarriesStatus(t *testing.T) {
 	}))
 	defer srv.Close()
 	if _, err := New(Cred{Mode: "direct", OrgCode: "o1", StratflowURL: srv.URL}).StratflowListPlansByStatus(t.Context(), "RUN", "DEAD"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStratflowListDecisionsCarriesPagingAndStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/openapi/mock/decisions" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		q := r.URL.Query()
+		if q.Get("runCode") != "RUN/1" || q.Get("status") != "DONE" || q.Get("pageNo") != "2" || q.Get("pageSize") != "50" {
+			t.Fatalf("decisions query 未完整透传: %s", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":{"records":[{"actionCode":"A1","runCode":"RUN/1","nodeId":"sms_1","entryCode":"E1","channel":"SMS","caseKey":"delivered","status":"DONE","noReceipt":false,"expectedVars":{},"actualVars":{},"routed":true}],"total":51,"pageNo":2,"pageSize":50}}`))
+	}))
+	defer srv.Close()
+	page, err := New(Cred{Mode: "direct", OrgCode: "o1", StratflowURL: srv.URL}).StratflowListDecisions(t.Context(), "RUN/1", "DONE", 2, 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 51 || page.PageNo != 2 || len(page.Records) != 1 || page.Records[0].CaseKey != "delivered" {
+		t.Fatalf("decisions page 解析错: %+v", page)
+	}
+}
+
+func TestStratflowPutTypedConfigRoundTrip(t *testing.T) {
+	caseKey := "connected_z"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/openapi/mock/config/V1/call_1" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var got SfMockNodeConfig
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatal(err)
+		}
+		if len(got.Cases) != 1 || got.Cases[0].Result.Intention == nil || *got.Cases[0].Result.Intention != "Z" {
+			t.Fatalf("Case JSON 丢字段: %+v", got)
+		}
+		if len(got.Rules) != 1 || got.Rules[0].Conditions[0].Value != "VIP" || got.DefaultSelection == nil || got.DefaultSelection.CaseKey == nil {
+			t.Fatalf("规则/默认选择 JSON 丢字段: %+v", got)
+		}
+		_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":null}`))
+	}))
+	defer srv.Close()
+	intention := "Z"
+	cfg := SfMockNodeConfig{
+		Cases: []SfMockCase{{
+			Key: caseKey, Name: "接通-Z", DelayMs: 1000,
+			Result: SfMockCaseResult{Type: "CALL", Status: "CONNECTED", Intention: &intention},
+		}},
+		DefaultSelection: &SfMockSelection{Mode: "FIXED", CaseKey: &caseKey},
+		Rules: []SfMockSelectionRule{{
+			Name: "VIP", Priority: 100,
+			Conditions: []SfMockMatchCondition{{Key: "customer_level", Type: "string", Op: "eq", Value: "VIP"}},
+			Selection:  SfMockSelection{Mode: "FIXED", CaseKey: &caseKey},
+		}},
+	}
+	if err := New(Cred{Mode: "direct", OrgCode: "o1", StratflowURL: srv.URL}).StratflowPutConfig(t.Context(), "V1", "call_1", cfg); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -3,6 +3,20 @@
 > 本项目改动按主题记录（倒序，最新在上）。决策原因见 [DECISIONS.md](DECISIONS.md)，当前状态见 [STATUS.md](STATUS.md)。
 ---
 
+## 2026-07-21
+
+- **StratFlow 名单批量生成与 CSV 导入**：`/stratflow-mock` 的「选名单导入触发 run」新增连续手机号批量生成，支持覆盖或追加、保留 `+`/前导零，单次上限 10000 条；逐行名单改为导入 Org 页面下载的 CSV 模板，而不是 JSON 文件。CSV 保留手机号文本，支持标准双引号/逗号/CRLF/BOM；已知字段按 Key/显示名归一，已知数组字段按 `|` 拆分，未在当前集合发现的表头和值也原样写入 `bizFields` 提交，由 Hermes 作最终字段契约判定。导入成功后同步号码区并保留每行业务字段作为本次提交事实源。公共业务字段 JSON 仅用于手填/批量生成号码时给全部号码赋同一对象。
+- **解析校验与验证**：CSV 前端只拦无法可靠组装 `rows` 的结构错误（重复/空表头、缺 phone、列数异常、引号未闭合）；不校验未知列、必填或字段类型。`test1` 等未知列、已知字段错误值和缺失值均原样提交，Hermes 是唯一字段契约裁判，其接受/拒绝结果由页面直接展示。11 个 Node 单测覆盖连续号码、公共字段、Org 模板 CSV、字段 Key/显示名、未知列透传、引号逗号、数组拆分和异常格式；用户提供的 `stratflow_019f69085a6a78edb1c16e425158de43_template.csv` 已实读解析为 `phone=10000000000`。异步文件读取和导入确认保留机构/名单 generation 护栏。`npm --prefix web run build`、`make sync-web && make verify-embed`、`go test ./...`、`go vet ./...`、`go build ./...` 与 `git diff --check` 通过（Vite 仅既有 chunk size warning）；lint 仍因仓库未安装 eslint 无法执行，当前无可连接浏览器实例。
+
+## 2026-07-20
+
+- **修复 StratFlow 触达节点展开白屏**：根因是 hermes-mock 已使用类型化 Case DTO，而测试环境 Hermes 仍返回旧 `forcedOutcome/weights/baseDelayMs` 协议；Go `encoding/json` 会把缺失的新字段静默解成 `config.cases=null`，前端展开时执行 `cases.map` 触发整页崩溃。现在 Go client 会拒绝旧协议并返回明确的“先同步部署 Hermes、清旧 `sf:mock:cfg:*`”错误；页面保留持久错误提示，节点编辑器另有最内层契约守卫，即使代理遗漏也不再白屏。新增旧协议拒绝与完整新协议放行测试；前端构建、embed 校验通过。
+- **StratFlow Mock 类型化 Case**：触达结果从后端固定 A/B/C 套餐改为可新增、复制、删除和编辑的 CALL/SMS Case；CALL 开放 A–Z、完整振铃类型、接通拨次、通话时长、取消/未拨打/无回执，SMS 开放错误码、描述和计费条数。每个 Case 返回具体回执步骤、预期变量和触达节点出口预览。
+- **名单字段规则与概率池**：新增 `forcedCaseKey → priority 首条 bizFields 规则 → defaultSelection` 选择链；规则内条件为 AND，命中结果和默认结果均支持固定或相对权重随机。字段契约提供下拉，也允许手填合法 key/类型；比较器与画布 Condition 同源，但规则只负责结果产生前选 Case，不配置业务分支。概率池明确只引用当前节点的命名 Case；新增概率项改为“选择已有 Case 加入概率池”的显式下拉，不再静默塞入第一个未使用 Case。节点编辑器同时标明当前 Case 来自 Hermes 默认模板还是已保存配置。
+- **决策历史治理**：Mock plan 最后一步完成后转 DONE，不再立即删除；无回执 Case 也保留选择事实。新增分页 decisions 接口和页面表格，展示规则、Case、权重、预期/实际变量与出口。DONE 默认保留 7 天并按索引分批清理，PENDING/DEAD 不参与 TTL；清场显式删除当前机构计划与历史。
+- **对抗式审查收口**：后端不再静默忽略 CALL/SMS 跨类型或当前状态无效字段；概率池在页面端保证至少一个且 Case 不重复，Case/规则名编辑使用稳定面板 identity 防止输入丢焦点；删除/改名 Case 会同步修复全部选择引用。决策翻页会废弃旧请求，强制选择不再误标成“默认选择”。新增 NO_RECEIPT 持久化、DONE-only TTL、fieldContract 冲突、决策分页 query 和完整配置 JSON round-trip 测试。
+- **验证**：Hermes 核心定向测试与编译通过；完整 `:hermes-stratflow:test` 共 642 项，其中 596 通过、30 跳过，16 个失败全部是 Testcontainers 在本机找不到 `/var/run/docker.sock` 的初始化错误，无业务断言失败。`go test ./...`、`go vet ./...`、`go build ./...`、TypeScript/Vite build、embed 一致性通过（仅既有 chunk size warning）。`npm run lint` 因仓库未声明/安装 eslint 可执行文件无法运行；当前无可用浏览器实例，页面真实点击/截图待部署环境补验。
+
 ## 2026-07-17
 
 - **HTTP Mock 可理解性与概率响应改造**：Endpoint 编辑器由 Cases/Rules 原始 JSON 改为结构化表单；Allowed Method 明确仅做准入，规则可视化配置 Query/Header/JSON Body/Raw Body/Method、AND 条件和优先级。列表展开直接展示“请求条件 → 固定/概率结果”，每个 Endpoint 新增带真实 URL 的直接调用、参数匹配、显式 Case、FULL 覆盖和概率说明。

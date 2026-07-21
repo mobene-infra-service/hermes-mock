@@ -10,7 +10,7 @@ import (
 
 // stratflow.go —— 对接 hermes-stratflow 应用层 mock 下游 OpenAPI（编排台数据面）。
 //
-// 契约权威源：hermes 仓 docs/stratflow-mock-openapi-spec.md（已落地）。本文件只做 Go 侧消费：
+// 契约权威源：hermes 仓 docs/reference/api-reference.md 的 hermes-stratflow Mock 小节。本文件只做 Go 侧消费：
 //   - mock 管理：gate 开关 / per-node 结局配置 / 在途计划观测 / 一键清空（/openapi/mock/*）
 //   - 发现：方案·版本·名单·字段·绑定·run 列表·run 进度（/openapi/mock/*，仅 mock-downstream.enabled 装配）
 //   - 触发：导名单生成 run（/openapi/collections/{code}/import）
@@ -31,30 +31,79 @@ type SfMockGateView struct {
 	ReceiptWindowSec int64             `json:"receiptWindowSec"`
 }
 
-// SfMockOutcomeView 某触达节点某结局的展示视图（有效权重 = 配置覆盖 > 默认；steps=0 表示超时不回执）。
-type SfMockOutcomeView struct {
-	Key           string `json:"key"`
-	Label         string `json:"label"`
-	Weight        int    `json:"weight"`
-	DefaultWeight int    `json:"defaultWeight"`
-	Steps         int    `json:"steps"`
+type SfMockCaseResult struct {
+	Type              string  `json:"type"`
+	Status            string  `json:"status"`
+	TerminalAttemptNo *int    `json:"terminalAttemptNo,omitempty"`
+	RetryRingStatus   *string `json:"retryRingStatus,omitempty"`
+	RingStatus        *string `json:"ringStatus,omitempty"`
+	Intention         *string `json:"intention,omitempty"`
+	TalkDurationSec   *int    `json:"talkDurationSec,omitempty"`
+	FailureReason     *string `json:"failureReason,omitempty"`
+	ErrorCode         *string `json:"errorCode,omitempty"`
+	ErrorDesc         *string `json:"errorDesc,omitempty"`
+	PartCount         *int    `json:"partCount,omitempty"`
 }
 
-// SfMockNodeView 某触达节点的 mock 配置视图。
-type SfMockNodeView struct {
-	NodeID        string              `json:"nodeId"`
-	Type          string              `json:"type"`
-	Channel       *string             `json:"channel"`
-	ForcedOutcome *string             `json:"forcedOutcome"`
-	BaseDelayMs   int64               `json:"baseDelayMs"`
-	Outcomes      []SfMockOutcomeView `json:"outcomes"`
+type SfMockCase struct {
+	Key     string           `json:"key"`
+	Name    string           `json:"name"`
+	DelayMs int64            `json:"delayMs"`
+	Result  SfMockCaseResult `json:"result"`
 }
 
-// SfMockNodeConfig per-node mock 配置（写：weights 覆盖默认权重 / forcedOutcome 恒采 / baseDelayMs 叠加延迟）。
+type SfMockWeightedCase struct {
+	CaseKey string `json:"caseKey"`
+	Weight  int    `json:"weight"`
+}
+
+type SfMockSelection struct {
+	Mode    string               `json:"mode"`
+	CaseKey *string              `json:"caseKey,omitempty"`
+	Choices []SfMockWeightedCase `json:"choices,omitempty"`
+}
+
+type SfMockMatchCondition struct {
+	Key      string  `json:"key"`
+	Type     string  `json:"type"`
+	ItemType *string `json:"itemType,omitempty"`
+	Op       string  `json:"op"`
+	Value    any     `json:"value,omitempty"`
+}
+
+type SfMockSelectionRule struct {
+	Name       string                 `json:"name"`
+	Priority   int                    `json:"priority"`
+	Conditions []SfMockMatchCondition `json:"conditions"`
+	Selection  SfMockSelection        `json:"selection"`
+}
+
+// SfMockNodeConfig 是一个节点的完整原子配置。
 type SfMockNodeConfig struct {
-	Weights       map[string]int `json:"weights"`
-	ForcedOutcome *string        `json:"forcedOutcome"`
-	BaseDelayMs   int64          `json:"baseDelayMs"`
+	ForcedCaseKey    *string               `json:"forcedCaseKey"`
+	Cases            []SfMockCase          `json:"cases"`
+	DefaultSelection *SfMockSelection      `json:"defaultSelection"`
+	Rules            []SfMockSelectionRule `json:"rules"`
+}
+
+type SfMockResultSchema struct {
+	Type           string   `json:"type"`
+	Statuses       []string `json:"statuses"`
+	RingStatuses   []string `json:"ringStatuses"`
+	Intentions     []string `json:"intentions"`
+	MaxAttemptNo   *int     `json:"maxAttemptNo"`
+	RetryStepGapMs *int64   `json:"retryStepGapMs"`
+}
+
+type SfMockMatchField struct {
+	Key      string  `json:"key"`
+	Type     string  `json:"type"`
+	ItemType *string `json:"itemType"`
+}
+
+type SfMockMatchSchema struct {
+	Fields    []SfMockMatchField  `json:"fields"`
+	Operators map[string][]string `json:"operators"`
 }
 
 // SfMockStep 一步回执（回放器据 delayMs 排到点）。
@@ -65,22 +114,78 @@ type SfMockStep struct {
 	Data          map[string]any `json:"data"`
 }
 
+type SfMockCasePreview struct {
+	Steps        []SfMockStep   `json:"steps"`
+	ActionFinal  string         `json:"actionFinal"`
+	NodePort     string         `json:"nodePort"`
+	ExpectedVars map[string]any `json:"expectedVars"`
+	DynamicVars  []string       `json:"dynamicVars"`
+}
+
+// SfMockNodeView 某触达节点的有效配置、可编辑 Schema 与逐 Case 编译预览。
+type SfMockNodeView struct {
+	NodeID       string                       `json:"nodeId"`
+	Type         string                       `json:"type"`
+	Channel      *string                      `json:"channel"`
+	Configured   bool                         `json:"configured"`
+	ResultSchema SfMockResultSchema           `json:"resultSchema"`
+	MatchSchema  SfMockMatchSchema            `json:"matchSchema"`
+	Config       SfMockNodeConfig             `json:"config"`
+	Previews     map[string]SfMockCasePreview `json:"previews"`
+}
+
 // SfMockActionPlan per-action 计划；DEAD 仍返回，便于观测和人工恢复。
 type SfMockActionPlan struct {
-	ActionCode string       `json:"actionCode"`
-	RunCode    string       `json:"runCode"`
-	NodeID     string       `json:"nodeId"`
-	EntryCode  string       `json:"entryCode"`
-	Channel    string       `json:"channel"`
-	OrgCode    string       `json:"orgCode"`
-	OutcomeKey string       `json:"outcomeKey"`
-	BaseMs     *int64       `json:"baseMs"`
-	Idx        *int         `json:"idx"`
-	Steps      []SfMockStep `json:"steps"`
-	Status     string       `json:"status"`
-	NextDueAt  string       `json:"nextDueAt"`
-	RetryCount int          `json:"retryCount"`
-	LastError  *string      `json:"lastError"`
+	ActionCode     string       `json:"actionCode"`
+	RunCode        string       `json:"runCode"`
+	NodeID         string       `json:"nodeId"`
+	EntryCode      string       `json:"entryCode"`
+	Channel        string       `json:"channel"`
+	OrgCode        string       `json:"orgCode"`
+	OutcomeKey     string       `json:"outcomeKey"`
+	OutcomeLabel   *string      `json:"outcomeLabel"`
+	SelectionMode  *string      `json:"selectionMode"`
+	MatchedRule    *string      `json:"matchedRule"`
+	SelectedWeight *int         `json:"selectedWeight"`
+	TotalWeight    *int         `json:"totalWeight"`
+	BaseMs         *int64       `json:"baseMs"`
+	Idx            *int         `json:"idx"`
+	Steps          []SfMockStep `json:"steps"`
+	Status         string       `json:"status"`
+	NextDueAt      string       `json:"nextDueAt"`
+	RetryCount     int          `json:"retryCount"`
+	LastError      *string      `json:"lastError"`
+}
+
+type SfMockDecision struct {
+	ActionCode     string         `json:"actionCode"`
+	RunCode        string         `json:"runCode"`
+	NodeID         string         `json:"nodeId"`
+	EntryCode      string         `json:"entryCode"`
+	Channel        string         `json:"channel"`
+	CaseKey        string         `json:"caseKey"`
+	CaseName       *string        `json:"caseName"`
+	SelectionMode  *string        `json:"selectionMode"`
+	MatchedRule    *string        `json:"matchedRule"`
+	SelectedWeight *int           `json:"selectedWeight"`
+	TotalWeight    *int           `json:"totalWeight"`
+	Status         string         `json:"status"`
+	NoReceipt      bool           `json:"noReceipt"`
+	ExpectedVars   map[string]any `json:"expectedVars"`
+	ExpectedPort   *string        `json:"expectedPort"`
+	ActualVars     map[string]any `json:"actualVars"`
+	ActualPort     *string        `json:"actualPort"`
+	Routed         bool           `json:"routed"`
+	SelectedAt     *string        `json:"selectedAt"`
+	CompletedAt    *string        `json:"completedAt"`
+	LastError      *string        `json:"lastError"`
+}
+
+type SfMockDecisionPage struct {
+	Records  []SfMockDecision `json:"records"`
+	Total    int64            `json:"total"`
+	PageNo   int64            `json:"pageNo"`
+	PageSize int64            `json:"pageSize"`
 }
 
 // SfWorkflow 授权方案列表项。
@@ -274,26 +379,56 @@ func (c *Client) StratflowSetReceiptWindow(ctx context.Context, seconds int64) (
 	return v, err
 }
 
-// StratflowListConfig 列某发布版本各触达节点的可 mock 结局词表 + 当前有效权重。
+// StratflowListConfig 列某发布版本各触达节点的类型化 Case 配置、编辑 Schema 与编译预览。
 func (c *Client) StratflowListConfig(ctx context.Context, versionCode string) ([]SfMockNodeView, error) {
 	var out []SfMockNodeView
 	err := c.sfCall(ctx, "GET", "/openapi/mock/config/"+url.PathEscape(versionCode), nil, &out)
-	return out, err
+	if err != nil {
+		return nil, err
+	}
+	for _, node := range out {
+		if err := validateTypedMockNode(node); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
-// StratflowPutConfig 写单节点 mock 配置（服务端校验结局键/权重/baseDelayMs 窗口）。
+// validateTypedMockNode 防止旧 Hermes 的 forcedOutcome/weights 响应被新 DTO 静默解成 nil，
+// 最终在前端展开节点时对 cases.map 触发整页白屏。旧协议不自动迁移，必须先同步部署 Hermes。
+func validateTypedMockNode(node SfMockNodeView) error {
+	if node.ResultSchema.Type == "" ||
+		node.ResultSchema.Statuses == nil ||
+		node.ResultSchema.RingStatuses == nil ||
+		node.ResultSchema.Intentions == nil ||
+		node.MatchSchema.Fields == nil ||
+		node.MatchSchema.Operators == nil ||
+		len(node.Config.Cases) == 0 ||
+		node.Config.DefaultSelection == nil ||
+		node.Config.Rules == nil ||
+		node.Previews == nil {
+		return fmt.Errorf(
+			"Hermes StratFlow Mock 配置协议不兼容：节点 %s 未返回类型化 cases/defaultSelection/schema/previews；"+
+				"请先部署配套 Hermes 后端并清理旧 sf:mock:cfg:* 配置",
+			node.NodeID,
+		)
+	}
+	return nil
+}
+
+// StratflowPutConfig 原子覆盖单节点完整配置（服务端校验 Case、规则、权重与回执窗口）。
 func (c *Client) StratflowPutConfig(ctx context.Context, versionCode, nodeID string, cfg SfMockNodeConfig) error {
 	path := "/openapi/mock/config/" + url.PathEscape(versionCode) + "/" + url.PathEscape(nodeID)
 	return c.sfCall(ctx, "PUT", path, cfg, nil)
 }
 
-// StratflowDeleteConfig 删单节点 mock 配置（回落默认权重）。
+// StratflowDeleteConfig 删单节点自定义配置（回落服务端默认模板）。
 func (c *Client) StratflowDeleteConfig(ctx context.Context, versionCode, nodeID string) error {
 	path := "/openapi/mock/config/" + url.PathEscape(versionCode) + "/" + url.PathEscape(nodeID)
 	return c.sfCall(ctx, "DELETE", path, nil, nil)
 }
 
-// StratflowClearMock 一键清空 mock 状态。涉及 plans 时必须由上游显式确认。
+// StratflowClearMock 一键清空 mock 状态。plans 同时包含在途计划与 DONE 决策历史，必须由上游显式确认。
 func (c *Client) StratflowClearMock(ctx context.Context, scope string, confirm bool) error {
 	if scope == "" {
 		scope = "all"
@@ -314,6 +449,21 @@ func (c *Client) StratflowListPlansByStatus(ctx context.Context, runCode, status
 		q.Set("status", status)
 	}
 	err := c.sfCall(ctx, "GET", "/openapi/mock/plans?"+q.Encode(), nil, &out)
+	return out, err
+}
+
+// StratflowListDecisions 分页查本次 run 每条名单的 Case 选择和实际变量/出口。
+func (c *Client) StratflowListDecisions(ctx context.Context, runCode, status string, pageNo, pageSize int) (SfMockDecisionPage, error) {
+	var out SfMockDecisionPage
+	q := url.Values{
+		"runCode":  {runCode},
+		"pageNo":   {strconv.Itoa(pageNo)},
+		"pageSize": {strconv.Itoa(pageSize)},
+	}
+	if status != "" {
+		q.Set("status", status)
+	}
+	err := c.sfCall(ctx, "GET", "/openapi/mock/decisions?"+q.Encode(), nil, &out)
 	return out, err
 }
 

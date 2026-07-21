@@ -440,20 +440,70 @@ export interface SfGateView {
   deliveryPaused: boolean
   receiptWindowSec: number
 }
-export interface SfOutcome { key: string; label: string; weight: number; defaultWeight: number; steps: number }
-export interface SfNode { nodeId: string; type: string; channel?: string | null; forcedOutcome?: string | null; baseDelayMs: number; outcomes: SfOutcome[] }
-export interface SfNodeConfig { weights?: Record<string, number>; forcedOutcome?: string | null; baseDelayMs?: number }
+export interface SfMockCaseResult {
+  type: 'CALL' | 'SMS'
+  status: string
+  terminalAttemptNo?: number | null
+  retryRingStatus?: string | null
+  ringStatus?: string | null
+  intention?: string | null
+  talkDurationSec?: number | null
+  failureReason?: string | null
+  errorCode?: string | null
+  errorDesc?: string | null
+  partCount?: number | null
+}
+export interface SfMockCase { key: string; name: string; delayMs: number; result: SfMockCaseResult }
+export interface SfWeightedCase { caseKey: string; weight: number }
+export interface SfSelection { mode: 'FIXED' | 'WEIGHTED'; caseKey?: string | null; choices?: SfWeightedCase[] }
+export interface SfMatchCondition { key: string; type: string; itemType?: string | null; op: string; value?: unknown }
+export interface SfSelectionRule { name: string; priority: number; conditions: SfMatchCondition[]; selection: SfSelection }
+export interface SfNodeConfig { forcedCaseKey?: string | null; cases: SfMockCase[]; defaultSelection: SfSelection; rules: SfSelectionRule[] }
+export interface SfResultSchema { type: 'CALL' | 'SMS'; statuses: string[]; ringStatuses: string[]; intentions: string[]; maxAttemptNo?: number | null; retryStepGapMs?: number | null }
+export interface SfMatchField { key: string; type: string; itemType?: string | null }
+export interface SfMatchSchema { fields: SfMatchField[]; operators: Record<string, string[]> }
+export interface SfCasePreview { steps: SfMockStep[]; actionFinal: string; nodePort: string; expectedVars: Record<string, unknown>; dynamicVars: string[] }
+export interface SfNode {
+  nodeId: string
+  type: string
+  channel?: string | null
+  configured: boolean
+  resultSchema: SfResultSchema
+  matchSchema: SfMatchSchema
+  config: SfNodeConfig
+  previews: Record<string, SfCasePreview>
+}
 export interface SfWorkflow { defCode: string; name: string; status: number; orgEnabled: boolean }
 export interface SfWorkflowDetail extends SfWorkflow { versionCode: string }
 export interface SfCollection { code: string; name: string; status: number; boundPlanCount: number; fieldCount: number; entryCount: number }
-export interface SfField { key: string; displayName: string; dataType: string; required: boolean; sort: number; maxLen?: number | null; format?: string | null }
+export interface SfField {
+  key: string
+  displayName: string
+  dataType: string
+  required: boolean
+  sort: number
+  format?: string | null
+  options?: string[] | null
+  itemType?: string | null
+  maxLen?: number | null
+  scale?: number | null
+}
 export interface SfBinding { defCode: string; defName: string; status: number }
 export interface SfRun { code: string; collectionCode: string; defCode: string; defName: string; versionCode: string; status: number; numberCount: number; reachedEndCount: number; terminalCount: number; expiredCount: number; canceledCount: number }
 export interface SfRunNode { nodeId: string; inflow: number; processed: number; processing: number; edgeFlow: Record<string, number> }
 export interface SfRunProgress { run: SfRun; nodes: SfRunNode[] }
 export interface SfMockStep { delayMs: number; status: string; failureReason?: string | null; data?: Record<string, unknown> }
-export type SfPlanStatus = 'PENDING' | 'DEAD'
-export interface SfActionPlan { actionCode: string; runCode: string; nodeId: string; entryCode: string; channel: string; outcomeKey: string; baseMs?: number | null; idx?: number | null; steps?: SfMockStep[] | null; status: SfPlanStatus; nextDueAt: string; retryCount: number; lastError?: string | null }
+export type SfPlanStatus = 'PENDING' | 'DEAD' | 'DONE'
+export interface SfActionPlan { actionCode: string; runCode: string; nodeId: string; entryCode: string; channel: string; outcomeKey: string; outcomeLabel?: string | null; selectionMode?: string | null; matchedRule?: string | null; selectedWeight?: number | null; totalWeight?: number | null; baseMs?: number | null; idx?: number | null; steps?: SfMockStep[] | null; status: SfPlanStatus; nextDueAt: string; retryCount: number; lastError?: string | null }
+export interface SfDecision {
+  actionCode: string; runCode: string; nodeId: string; entryCode: string; channel: string
+  caseKey: string; caseName?: string | null; selectionMode?: string | null; matchedRule?: string | null
+  selectedWeight?: number | null; totalWeight?: number | null; status: SfPlanStatus; noReceipt: boolean
+  expectedVars: Record<string, unknown>; expectedPort?: string | null
+  actualVars: Record<string, unknown>; actualPort?: string | null; routed: boolean
+  selectedAt?: string | null; completedAt?: string | null; lastError?: string | null
+}
+export interface SfDecisionPage { records: SfDecision[]; total: number; pageNo: number; pageSize: number }
 export interface SfImportPlan { defCode: string; versionCode: string; result: number; runCode: string; failFields?: string[] | null }
 export interface SfImportResult { code: string; batchCode: string; collectionCode: string; status: number; total: number; success: number; fail: number; plans: SfImportPlan[] }
 export interface SfImportRow { phone: string; bizFields?: Record<string, unknown> }

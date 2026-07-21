@@ -1,24 +1,29 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Card, Select, Button, Space, Table, Tag, Typography, InputNumber, Input, Switch,
-  message, Modal, Alert, Collapse, Descriptions, Empty, Divider,
+  message, Modal, Alert, Collapse, Descriptions, Empty, Divider, Upload, Radio,
 } from 'antd'
-import { ReloadOutlined, ThunderboltOutlined, ClearOutlined } from '@ant-design/icons'
+import { ReloadOutlined, ThunderboltOutlined, ClearOutlined, PlusOutlined, UploadOutlined } from '@ant-design/icons'
 import {
   sfGate, sfSetGlobalGate, sfSetSchemeGate, sfClearSchemeGate, sfSetDeliveryPaused, sfSetReceiptWindow,
-  sfListConfig, sfPutConfig, sfDeleteConfig, sfClearMock, sfListPlans, sfRequeuePlan,
+  sfListConfig, sfPutConfig, sfDeleteConfig, sfClearMock, sfListPlans, sfListDecisions, sfRequeuePlan,
   sfWorkflows, sfWorkflowDetail, sfCollections, sfCollectionFields, sfCollectionBindings, sfRunProgress, sfImport,
   CURRENT_ORG_STORAGE_KEY,
 } from '../api'
 import type {
   SfGateView, SfNode, SfNodeConfig, SfWorkflow, SfWorkflowDetail,
-  SfCollection, SfField, SfActionPlan, SfImportResult, SfRunProgress, SfRunNode, SfBinding, SfImportRow, SfDispatchMode,
+  SfCollection, SfField, SfActionPlan, SfDecision, SfImportResult, SfRunProgress, SfRunNode, SfBinding, SfImportRow, SfDispatchMode,
 } from '../types'
 import { SF_IMPORT_RUN_CREATED, SF_IMPORT_FIELD_FAIL } from '../types'
 import { PageHeader } from '../components/layout/PageHeader'
 import { InfoBanner } from '../components/layout/InfoBanner'
 import { usePolling } from '../hooks/usePolling'
 import { ORG_CHANGED_EVENT } from '../components/layout/useCurrentOrg'
+import { StratflowMockNodeEditor } from '../components/StratflowMockNodeEditor'
+import {
+  composeStratflowImportRows, generateSequentialPhones, MAX_STRATFLOW_IMPORT_ROWS, parseStratflowImportCsv, splitStratflowPhones,
+  type SfImportComposeResult,
+} from './stratflow-import'
 
 const { Text, Paragraph } = Typography
 
@@ -32,14 +37,19 @@ function defaultWindow(): [string, string] {
   return [fmtUTC(new Date(now - 24 * 3600e3)), fmtUTC(new Date(now + 24 * 3600e3))]
 }
 
-// 单节点的可编辑配置（本地态；初值来自 GET /config 返回的有效权重/强制/延迟）。
-type Edit = { forcedOutcome?: string; baseDelayMs: number; weights: Record<string, number> }
-
 const DISPATCH_MODE_OPTIONS: { value: SfDispatchMode; label: string }[] = [
   { value: 'PAUSED', label: 'PAUSED · 暂停新派发' },
   { value: 'MOCK', label: 'MOCK · 合成回执' },
   { value: 'REAL', label: 'REAL · 真实下游' },
 ]
+
+const SELECTION_MODE_LABEL: Record<string, string> = {
+  FORCED: '强制 Case',
+  RULE_FIXED: '规则固定',
+  RULE_WEIGHTED: '规则概率',
+  DEFAULT_FIXED: '默认固定',
+  DEFAULT_WEIGHTED: '默认概率',
+}
 
 const isDispatchMode = (value: unknown): value is SfDispatchMode => value === 'REAL' || value === 'MOCK' || value === 'PAUSED'
 
@@ -54,7 +64,8 @@ export default function StratflowMockPage() {
   const [detail, setDetail] = useState<SfWorkflowDetail | null>(null)
 
   const [nodes, setNodes] = useState<SfNode[]>([])
-  const [edits, setEdits] = useState<Record<string, Edit>>({})
+  const [edits, setEdits] = useState<Record<string, SfNodeConfig>>({})
+  const [configErr, setConfigErr] = useState('')
 
   const [collections, setCollections] = useState<SfCollection[]>([])
   const [collCode, setCollCode] = useState<string>()
@@ -66,9 +77,18 @@ export default function StratflowMockPage() {
   const [idemKey, setIdemKey] = useState('')
   const [importing, setImporting] = useState(false)
   const [importRes, setImportRes] = useState<SfImportResult | null>(null)
+  const [importPreview, setImportPreview] = useState<SfImportComposeResult | null>(null)
+  const [csvFileName, setCsvFileName] = useState('')
+  const [phoneGeneratorOpen, setPhoneGeneratorOpen] = useState(false)
+  const [phoneGeneratorStart, setPhoneGeneratorStart] = useState('13800138000')
+  const [phoneGeneratorCount, setPhoneGeneratorCount] = useState(100)
+  const [phoneGeneratorMode, setPhoneGeneratorMode] = useState<'overwrite' | 'append'>('overwrite')
 
   const [runCode, setRunCode] = useState('')
   const [plans, setPlans] = useState<SfActionPlan[]>([])
+  const [decisions, setDecisions] = useState<SfDecision[]>([])
+  const [decisionTotal, setDecisionTotal] = useState(0)
+  const [decisionPage, setDecisionPage] = useState(1)
   const [plansErr, setPlansErr] = useState('')
   const [progress, setProgress] = useState<SfRunProgress | null>(null)
   const [timeWin, setTimeWin] = useState<[string, string]>(defaultWindow())
@@ -120,7 +140,7 @@ export default function StratflowMockPage() {
   // —— 选方案 → 拿 versionCode + 配置 ——
   const pickWorkflow = async (dc: string) => {
     const generation = ++workflowGenerationRef.current
-    setDefCode(dc); setDetail(null); setNodes([]); setEdits({})
+    setDefCode(dc); setDetail(null); setNodes([]); setEdits({}); setConfigErr('')
     try {
       const d = await sfWorkflowDetail(dc)
       if (generation !== workflowGenerationRef.current) return
@@ -133,17 +153,25 @@ export default function StratflowMockPage() {
     try {
       const list = (await sfListConfig(ver)).nodes || []
       if (generation !== workflowGenerationRef.current) return
+      const incompatible = list.find((n) => !Array.isArray(n.config?.cases) || !n.config.defaultSelection
+        || !Array.isArray(n.config.rules) || !Array.isArray(n.resultSchema?.statuses)
+        || !Array.isArray(n.resultSchema.ringStatuses) || !Array.isArray(n.resultSchema.intentions)
+        || !Array.isArray(n.matchSchema?.fields) || !n.matchSchema.operators || !n.previews)
+      if (incompatible) {
+        throw new Error(`Hermes StratFlow Mock 配置协议不兼容：节点 ${incompatible.nodeId} 未返回类型化 cases/defaultSelection/schema/previews；请先部署配套 Hermes 后端并清理旧 sf:mock:cfg:* 配置`)
+      }
       setNodes(list)
-      const init: Record<string, Edit> = {}
+      setConfigErr('')
+      const init: Record<string, SfNodeConfig> = {}
       list.forEach((n) => {
-        init[n.nodeId] = {
-          forcedOutcome: n.forcedOutcome ?? undefined,
-          baseDelayMs: n.baseDelayMs || 0,
-          weights: Object.fromEntries(n.outcomes.map((o) => [o.key, o.weight])),
-        }
+        init[n.nodeId] = JSON.parse(JSON.stringify(n.config)) as SfNodeConfig
       })
       setEdits(init)
-    } catch (e) { if (generation === workflowGenerationRef.current) message.error(String(e)) }
+    } catch (e) {
+      if (generation !== workflowGenerationRef.current) return
+      const error = String(e)
+      setNodes([]); setEdits({}); setConfigErr(error); message.error(error)
+    }
   }
 
   const saveNode = async (n: SfNode) => {
@@ -151,13 +179,9 @@ export default function StratflowMockPage() {
     const orgGeneration = orgGenerationRef.current
     const workflowGeneration = workflowGenerationRef.current
     const ed = edits[n.nodeId]
-    const cfg: SfNodeConfig = {
-      forcedOutcome: ed.forcedOutcome || null,
-      baseDelayMs: ed.baseDelayMs || 0,
-      weights: ed.weights,
-    }
+    if (!ed) return
     try {
-      await sfPutConfig(versionCode, n.nodeId, cfg)
+      await sfPutConfig(versionCode, n.nodeId, ed)
       if (orgGeneration !== orgGenerationRef.current || workflowGeneration !== workflowGenerationRef.current) return
       message.success(`已存 ${n.nodeId}`)
       await loadConfig(versionCode, workflowGeneration)
@@ -180,8 +204,8 @@ export default function StratflowMockPage() {
     }
   }
 
-  const patchEdit = (nodeId: string, patch: Partial<Edit>) =>
-    setEdits((prev) => ({ ...prev, [nodeId]: { ...prev[nodeId], ...patch } }))
+  const setNodeEdit = (nodeId: string, config: SfNodeConfig) =>
+    setEdits((prev) => ({ ...prev, [nodeId]: config }))
 
   // —— 名单 ——
   const loadCollections = useCallback(async () => {
@@ -201,9 +225,10 @@ export default function StratflowMockPage() {
       observeGenerationRef.current++
       observingRef.current = false
       setGate(null); setGateErr(''); setWorkflows([]); setDefCode(undefined); setDetail(null)
-      setNodes([]); setEdits({}); setCollections([]); setCollCode(undefined); setFields([]); setBindings([])
-      setPhonesText(''); setBizText(''); setIdemKey(''); setImportRes(null); setImporting(false)
-      setRunCode(''); setPlans([]); setPlansErr(''); setProgress(null); setAutoObserve(false)
+      setNodes([]); setEdits({}); setConfigErr(''); setCollections([]); setCollCode(undefined); setFields([]); setBindings([])
+      setPhonesText(''); setBizText(''); setIdemKey(''); setImportRes(null); setImportPreview(null); setCsvFileName(''); setImporting(false)
+      setPhoneGeneratorOpen(false)
+      setRunCode(''); setPlans([]); setDecisions([]); setDecisionTotal(0); setDecisionPage(1); setPlansErr(''); setProgress(null); setAutoObserve(false)
       Modal.destroyAll()
       void loadGate(); void loadWorkflows(); void loadCollections()
     }
@@ -219,8 +244,8 @@ export default function StratflowMockPage() {
   const pickCollection = async (code: string) => {
     const generation = ++collectionGenerationRef.current
     observeGenerationRef.current++; observingRef.current = false
-    setCollCode(code); setFields([]); setBindings([])
-    setRunCode(''); setPlans([]); setPlansErr(''); setProgress(null)
+    setCollCode(code); setFields([]); setBindings([]); setImportPreview(null); setCsvFileName(''); setImportRes(null)
+    setRunCode(''); setPlans([]); setDecisions([]); setDecisionTotal(0); setDecisionPage(1); setPlansErr(''); setProgress(null)
     try {
       const [f, b] = await Promise.all([sfCollectionFields(code), sfCollectionBindings(code)])
       if (generation !== collectionGenerationRef.current) return
@@ -260,26 +285,96 @@ export default function StratflowMockPage() {
       }
     })
     if (defCode && boundDefs.includes(defCode) && nodes.length > 0) {
-      const unset = nodes.filter((n) => !edits[n.nodeId]?.forcedOutcome).map((n) => n.nodeId)
-      if (unset.length > 0) {
-        w.push(`方案 ${defCode} 有 ${unset.length}/${nodes.length} 个触达节点未设强制结局（${unset.join('、')}）：将按默认权重随机分支。要断言特定分支请先逐节点设 forcedOutcome。`)
+      const probabilistic = nodes.filter((n) => {
+        const config = edits[n.nodeId]
+        return config && Array.isArray(config.cases) && !!config.defaultSelection && Array.isArray(config.rules)
+          && !config.forcedCaseKey && (config.defaultSelection.mode === 'WEIGHTED' || config.rules.some((rule) => rule.selection.mode === 'WEIGHTED'))
+      }).map((n) => n.nodeId)
+      if (probabilistic.length > 0) {
+        w.push(`方案 ${defCode} 的节点 ${probabilistic.join('、')} 含概率选择且未强制 Case：每条名单会在派发时独立抽取结果。需要完全确定的断言时请临时设置强制 Case。`)
       }
     }
     return w
   }
 
+  const previewImportRows = (nextBizText = bizText, syncPhones = true) => {
+    const result = composeStratflowImportRows(phonesText, nextBizText, fields)
+    setImportPreview(result)
+    setCsvFileName('')
+    setImportRes(null)
+    if (result.errorCount > 0) {
+      message.error(`解析/校验未通过，共 ${result.errorCount} 个问题`)
+      return result
+    }
+    if (syncPhones && result.mode === 'ROWS') setPhonesText(result.rows.map((row) => row.phone).join('\n'))
+    message.success(`已解析 ${result.rows.length} 条名单`)
+    return result
+  }
+
+  const importCsvFile = async (file: File) => {
+    const orgGeneration = orgGenerationRef.current
+    const collectionGeneration = collectionGenerationRef.current
+    if (file.size > 10 * 1024 * 1024) {
+      message.error('CSV 文件不能超过 10 MB')
+      return
+    }
+    try {
+      const content = await file.text()
+      if (orgGeneration !== orgGenerationRef.current || collectionGeneration !== collectionGenerationRef.current) return
+      const result = parseStratflowImportCsv(content, fields)
+      setImportPreview(result)
+      setCsvFileName(file.name)
+      setImportRes(null)
+      if (result.errorCount > 0) {
+        message.error(`CSV 结构解析失败，共 ${result.errorCount} 个问题`)
+        return
+      }
+      setPhonesText(result.rows.map((row) => row.phone).join('\n'))
+      setBizText('')
+      message.success(`已从 ${file.name} 解析 ${result.rows.length} 条名单`)
+    } catch (e) {
+      if (orgGeneration === orgGenerationRef.current && collectionGeneration === collectionGenerationRef.current) {
+        message.error(`读取 CSV 文件失败：${String(e)}`)
+      }
+    }
+  }
+
+  const applyPhoneGeneration = () => {
+    try {
+      const generated = generateSequentialPhones(phoneGeneratorStart, phoneGeneratorCount)
+      const existing = splitStratflowPhones(phonesText)
+      const next = phoneGeneratorMode === 'append' ? [...existing, ...generated] : generated
+      if (next.length > MAX_STRATFLOW_IMPORT_ROWS) {
+        message.error(`号码总数不能超过 ${MAX_STRATFLOW_IMPORT_ROWS}`)
+        return
+      }
+      setPhonesText(next.join('\n'))
+      setImportPreview(null)
+      setCsvFileName('')
+      setImportRes(null)
+      setPhoneGeneratorOpen(false)
+      message.success(`${phoneGeneratorMode === 'append' ? '已追加' : '已生成'} ${generated.length} 个号码`)
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : String(e))
+    }
+  }
+
   const doImport = () => {
     if (!collCode) { message.warning('先选名单集合'); return }
-    const phones = phonesText.split('\n').map((s) => s.trim()).filter(Boolean)
-    if (!phones.length) { message.warning('至少填一个号码'); return }
-    let biz: Record<string, unknown> = {}
-    if (bizText.trim()) {
-      try { biz = JSON.parse(bizText) } catch { message.error('公共业务字段不是合法 JSON'); return }
+    const composed = importPreview?.mode === 'CSV'
+      ? importPreview
+      : composeStratflowImportRows(phonesText, bizText, fields)
+    setImportPreview(composed)
+    if (composed.errorCount > 0) {
+      message.error(`解析/校验未通过，共 ${composed.errorCount} 个问题`)
+      return
     }
     const code = collCode
-    const rows: SfImportRow[] = phones.map((p) => ({ phone: p, bizFields: biz }))
+    const rows: SfImportRow[] = composed.rows
     const warns = importWarnings()
     if (warns.length === 0) { void runImport(code, rows); return }
+    const orgGeneration = orgGenerationRef.current
+    const collectionGeneration = collectionGenerationRef.current
     Modal.confirm({
       title: '导入前确认：以下情况可能让分支断言失真',
       width: 560,
@@ -291,7 +386,13 @@ export default function StratflowMockPage() {
       okText: '仍然导入',
       okButtonProps: { danger: true },
       cancelText: '返回修正',
-      onOk: () => runImport(code, rows),
+      onOk: () => {
+        if (orgGeneration !== orgGenerationRef.current || collectionGeneration !== collectionGenerationRef.current) {
+          message.error('机构或名单集合已变化，本次导入已取消')
+          return
+        }
+        return runImport(code, rows)
+      },
     })
   }
 
@@ -314,9 +415,9 @@ export default function StratflowMockPage() {
       if (ok) {
         observeGenerationRef.current++; observingRef.current = false
         setRunCode(ok.runCode)
-        setPlans([]); setPlansErr(''); setProgress(null)
+        setPlans([]); setDecisions([]); setDecisionTotal(0); setDecisionPage(1); setPlansErr(''); setProgress(null)
         message.success(`已生成 run ${ok.runCode}`)
-        void observe(ok.runCode)
+        void observe(ok.runCode, 1)
       } else {
         const fail = (res.plans || [])[0]
         message.warning(fail?.result === SF_IMPORT_FIELD_FAIL ? `字段契约失败：${(fail.failFields || []).join(', ')}` : '无可用绑定/未生成 run，看导入结果')
@@ -329,7 +430,7 @@ export default function StratflowMockPage() {
   }
 
   // —— 观测 ——
-  const observe = useCallback(async (rc?: string) => {
+  const observe = useCallback(async (rc?: string, pageNo = decisionPage) => {
     const code = rc || runCode
     if (!code || !collCode || observingRef.current) return
     const generation = ++observeGenerationRef.current
@@ -348,6 +449,15 @@ export default function StratflowMockPage() {
             if (generation !== observeGenerationRef.current) return
             setPlans([]); setPlansErr(`计划查询失败，进度数据仍有效：${String(e)}`)
           }),
+        sfListDecisions(code, pageNo, 100)
+          .then((page) => {
+            if (generation !== observeGenerationRef.current) return
+            setDecisions(page.records || []); setDecisionTotal(page.total || 0)
+          })
+          .catch((e) => {
+            if (generation !== observeGenerationRef.current) return
+            setDecisions([]); setDecisionTotal(0); message.error(`决策记录查询失败：${String(e)}`)
+          }),
         sfRunProgress(collCode, code, timeWin[0], timeWin[1])
           .then((next) => { if (generation === observeGenerationRef.current) setProgress(next) })
           .catch((e) => {
@@ -358,9 +468,10 @@ export default function StratflowMockPage() {
     } finally {
       if (generation === observeGenerationRef.current) observingRef.current = false
     }
-  }, [runCode, collCode, timeWin])
+  }, [runCode, collCode, timeWin, decisionPage])
 
   usePolling(() => { if (autoObserve && runCode) void observe() }, 3000, { immediate: false })
+  useEffect(() => { if (runCode && collCode) void observe() }, [decisionPage])
 
   const executeClearMock = async (scope: 'all' | 'plans' | 'config') => {
     const orgGeneration = orgGenerationRef.current
@@ -369,7 +480,7 @@ export default function StratflowMockPage() {
       await sfClearMock(scope)
       if (orgGeneration !== orgGenerationRef.current || workflowGeneration !== workflowGenerationRef.current) return
       message.success(`已清空（${scope}）`)
-      if (scope !== 'config') { setPlans([]); setProgress(null) }
+      if (scope !== 'config') { setPlans([]); setDecisions([]); setDecisionTotal(0); setDecisionPage(1); setProgress(null) }
       if (versionCode && scope !== 'plans') await loadConfig(versionCode, workflowGeneration)
     } catch (e) {
       if (orgGeneration === orgGenerationRef.current && workflowGeneration === workflowGenerationRef.current) message.error(String(e))
@@ -381,7 +492,7 @@ export default function StratflowMockPage() {
     if (scope === 'config') { void executeClearMock(scope); return }
     Modal.confirm({
       title: '确认清理在途 Mock 计划？',
-      content: '删除 plans 后，对应已派发动作不会再收到合成回执，只能等待回执超时。该操作仅作用于当前机构，但可能令正在执行的 run 变慢或走失败分支。',
+      content: '将删除当前机构的 PENDING/DEAD 回放计划以及 DONE 决策历史；已派发动作若仍在途将不再收到合成回执，只能等待回执超时。该操作可能令正在执行的 run 变慢或走失败分支。',
       okText: '确认清理',
       okButtonProps: { danger: true },
       cancelText: '取消',
@@ -423,6 +534,7 @@ export default function StratflowMockPage() {
       ? (gate.schemes[defCode] ? 'MOCK' : 'REAL')
       : undefined
   const requiredFields = useMemo(() => fields.filter((f) => f.required), [fields])
+  const phoneCount = useMemo(() => splitStratflowPhones(phonesText).length, [phonesText])
 
   return (
     <div className="page-container">
@@ -432,7 +544,7 @@ export default function StratflowMockPage() {
         onReload={() => { void loadGate(); void loadWorkflows() }}
       />
       <InfoBanner title="应用层 mock 编排（与 SIP 被叫腿正交）">
-        这里驱动 <Text code>hermes-stratflow</Text> 的应用层 mock：派发那刻按结局词表采样 → 合成回执事件，**不打真实电话、不经被叫腿**。
+        这里驱动 <Text code>hermes-stratflow</Text> 的应用层 mock：派发那刻按 Case 选择规则采样 → 合成回执事件，<Text strong>不打真实电话、不经被叫腿</Text>。
         用于测策略图分支/回执逻辑。顺序：选方案(拿 versionCode) → 开方案门闸 → 配结局 → 选名单导入触发 run → 观测计划 + 按 edgeFlow 断言分支。
       </InfoBanner>
 
@@ -495,41 +607,13 @@ export default function StratflowMockPage() {
       {versionCode && (
         <Card title="③ 触达节点结局配置" size="small" style={{ marginBottom: 12 }}
           extra={<Button size="small" icon={<ReloadOutlined />} onClick={() => loadConfig(versionCode)}>刷新</Button>}>
-          {nodes.length === 0 ? <Empty description="该版本无触达节点（VOICEBOT_CALL/SMS_SEND）" /> : (
+          {configErr ? <Alert type="error" showIcon message="触达节点配置加载失败" description={configErr} /> : nodes.length === 0 ? <Empty description="该版本无触达节点（VOICEBOT_CALL/SMS_SEND）" /> : (
             <Collapse items={nodes.map((n) => {
               const ed = edits[n.nodeId]
               return {
                 key: n.nodeId,
-                label: <Space><Text strong>{n.nodeId}</Text><Tag>{n.type}</Tag>{n.channel && <Tag color="geekblue">{n.channel}</Tag>}{ed?.forcedOutcome && <Tag color="orange">强制 {ed.forcedOutcome}</Tag>}</Space>,
-                children: ed ? (
-                  <>
-                    <Space wrap style={{ marginBottom: 8 }}>
-                      <Text>强制结局：</Text>
-                      <Select allowClear style={{ width: 260 }} placeholder="不强制（按权重随机）" value={ed.forcedOutcome}
-                        onChange={(v) => patchEdit(n.nodeId, { forcedOutcome: v })}
-                        options={n.outcomes.map((o) => ({ value: o.key, label: `${o.label}（${o.key}）` }))} />
-                      <Text>基础延迟 baseDelayMs：</Text>
-                      <InputNumber min={0} step={1000} value={ed.baseDelayMs} onChange={(v) => patchEdit(n.nodeId, { baseDelayMs: v || 0 })} />
-                      <Text type="secondary">过大会被拒（须小于回执窗口）。</Text>
-                    </Space>
-                    <Table size="small" rowKey="key" pagination={false} dataSource={n.outcomes}
-                      columns={[
-                        { title: '结局', dataIndex: 'label', render: (v: string, o) => <Space><Text>{v}</Text><Text code style={{ fontSize: 11 }}>{o.key}</Text>{o.steps === 0 && <Tag color="gold">超时不回执</Tag>}</Space> },
-                        { title: '默认权重', dataIndex: 'defaultWeight', width: 90 },
-                        {
-                          title: '有效权重', width: 130, render: (_: unknown, o) => (
-                            <InputNumber min={0} disabled={!!ed.forcedOutcome} value={ed.weights[o.key]}
-                              onChange={(v) => patchEdit(n.nodeId, { weights: { ...ed.weights, [o.key]: v || 0 } })} />
-                          ),
-                        },
-                        { title: '回执步数', dataIndex: 'steps', width: 80 },
-                      ]} />
-                    <Space style={{ marginTop: 8 }}>
-                      <Button type="primary" size="small" disabled={!master} onClick={() => saveNode(n)}>保存本节点</Button>
-                      <Button size="small" disabled={!master} onClick={() => resetNode(n)}>重置为默认</Button>
-                    </Space>
-                  </>
-                ) : null,
+                label: <Space><Text strong>{n.nodeId}</Text><Tag>{n.type}</Tag>{n.channel && <Tag color="geekblue">{n.channel}</Tag>}{n.configured ? <Tag color="green">已自定义</Tag> : <Tag>默认模板</Tag>}{ed?.forcedCaseKey && <Tag color="orange">强制 {ed.forcedCaseKey}</Tag>}</Space>,
+                children: ed ? <StratflowMockNodeEditor node={n} value={ed} disabled={!master} onChange={(config) => setNodeEdit(n.nodeId, config)} onSave={() => void saveNode(n)} onReset={() => void resetNode(n)} /> : null,
               }
             })} />
           )}
@@ -547,7 +631,7 @@ export default function StratflowMockPage() {
           {collCode && (
             <>
               {requiredFields.length > 0 && (
-                <Alert type="info" showIcon message={<span>必填业务字段：{requiredFields.map((f) => <Tag key={f.key}>{f.displayName}（{f.key}）</Tag>)} —— 未提供会导致导入 result=2（字段契约失败）。</span>} />
+                <Alert type="info" showIcon message={<span>必填业务字段：{requiredFields.map((f) => <Tag key={f.key}>{f.displayName}（{f.key}）</Tag>)} —— 缺失时会在导入前拦截。</span>} />
               )}
               <Text type="secondary" style={{ fontSize: 12 }}>
                 绑定方案：{bindings.length === 0 ? '无（导入不会生成 run）' : bindings.map((b) => (
@@ -556,21 +640,84 @@ export default function StratflowMockPage() {
                   </Tag>
                 ))}
               </Text>
-              <Space align="start" wrap style={{ width: '100%' }}>
-                <div>
-                  <Text type="secondary">号码（每行一个）</Text>
-                  <Input.TextArea rows={5} style={{ width: 300 }} value={phonesText} onChange={(e) => setPhonesText(e.target.value)} placeholder={'13800138000\n13800138001'} />
+              {fields.length > 0 && (
+                <Space size={[4, 6]} wrap>
+                  <Text type="secondary" style={{ fontSize: 12 }}>集合字段：</Text>
+                  {fields.map((field) => (
+                    <Tag key={field.key} color={field.required ? 'red' : undefined}>
+                      {field.displayName} · {field.key}:{field.dataType === 'array' ? `array<${field.itemType || '?'}>` : field.dataType}{field.required ? ' *' : ''}
+                    </Tag>
+                  ))}
+                </Space>
+              )}
+              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'flex-start' }}>
+                <div style={{ width: 360, maxWidth: '100%' }}>
+                  <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 4 }}>
+                    <Text type="secondary">号码（每行一个） · 已填 {phoneCount} 条</Text>
+                    <Space size={6}>
+                      <Button size="small" icon={<PlusOutlined />} onClick={() => setPhoneGeneratorOpen(true)}>批量生成</Button>
+                      <Upload accept=".csv,text/csv" showUploadList={false} disabled={fields.length === 0} beforeUpload={(file) => {
+                        void importCsvFile(file)
+                        return false
+                      }}>
+                        <Button size="small" disabled={fields.length === 0} icon={<UploadOutlined />}>导入 CSV</Button>
+                      </Upload>
+                    </Space>
+                  </Space>
+                  <Input.TextArea rows={8} style={{ width: '100%' }} value={phonesText} onChange={(e) => {
+                    setPhonesText(e.target.value); setImportPreview(null); setCsvFileName(''); setImportRes(null)
+                  }} placeholder={'13800138000\n13800138001'} />
                 </div>
-                <div>
-                  <Text type="secondary">公共业务字段 JSON（应用到每行，可空）</Text>
-                  <Input.TextArea rows={5} style={{ width: 300 }} value={bizText} onChange={(e) => setBizText(e.target.value)} placeholder={'{"customer_name":"张三"}'} />
+                <div style={{ width: 560, maxWidth: '100%' }}>
+                  <Space wrap style={{ width: '100%', justifyContent: 'space-between', marginBottom: 4 }}>
+                    <Text type="secondary">公共业务字段 JSON（手填/批量生成号码时，可空）</Text>
+                    <Button size="small" disabled={fields.length === 0} onClick={() => previewImportRows()}>校验公共字段</Button>
+                  </Space>
+                  <Input.TextArea rows={8} style={{ width: '100%', fontFamily: 'monospace' }} value={bizText} onChange={(e) => {
+                    setBizText(e.target.value); setImportPreview(null); setCsvFileName(''); setImportRes(null)
+                  }} placeholder={'{"customer_name":"张三","tags":["vip"]}'} />
+                  <Text type="secondary" style={{ display: 'block', marginTop: 4, fontSize: 12 }}>
+                    公共对象会应用到号码区的全部号码。逐行号码与业务字段请使用「导入 CSV」：表头为 <Text code>phone</Text> + 业务字段；已知数组字段用 <Text code>|</Text> 分隔，未在当前集合发现的列也会按原表头提交，由 Hermes 最终校验。
+                  </Text>
                 </div>
-                <div>
+                <div style={{ width: 240, maxWidth: '100%' }}>
                   <Text type="secondary">idempotencyKey（可空）</Text>
-                  <Input style={{ width: 220 }} value={idemKey} onChange={(e) => setIdemKey(e.target.value)} placeholder="防重复提交" />
+                  <Input maxLength={128} style={{ width: '100%', display: 'block', marginTop: 4 }} value={idemKey} onChange={(e) => setIdemKey(e.target.value)} placeholder="防重复提交" />
                 </div>
-              </Space>
-              <Button type="primary" icon={<ThunderboltOutlined />} loading={importing} onClick={doImport}>导入触发 run</Button>
+              </div>
+              {importPreview && (
+                <Card size="small" title={`解析预览 · ${importPreview.rows.length} 条`}>
+                  <Space wrap style={{ marginBottom: importPreview.errorCount > 0 ? 8 : 12 }}>
+                    <Tag color={importPreview.mode === 'CSV' ? 'blue' : importPreview.mode === 'ROWS' ? 'purple' : 'default'}>
+                      {importPreview.mode === 'CSV' ? `CSV${csvFileName ? ` · ${csvFileName}` : ''}` : importPreview.mode === 'ROWS' ? '逐行数据' : '公共字段'}
+                    </Tag>
+                    <Text type="secondary">已识别字段：{importPreview.fieldKeys.length ? importPreview.fieldKeys.join('、') : '无'}</Text>
+                    <Tag color={importPreview.errorCount > 0 ? 'red' : 'green'}>
+                      {importPreview.errorCount > 0 ? `${importPreview.errorCount} 个问题` : importPreview.mode === 'CSV' ? '解析通过 · 待 Hermes 校验' : '校验通过'}
+                    </Tag>
+                  </Space>
+                  {importPreview.errorCount > 0 ? (
+                    <Alert type="error" showIcon message="请修正后再导入" description={(
+                      <>
+                        <ol style={{ margin: '6px 0 0', paddingLeft: 20 }}>
+                          {importPreview.errors.slice(0, 20).map((error, index) => <li key={`${index}-${error}`}>{error}</li>)}
+                        </ol>
+                        {importPreview.errorCount > 20 && <Text type="secondary">这里只展示前 20 个问题；共 {importPreview.errorCount} 个{importPreview.errorsTruncated ? '，详细错误已截断' : ''}。</Text>}
+                      </>
+                    )} />
+                  ) : (
+                    <Table size="small" pagination={false} rowKey="rowNo"
+                      dataSource={importPreview.rows.slice(0, 5).map((row, index) => ({ ...row, rowNo: index + 1 }))}
+                      columns={[
+                        { title: '#', dataIndex: 'rowNo', width: 54 },
+                        { title: 'phone', dataIndex: 'phone', width: 180 },
+                        { title: 'bizFields', dataIndex: 'bizFields', render: (value: Record<string, unknown>) => <Text code style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify(value)}</Text> },
+                      ]} />
+                  )}
+                  {importPreview.errorCount === 0 && importPreview.rows.length > 5 && <Text type="secondary">仅预览前 5 条，提交时会导入全部 {importPreview.rows.length} 条。</Text>}
+                </Card>
+              )}
+              <Button type="primary" icon={<ThunderboltOutlined />} loading={importing} onClick={doImport}>导入并触发 run</Button>
               {importRes && (
                 <Descriptions size="small" bordered column={2} style={{ marginTop: 8 }}>
                   <Descriptions.Item label="批次">{importRes.batchCode || importRes.code}</Descriptions.Item>
@@ -589,6 +736,23 @@ export default function StratflowMockPage() {
         </Space>
       </Card>
 
+      <Modal title="批量生成连续手机号" open={phoneGeneratorOpen} okText={phoneGeneratorMode === 'append' ? '追加号码' : '覆盖号码'}
+        cancelText="取消" onOk={applyPhoneGeneration} onCancel={() => setPhoneGeneratorOpen(false)}>
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <div>
+            <Text type="secondary">起始手机号</Text>
+            <Input style={{ marginTop: 4 }} value={phoneGeneratorStart} onChange={(e) => setPhoneGeneratorStart(e.target.value)} placeholder="13800138000" />
+          </div>
+          <div>
+            <Text type="secondary">生成数量（最多 {MAX_STRATFLOW_IMPORT_ROWS}）</Text><br />
+            <InputNumber min={1} max={MAX_STRATFLOW_IMPORT_ROWS} precision={0} style={{ width: '100%', marginTop: 4 }} value={phoneGeneratorCount}
+              onChange={(value) => setPhoneGeneratorCount(Number(value) || 1)} />
+          </div>
+          <Radio.Group value={phoneGeneratorMode} onChange={(e) => setPhoneGeneratorMode(e.target.value as 'overwrite' | 'append')}
+            options={[{ value: 'overwrite', label: '覆盖号码区' }, { value: 'append', label: `追加到现有 ${phoneCount} 条之后` }]} />
+        </Space>
+      </Modal>
+
       {/* ⑤ 观测 + 断言 */}
       <Card title="⑤ 观测计划 + 断言分支（edgeFlow）" size="small"
         extra={
@@ -603,7 +767,7 @@ export default function StratflowMockPage() {
           <Text>runCode：</Text>
           <Input style={{ width: 240 }} value={runCode} onChange={(e) => {
             observeGenerationRef.current++; observingRef.current = false
-            setRunCode(e.target.value); setPlans([]); setPlansErr(''); setProgress(null)
+            setRunCode(e.target.value); setPlans([]); setDecisions([]); setDecisionTotal(0); setDecisionPage(1); setPlansErr(''); setProgress(null)
           }} placeholder="import 后自动填，也可手填" />
           <Text type="secondary">进度窗口(UTC)：</Text>
           <Input style={{ width: 170 }} value={timeWin[0]} onChange={(e) => {
@@ -617,7 +781,7 @@ export default function StratflowMockPage() {
           }} />
           <Text type="secondary">≤31天</Text>
         </Space>
-        <Divider style={{ margin: '8px 0' }} orientation="left" plain>mock 计划（PENDING / DEAD；超时结局无计划）</Divider>
+        <Divider style={{ margin: '8px 0' }} orientation="left" plain>mock 回放计划（PENDING / DEAD）</Divider>
         {plansErr && <Alert type="warning" showIcon message={plansErr} style={{ marginBottom: 8 }} />}
         <Table size="small" rowKey="actionCode" pagination={{ pageSize: 5 }} dataSource={plans} locale={{ emptyText: '无在途计划' }}
           columns={[
@@ -629,6 +793,20 @@ export default function StratflowMockPage() {
             { title: '重试', dataIndex: 'retryCount', width: 70 },
             { title: '最近错误', dataIndex: 'lastError', ellipsis: true },
             { title: '操作', width: 90, render: (_: unknown, p: SfActionPlan) => p.status === 'DEAD' ? <Button size="small" onClick={() => void requeuePlan(p)}>重新入队</Button> : null },
+          ]} />
+        <Divider style={{ margin: '8px 0' }} orientation="left" plain>Mock 决策记录（DONE 保留 7 天）</Divider>
+        <Table size="small" rowKey="actionCode" dataSource={decisions} scroll={{ x: 1200 }} locale={{ emptyText: '暂无决策记录；导入并发生触达派发后生成' }}
+          pagination={{ current: decisionPage, pageSize: 100, total: decisionTotal, showSizeChanger: false, onChange: (page) => {
+            observeGenerationRef.current++; observingRef.current = false; setDecisionPage(page)
+          }, showTotal: (total) => `共 ${total} 条` }}
+          columns={[
+            { title: '名单/节点', width: 210, render: (_: unknown, d: SfDecision) => <><Text code>{d.entryCode}</Text><br /><Text>{d.nodeId} · {d.channel}</Text></> },
+            { title: '选择方式', width: 210, render: (_: unknown, d: SfDecision) => <><Tag color={d.selectionMode?.includes('WEIGHTED') ? 'purple' : d.selectionMode === 'FORCED' ? 'orange' : 'blue'}>{d.selectionMode ? (SELECTION_MODE_LABEL[d.selectionMode] || d.selectionMode) : '—'}</Tag><div>{d.selectionMode === 'FORCED' ? '临时强制覆盖' : d.matchedRule ? `命中规则：${d.matchedRule}` : '未命中规则，走默认'}{d.totalWeight ? ` · 权重 ${d.selectedWeight}/${d.totalWeight}` : ''}</div></> },
+            { title: 'Case', width: 220, render: (_: unknown, d: SfDecision) => <><Text>{d.caseName || d.caseKey}</Text><br /><Text code>{d.caseKey}</Text>{d.noReceipt && <Tag color="gold">不回执</Tag>}</> },
+            { title: '回放', width: 90, render: (_: unknown, d: SfDecision) => <Tag color={d.status === 'DEAD' ? 'red' : d.status === 'DONE' ? 'green' : 'processing'}>{d.status}</Tag> },
+            { title: '预期变量/出口', width: 230, render: (_: unknown, d: SfDecision) => <><Text code style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify(d.expectedVars || {})}</Text><div>出口：{d.expectedPort || '—'}</div></> },
+            { title: '实际变量/出口', width: 230, render: (_: unknown, d: SfDecision) => <><Text code style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify(d.actualVars || {})}</Text><div>{d.routed ? `已分流：${d.actualPort || '—'}` : '尚未分流'}</div></> },
+            { title: '错误', dataIndex: 'lastError', ellipsis: true },
           ]} />
         <Divider style={{ margin: '8px 0' }} orientation="left" plain>run 进度（漏斗 + 边流量）</Divider>
         {progress ? (

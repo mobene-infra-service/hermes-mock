@@ -25,6 +25,7 @@ func registerStratflowRoutes(g *gin.RouterGroup, d *Deps) {
 	g.DELETE("/stratflow/mock/config/:versionCode/:nodeId", d.sfDeleteConfig)
 	g.DELETE("/stratflow/mock/all", d.sfClearMock)
 	g.GET("/stratflow/mock/plans", d.sfListPlans)
+	g.GET("/stratflow/mock/decisions", d.sfListDecisions)
 	g.POST("/stratflow/mock/plans/:actionCode/requeue", d.sfRequeuePlan)
 	g.GET("/stratflow/workflows", d.sfWorkflows)
 	g.GET("/stratflow/workflows/:defCode", d.sfWorkflowDetail)
@@ -303,6 +304,36 @@ func (d *Deps) sfListPlans(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"plans": list})
+}
+
+func (d *Deps) sfListDecisions(c *gin.Context) {
+	runCode := strings.TrimSpace(c.Query("runCode"))
+	if runCode == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "需提供 runCode"})
+		return
+	}
+	status := strings.ToUpper(strings.TrimSpace(c.Query("status")))
+	if status != "" && status != "PENDING" && status != "DEAD" && status != "DONE" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "status 须为 PENDING / DEAD / DONE"})
+		return
+	}
+	pageNo, errNo := strconv.Atoi(c.DefaultQuery("pageNo", "1"))
+	pageSize, errSize := strconv.Atoi(c.DefaultQuery("pageSize", "100"))
+	if errNo != nil || errSize != nil || pageNo < 1 || pageSize < 1 || pageSize > 200 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "pageNo 须 >=1，pageSize 须为 1-200"})
+		return
+	}
+	cli, ok := d.sfClient(c)
+	if !ok {
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+	page, err := cli.StratflowListDecisions(ctx, runCode, status, pageNo, pageSize)
+	if sfErr(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, page)
 }
 
 func (d *Deps) sfRequeuePlan(c *gin.Context) {

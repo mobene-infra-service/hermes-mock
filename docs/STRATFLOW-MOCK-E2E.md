@@ -27,7 +27,7 @@ hermes-mock 对外暴露两组不同前缀：
 
 | 能力 | 前缀 | 示例 |
 |---|---|---|
-| gate/config/plans/clear | `/api/stratflow/mock` | `GET /api/stratflow/mock/gate` |
+| gate/config/plans/decisions/clear | `/api/stratflow/mock` | `GET /api/stratflow/mock/gate` |
 | 发现/import/progress | `/api/stratflow` | `POST /api/stratflow/collections/{code}/import` |
 
 常见错误是把 import 写成 `/api/stratflow/mock/collections/...`，该路径返回 404。
@@ -144,62 +144,51 @@ PUT /api/stratflow/mock/gate/scheme/{defCode}?mode=MOCK
 
 只开当前专用方案 override；不要为了方便切全局 gate。
 
-### 5.3 查看结局词表
+### 5.3 查看 Case、Schema 与编译预览
 
 ```http
 GET /api/stratflow/mock/config/{versionCode}
 ```
 
-SMS 结局：
+未自定义时返回可编辑默认模板。重点检查：
 
-- `SMS_DELIVERED`
-- `SMS_FAILED_INVALID_NUMBER`
-- `SMS_FAILED_BLACKLIST`
-- `SMS_FAILED_CARRIER_REJECT`
-- `SMS_TIMEOUT_NO_RECEIPT`
-
-CALL 结局：
-
-- `CALL_ANSWERED_A/B/C`
-- `CALL_NO_ANSWER`
-- `CALL_POWER_OFF`
-- `CALL_EMPTY_NUMBER`
-- `CALL_REJECTED`
-- `CALL_REDIAL_THEN_ANSWER`
-- `CALL_TIMEOUT_NO_RECEIPT`
+- `config.cases`：可编辑 Case；
+- `resultSchema`：CALL/SMS 可用状态、A–Z、RingType、最大拨次；
+- `matchSchema`：bizFields 类型与操作符；
+- `previews[caseKey]`：具体回执步骤、预期变量和触达节点出口。
 
 ### 5.4 配置节点
 
-强制单一结局：
+PUT 必须提交 GET 返回的完整 `config`。下面是最小 SMS 固定结果示例：
 
 ```http
 PUT /api/stratflow/mock/config/{versionCode}/{nodeId}
 Content-Type: application/json
 
 {
-  "weights": {},
-  "forcedOutcome": "SMS_DELIVERED",
-  "baseDelayMs": 0
+  "forcedCaseKey": "delivered",
+  "cases": [
+    {"key":"delivered","name":"送达","delayMs":0,"result":{"type":"SMS","status":"DELIVERED","partCount":1}},
+    {"key":"failed","name":"黑名单","delayMs":0,"result":{"type":"SMS","status":"FAILED","errorCode":"BLACKLIST","errorDesc":"黑名单拦截"}}
+  ],
+  "defaultSelection": {"mode":"FIXED","caseKey":"delivered"},
+  "rules": []
 }
 ```
 
-50:50 权重示例：
+取消 `forcedCaseKey` 并把默认选择改成 50:50：
 
 ```json
 {
-  "weights": {
-    "SMS_DELIVERED": 50,
-    "SMS_FAILED_INVALID_NUMBER": 50,
-    "SMS_FAILED_BLACKLIST": 0,
-    "SMS_FAILED_CARRIER_REJECT": 0,
-    "SMS_TIMEOUT_NO_RECEIPT": 0
-  },
-  "forcedOutcome": null,
-  "baseDelayMs": 0
+  "forcedCaseKey": null,
+  "defaultSelection": {
+    "mode": "WEIGHTED",
+    "choices": [{"caseKey":"delivered","weight":1},{"caseKey":"failed","weight":1}]
+  }
 }
 ```
 
-配置必须先于 import。采样在动作派发时定型，修改配置不会改变已经生成的计划。
+实际 PUT 仍要带完整 `cases/rules`。配置必须先于 import；每条名单派发时按“强制 Case → 第一条命中 bizFields 规则 → 默认选择”定型，之后修改配置不会改变已生成计划。画布 Condition 在回执写入变量后分支，与这里的 Case 选择规则不是一件事。
 
 ### 5.5 导入并取得 runCode
 
@@ -284,7 +273,7 @@ ORDER BY a.entry_code, a.node_id, t.attempt_no;
 
 ```sql
 SELECT action_code, run_code, node_id, entry_code, channel, outcome_key,
-       next_due_at, claim_token, claimed_at, retry_count, last_error
+       status, next_due_at, claim_token, claimed_at, retry_count, last_error, completed_at
 FROM stratflow.t_sf_mock_action_plan
 WHERE org_code = :orgCode AND run_code = :runCode AND is_deleted = 0
 ORDER BY next_due_at;
@@ -296,8 +285,10 @@ ORDER BY next_due_at;
 
 ### 6.1 校验与守卫
 
-- 未知 forced outcome；
-- 负权重、负延迟；
+- `forcedCaseKey`、固定选择或概率池引用不存在的 Case；
+- Case key/规则名重复，概率池为空、重复 Case、零/负权重，负延迟；
+- CALL/SMS 跨类型字段、当前状态无效字段、NOT_CONNECTED 提前终态；
+- bizFields 规则字段类型与画布 fieldContract 冲突、操作符/右值不合法；
 - receipt window 59 秒；
 - 空 rows；
 - 缺必填字段；
@@ -307,15 +298,16 @@ ORDER BY next_due_at;
 
 ### 6.2 SMS
 
-逐一强制五种结局。超时用例把 receipt window 临时设为 60 秒，并给断言预留至少 3 分钟。
+至少覆盖 DELIVERED、带自定义 `errorCode/errorDesc/partCount` 的 FAILED、NO_RECEIPT。超时用例把 receipt window 临时设为 60 秒，并给断言预留至少 3 分钟。
 
 ### 6.3 CALL
 
-逐一强制九种结局，重点核对：
+分别配置并强制 CONNECTED、NOT_CONNECTED、CANCELLED、NOT_DIALED、NO_RECEIPT，重点核对：
 
-- A/B/C 分支；
-- NO_ANSWER 等失败是否按 maxRedial 生成多次 attempt；
-- REDIAL_THEN_ANSWER 是否先失败后接通；
+- A 与 Z 意向分支，以及自定义通话时长；
+- 全量 RingType 中的典型失败是否按 `maxRedialTimes+1` 生成多次 attempt；
+- 指定后续拨次 CONNECTED/CANCELLED 是否先产生前置失败回执；
+- NOT_DIALED 是否只在首拨终止；
 - TIMEOUT 是否没有合成回执。
 
 ### 6.4 混合、窗口与控制
@@ -352,9 +344,11 @@ DELETE /api/stratflow/mock/config/{versionCode}/{nodeId}
 
 随后验证每个节点：
 
-- `forcedOutcome=null`
-- `baseDelayMs=0`
-- `weight == defaultWeight`
+- `configured=false`；
+- `config` 已回落服务端默认模板；
+- 不再存在旧 `forcedOutcome/weights/baseDelayMs` 字段。
+
+决策历史通过 `GET /api/stratflow/mock/decisions?runCode=...` 查看；DONE 默认保留 7 天。执行 `scope=plans/all` 会连同 DONE 历史一起删除，且可能中断在途回执，只能在明确清场时使用。
 
 恢复开始前快照：
 

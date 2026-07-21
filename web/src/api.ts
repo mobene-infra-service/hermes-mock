@@ -295,7 +295,7 @@ export const clearHTTPMockRequests = (id: number) =>
 // ===== 策略流应用层 mock 编排（透传 hermes-stratflow /openapi/mock）=====
 import type {
   SfGateView, SfNode, SfNodeConfig, SfWorkflow, SfWorkflowDetail,
-  SfCollection, SfField, SfBinding, SfRun, SfRunProgress, SfActionPlan, SfImportResult, SfImportRow, SfDispatchMode,
+  SfCollection, SfField, SfBinding, SfRun, SfRunProgress, SfActionPlan, SfDecisionPage, SfImportResult, SfImportRow, SfDispatchMode,
 } from './types'
 
 // ① gate
@@ -324,6 +324,11 @@ export const sfListPlans = (runCode: string, status?: 'PENDING' | 'DEAD') => {
 }
 export const sfRequeuePlan = (actionCode: string) =>
   postJSON<{ ok: boolean }>(`/stratflow/mock/plans/${encodeURIComponent(actionCode)}/requeue`, {})
+export const sfListDecisions = (runCode: string, pageNo = 1, pageSize = 100, status?: 'PENDING' | 'DEAD' | 'DONE') => {
+  const q = new URLSearchParams({ runCode, pageNo: String(pageNo), pageSize: String(pageSize) })
+  if (status) q.set('status', status)
+  return getJSON<SfDecisionPage>(`/stratflow/mock/decisions?${q}`)
+}
 // ④ 发现
 export const sfWorkflows = () => getJSON<{ workflows: SfWorkflow[] }>('/stratflow/workflows')
 export const sfWorkflowDetail = (defCode: string) => getJSON<SfWorkflowDetail>(`/stratflow/workflows/${encodeURIComponent(defCode)}`)

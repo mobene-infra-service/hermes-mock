@@ -7,6 +7,13 @@
 
 ---
 
+## 2026-07-20 · StratFlow Mock 选择规则与画布 Condition 分层
+
+- **背景**：旧 Mock 用 `CALL_ANSWERED_A/B/C` 等固定套餐同时绑定呼叫状态、意向、振铃和时长，无法覆盖 A–Z 或自由组合；配置页只显示结局名、权重和步数，也无法解释实际产生的变量。名单还需要在同一 run 中按 bizFields 得到不同结果。
+- **决策**：Mock 配置改为类型化命名 Case；选择顺序固定为强制 Case、priority 首条 bizFields 规则、默认选择，规则/默认均可固定或按相对权重选择 Case。规则复用 Hermes Condition 的类型比较语义，但只发生在触达结果产生前；画布 Condition 继续在回执落 `run_var` 后决定业务边，不在 Mock 页复制配置。Mock config 响应直接提供结果/匹配 Schema，不新增 `/mock/condition-dict`。
+- **一致性约束**：CALL 未接通只能在节点 `maxRedialTimes` 耗尽时终态，接通/取消才可提前；SMS SKIPPED 仍是派发前时段路由，不伪造成回执。原始 bizFields 仅进程内匹配并禁止序列化/持久化；REAL CALL 不新增 bizFields 查询。
+- **观测与治理**：完成计划转 DONE，记录命中规则/Case/权重并批量关联真实变量和出口；无回执也保存决策。DONE 保留 7 天分批清理，PENDING/DEAD 永不自动清除。开发阶段不兼容旧配置，部署前清理 `sf:mock:cfg:*`。
+
 ## 2026-07-17 · HTTP Mock 概率响应复用命名 Case 权重池
 
 - **背景**：首版后端已经能按 method/query/header/jsonBody/rawBody 分流，但前端只在列表突出 Allowed Methods，并把 Cases/Rules 暴露成大段 JSON；使用者无法直观看出“什么参数命中什么响应”，也不知道显式 Case、FULL 覆盖等调用方式。另需在同一请求条件下模拟放行/阻断/错误/超时的概率分布。
