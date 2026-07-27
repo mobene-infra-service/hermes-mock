@@ -113,6 +113,152 @@ export interface HTTPMockRequestRecord {
   clientCanceled: boolean
 }
 
+// ===== 可插拔短信厂商 Mock =====
+export type SMSMockSubmitAction = 'RESPOND' | 'TIMEOUT'
+export type SMSMockSubmitResult = 'ACCEPTED' | 'REJECTED' | 'MALFORMED' | 'CUSTOM'
+
+export interface SMSMockSubmissionSpec {
+  action?: SMSMockSubmitAction
+  result?: SMSMockSubmitResult
+  httpStatus?: number
+  delayMs?: number
+  timeoutMs?: number
+  errorCode?: number
+  details?: string
+  parts?: number
+  rawBodyTemplate?: string
+}
+
+export interface SMSMockReceiptSpec {
+  enabled: boolean
+  delayMs?: number
+  statusCode?: string
+  errorCode?: string
+  errorDescription?: string
+  operator?: string
+  repeat?: number
+  repeatIntervalMs?: number
+  rawBodyTemplate?: string
+}
+
+export interface SMSMockCaseSpec {
+  submit: SMSMockSubmissionSpec
+  receipt: SMSMockReceiptSpec
+}
+
+export interface SMSMockEndpointConfig {
+  callbackUrl: string
+  callbackTimeoutMs?: number
+  callbackMaxAttempts?: number
+  callbackRetryBackoffMs?: number
+  allowCaseOverride: boolean
+  defaultCase: string
+  defaultWeightedCases?: HTTPMockWeightedCase[]
+  cases: Record<string, SMSMockCaseSpec>
+  rules?: HTTPMockRule[]
+}
+
+export interface SMSMockEndpoint {
+  id?: number
+  token?: string
+  name: string
+  enabled: boolean
+  provider: string
+  protocolVersion: string
+  config: SMSMockEndpointConfig
+  remark?: string
+  gmtCreate?: string
+  gmtModified?: string
+  invokePath?: string
+  invokeUrl?: string
+}
+
+export interface SMSMockProviderField {
+  path: string
+  label: string
+  description?: string
+}
+
+export interface SMSMockProviderInfo {
+  provider: string
+  protocolVersion: string
+  displayName: string
+  hermesVendorName: string
+  hermesConfig: Record<string, unknown>
+  hermesCallbackHint: string
+  submitContentType: string
+  receiptContentType: string
+  matchFields: SMSMockProviderField[]
+  submitTemplateVariables: string[]
+  receiptTemplateVariables: string[]
+  defaultConfig: SMSMockEndpointConfig
+}
+
+export interface SMSMockMessage {
+  id: number
+  endpointId: number
+  token: string
+  provider: string
+  protocolVersion: string
+  reference: string
+  recipient: string
+  sender: string
+  content: string
+  receivedAt: string
+  remote: string
+  requestBody: string
+  matchedRule: string
+  selectedCase: string
+  selectionMode: string
+  selectedWeight: number
+  totalWeight: number
+  submitAction: string
+  submitState: string
+  submitHttpStatus: number
+  submitResponseBody: string
+  submitCompletedAt?: string
+  receiptEnabled: boolean
+  receiptStatus: string
+  receiptDelayMs: number
+  receiptDueAt?: string
+  receiptTargetCount: number
+  receiptSentCount: number
+  receiptRepeatIntervalMs: number
+  callbackUrl: string
+  callbackMethod: string
+  callbackHeadersJson: string
+  callbackBody: string
+  callbackTimeoutMs: number
+  callbackMaxAttempts: number
+  callbackRetryBackoffMs: number
+  callbackClaimedAt?: string
+  callbackCurrentAttempt: number
+  callbackAttempts: number
+  callbackLastHttpStatus: number
+  callbackLastResponseBody: string
+  callbackLastError: string
+  callbackCompletedAt?: string
+  gmtModified: string
+}
+
+export interface SMSMockCallbackAttempt {
+  id: number
+  messageId: number
+  reference: string
+  deliveryNo: number
+  attemptNo: number
+  startedAt: string
+  completedAt?: string
+  url: string
+  method: string
+  requestHeadersJson: string
+  requestBody: string
+  httpStatus: number
+  responseBody: string
+  error: string
+  success: boolean
+}
+
 // ===== 通话链路可观测（SIP 信令 / ESL / WS / 桥接 时间线）=====
 export type TraceChannel = 'SIP' | 'ESL' | 'WS' | 'BRIDGE' | 'FLOW'
 

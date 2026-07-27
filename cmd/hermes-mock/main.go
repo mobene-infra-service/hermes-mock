@@ -23,6 +23,7 @@ import (
 	"hermes-mock/internal/sipagent"
 	"hermes-mock/internal/sipguard"
 	"hermes-mock/internal/siptrace"
+	"hermes-mock/internal/smsmock"
 	"hermes-mock/internal/testkit"
 	"hermes-mock/internal/tracelog"
 
@@ -109,6 +110,16 @@ func main() {
 	}
 	defer httpMockStore.Close()
 	logrus.Infof("httpmock: 已载入 %d 个 Endpoint", len(httpMockStore.List()))
+	// 短信厂商 Mock：厂商协议适配器 + 持久化 DLR 调度/重试。同进程部署，不改变 SIP 被叫腿边界。
+	smsMockStore, err := smsmock.New(repo, smsmock.DefaultRegistry(), cfg.SMSMockCallbackAllowedHosts)
+	if err != nil {
+		logrus.Fatalf("init SMS mock store: %v", err)
+	}
+	defer smsMockStore.Close()
+	logrus.Infof("smsmock: 已载入 %d 个 Endpoint / %d 个协议适配器", len(smsMockStore.List()), len(smsMockStore.ProviderInfos()))
+	if strings.TrimSpace(cfg.SMSMockCallbackAllowedHosts) == "" {
+		logrus.Warn("SMS_MOCK_CALLBACK_ALLOWED_HOSTS 为空：SMS Mock 可向任意 http/https host 发 DLR；共享部署建议配置 Arke host 白名单")
+	}
 
 	// 6. 启动 SIP agent（diago）：接收 FreeSWITCH 的 INVITE，按入口端口对应的客户集群行为应答（只演客户被叫腿）
 	sipPorts, err := cfg.ListenPorts()
@@ -142,7 +153,7 @@ func main() {
 	// RequestLogger 在外层：统一记录每个请求结果（含错误响应体），根治「接口报错却没日志」。
 	// Recovery 在内层：就地恢复 panic（带堆栈落 Error），恢复后外层 RequestLogger 仍能记到最终 500。
 	r.Use(api.RequestLogger(), api.Recovery())
-	api.Register(r, cfg, repo, clu, tracker, kit, bus, orgStore, cbStore, httpMockStore, orch)
+	api.Register(r, cfg, repo, clu, tracker, kit, bus, orgStore, cbStore, httpMockStore, smsMockStore, orch)
 
 	distFS, _ := fs.Sub(webDist, "web/dist")
 	api.MountFrontend(r, distFS)

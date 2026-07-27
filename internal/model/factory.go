@@ -79,7 +79,14 @@ func (f *RepositoryFactory) createSQLiteRepository(cfg *config.Config) (Reposito
 			return nil, fmt.Errorf("failed to create directory %q: %w", dir, err)
 		}
 	}
-	db, err := f.openGormDB(sqlite.Open(filePath))
+	// DLR worker 与提交 API 会并发写 SQLite。busy_timeout 避免短暂写锁直接冒泡为
+	// "database is locked"，WAL 让观测查询与状态推进可以并行；MySQL 部署不受影响。
+	separator := "?"
+	if strings.Contains(filePath, "?") {
+		separator = "&"
+	}
+	dsn := filePath + separator + "_busy_timeout=5000&_journal_mode=WAL"
+	db, err := f.openGormDB(sqlite.Open(dsn))
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to SQLite: %w", err)
 	}
@@ -132,6 +139,9 @@ func (f *RepositoryFactory) migrateSchema(db *gorm.DB) error {
 		&entity.Callback{},
 		&entity.HTTPMockEndpoint{},
 		&entity.HTTPMockRequest{},
+		&entity.SMSMockEndpoint{},
+		&entity.SMSMockMessage{},
+		&entity.SMSMockCallbackAttempt{},
 		&entity.OrgConfig{},
 	); err != nil {
 		return err

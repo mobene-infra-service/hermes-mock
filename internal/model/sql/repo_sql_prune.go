@@ -16,7 +16,7 @@ const pruneBatch = 5000
 
 // PruneObservations 删除 started_at/ts 早于 before 的观测行，返回删除总行数。
 // 每张表分批循环删，直到删完或 ctx 到期（到期则本轮删多少算多少，余量下轮继续，不算失败）。
-// 删除顺序：先事件（量最大）→ HTTP Mock 调用记录 → 呼叫记录 → 链路腿 → 回调。
+// 删除顺序：先事件（量最大）→ HTTP/SMS Mock 观测 → 呼叫记录 → 链路腿 → 回调。
 func (r *GormRepository) PruneObservations(ctx context.Context, before time.Time) (int64, error) {
 	var total int64
 	steps := []struct {
@@ -25,9 +25,13 @@ func (r *GormRepository) PruneObservations(ctx context.Context, before time.Time
 	}{
 		{&entity.TraceEvent{}, "ts < ?"},               // 按 ts（已加 idx_event_ts，走索引）
 		{&entity.HTTPMockRequest{}, "received_at < ?"}, // 按 received_at（idx_http_req_received）
-		{&entity.MockCall{}, "started_at < ?"},         // 按 started_at（有复合索引含 started_at）
-		{&entity.TraceLeg{}, "started_at < ?"},         // 按 started_at（idx_leg_time）
-		{&entity.Callback{}, "ts < ?"},                 // 按 ts（idx_cb_ts）
+		// SMS message 同时是持久化 DLR 任务：只清理终态，绝不按 TTL 删除 WAITING/PENDING/RETRY/DELIVERING。
+		{&entity.SMSMockMessage{}, "received_at < ? AND receipt_status IN ('NOT_SCHEDULED','SUCCEEDED','FAILED','CANCELED')"},
+		// message 先删，再同时清过期 attempt 与刚产生的孤儿，避免旧消息近期手工重发后残留无主 attempt。
+		{&entity.SMSMockCallbackAttempt{}, "started_at < ? OR NOT EXISTS (SELECT 1 FROM mock_sms_message WHERE mock_sms_message.id = mock_sms_callback_attempt.message_id)"},
+		{&entity.MockCall{}, "started_at < ?"}, // 按 started_at（有复合索引含 started_at）
+		{&entity.TraceLeg{}, "started_at < ?"}, // 按 started_at（idx_leg_time）
+		{&entity.Callback{}, "ts < ?"},         // 按 ts（idx_cb_ts）
 	}
 	for _, s := range steps {
 		n, err := r.pruneTable(ctx, s.model, s.cond, before)

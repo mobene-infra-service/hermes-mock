@@ -7,6 +7,15 @@
 
 ---
 
+## 2026-07-24 · 短信 Mock 使用独立状态机 + 版本化厂商 Adapter，不塞进通用 HTTP Mock
+
+- **根本问题**：Hermes-Arke 调厂商并非一次请求/响应结束，而是“同步提交结果 → 稍后以同一 reference 异步 DLR”的两阶段协议；还要覆盖延迟、丢回执、重复回执、网络失败重试和重启恢复。通用 HTTP Mock 是单次无状态响应桩，直接扩展会把回调调度、关联和生命周期混进其数据面。
+- **决策**：SMS Mock 在同一 hermes-mock 进程内作为独立模块与页面存在；厂商无关核心负责规范化消息、复用 HTTP Mock 的规则/概率选择器、持久化任务、指数退避、重复/手工投递和观测。线格式全部收进 `Adapter`，以 `provider/protocolVersion` 注册并允许版本并存；当前实现 `CM/v1`。新增厂商或请求语义变更只新增 Adapter + 契约测试，不复制 worker、表或页面。
+- **快速演进**：响应或 DLR 的小字段变化可在 Case 中用受限 `${reference}` 等模板调整，不执行表达式，渲染后必须是合法 JSON 且保留精确 reference。请求结构/认证/语义变化不靠万能映射掩盖，新增 `CM/v2` Adapter，使历史 v1 用例可继续复现；Endpoint 的 provider/version 创建后不可变，升级必须新建，避免旧 token 被原地改义。提交 method/query/header/body 解析、同步响应 header/body、DLR method/header/body 均归 Adapter，核心不再假设 POST+JSON；已用非 POST 提交 + 非 POST DLR 的契约测试证明新增厂商不用改状态机。Adapter 能力元数据同时给页面提供 Hermes vendor/config/callback 提示，避免新增厂商还要改硬编码 UI。
+- **可靠性语义**：Accepted 前先同步落 `mock_sms_message`，随后激活 DLR；未写出 Accepted 的客户端断开会同时终止 WAITING DLR，超过最大响应时长仍为 `PENDING_RESPONSE` 的进程崩溃遗留也由 lease recovery 终止，且提交 CAS 防旧执行流重新激活。worker 用 DB CAS claim，失败按指数退避；`callback_claimed_at` lease 防新实例把另一实例仍在执行的任务误恢复，scheduler 只按空闲 worker 数 claim，杜绝慢回调在内存排队超过 lease 后被重复认领；进程崩溃后的过期 callback claim 仍按 at-least-once 重投。自动重复的 `delivery_no` 与网络重试的 `attempt_no` 分开；终态才参与 TTL，删除/清空会等待本进程在途回调并跳过队列陈旧任务。Endpoint 虽保留本地缓存，但短信数据面每次按 token 以 DB 为准刷新，使滚动部署/多副本可立即看到另一实例的创建、修改和删除。
+- **CM 契约依据**：对照 Hermes 实际 `SmsCmService`/DTO：请求读取 `messages.authentication.producttoken` 与 `messages.msg[*]`，Accepted 响应读取全局/消息级错误码，回调读取 `messages.msg.reference/status`；成功判断是 `status.errorCode.isBlank()`，所以成功 DLR 必须发送空字符串而非 `"0"`。产品 token 只参与当次规则匹配，持久化请求中强制脱敏。
+- **边界与安全**：主动 HTTP DLR 是被测外部依赖的必要行为，不是 SIP UAC，不改变客户被叫腿边界。回调只允许 http/https、禁 userinfo/redirect，可用 `SMS_MOCK_CALLBACK_ALLOWED_HOSTS` 限 host；本模块不做代理真实厂商、不做生产短信网关、不保存真实 token。
+
 ## 2026-07-20 · StratFlow Mock 选择规则与画布 Condition 分层
 
 - **背景**：旧 Mock 用 `CALL_ANSWERED_A/B/C` 等固定套餐同时绑定呼叫状态、意向、振铃和时长，无法覆盖 A–Z 或自由组合；配置页只显示结局名、权重和步数，也无法解释实际产生的变量。名单还需要在同一 run 中按 bizFields 得到不同结果。

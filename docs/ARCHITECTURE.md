@@ -16,6 +16,7 @@
  │ siptrace+tracelog: 传输层抓真实 SIP 报文，聚合成链路时间线（周期落库）            │
  │ calltrace/callbacks: 每通被叫 / Hermes 回调 落库（mock_call/mock_callback）    │
  │ httpmock:       通用 /mock/{token} 规则响应；配置缓存 + 调用记录异步落库       │
+ │ smsmock:        短信厂商协议 Adapter + 提交响应 + 持久化 DLR 调度/重试/恢复     │
  └────────────────────────▲───────────────────────────────────────────────┘
               真实 SIP/RTP │（Hermes 线路 t_line.address 指向 mock）
  ┌────────────────────────┴───────────────────────────────────────────────┐
@@ -49,7 +50,7 @@ docs/                    本套文档
 | 包 | 职责 |
 |---|---|
 | `config` | 环境变量集中声明与解析（HTTP / SIP-RTP / DB；业务接入配置一律在「机构」页，不走 env） |
-| `entity` | **持久化对象（PO）+ 共享 DTO**：12 个 GORM 实体（客户配置/呼叫与链路观测/Hermes 回调/通用 HTTP Mock 配置与调用记录/机构配置）+ Meta/Resolved/过滤器。依赖图叶子。gorm tag 为 schema 权威 |
+| `entity` | **持久化对象（PO）+ 共享 DTO**：15 个 GORM 实体（客户配置/呼叫与链路观测/Hermes 回调/HTTP 与短信 Mock/机构配置）+ Meta/Resolved/过滤器。依赖图叶子。gorm tag 为 schema 权威 |
 | `model` | **Repository 接口唯一定义处** + 工厂（DBType=mysql/sqlite，openGormDB 统一连接池，启动 AutoMigrate 全实体）；`model/sql` 子包按表分文件实现（GormRepository） |
 | `cluster` | **客户集群领域服务**：四类配置的内存缓存 + `ResolveByNumber/ResolveByLine`（SIP 来话热路径，只读缓存不查库）+ `TakeNumbers` 取号游标；写穿透 Repository |
 | `orgcfg` | 机构 OpenAPI 接入配置缓存 + 当前机构选择（gateway 走网关 X-OpenApi-Key / direct 注入 ORG 头）；写穿透 Repository |
@@ -60,6 +61,7 @@ docs/                    本套文档
 | `orchestrator` | 经 Hermes 业务 REST/OpenAPI 触发 call-bot/otp/call-center 任务 + 坐席操作 |
 | `callbacks` | 接收 Hermes 回调（webhook）→ 经 Repository 落 `mock_callback` |
 | `httpmock` | **通用 HTTP Mock 领域服务**：Endpoint 配置/规则强校验并常驻内存；支持默认响应、命名 Case、method/query/header/jsonBody/rawBody 条件规则、默认/规则级 Case 权重池和 NONE/CASE_ONLY/FULL 本次覆盖；调用记录经有界队列异步落 `mock_http_request`，不阻塞数据面 |
+| `smsmock` | **短信厂商 Mock 领域服务**：厂商无关的 Case/规则/概率选择与持久化 DLR 状态机；`Adapter` 负责提交 method/query/header/body、同步响应、DLR method/header/body 和接入提示，按 `provider/protocolVersion` 并存。当前注册 `CM/v1`；DLR 支持延迟、失败、重复、网络重试、手工立即/重发/取消、重启恢复和多实例 claim lease，scheduler 只 claim 空闲 worker 可立即执行的任务。Endpoint 写穿透缓存，但数据面按 token 以 DB 为准刷新，避免多副本配置漂移 |
 | `testkit` | 业务测试编排（触发 + 真实 SIP 断言）；`SetBizCaller(orch)` 接 orchestrator，`SetRepo` 落测试历史 |
 | `api` | Gin 路由 + REST + 前端 embed 挂载（`Register` / `MountFrontend`）；请求/出站 Hermes 调用统一日志见 `middleware.go` / `hermesopenapi/logging.go`；`stratflow.go`=策略流应用层 mock 编排透传（`/api/stratflow/mock/*`） |
 
@@ -99,6 +101,19 @@ call-center/call-bot：任务 confirmUrlBeforeDial 可选择已启用 Endpoint/C
 按 HTTP_MOCK_PUBLIC_BASE_URL → forwarded 当前域名的顺序补全。HTTP 200 + 裸文本 false 时 Hermes 阻断拨打。
 ```
 
+**短信厂商 Mock（Hermes-Arke 外部依赖桩）**：
+```
+Hermes-Arke ──ANY /sms-mock/{provider}/{token}──▶ 对应版本 Adapter 决定 method/query/header/body 契约（CM/v1 为 POST JSON）
+            └─ 核心按规范化 reference/recipient/sender/content + Query/Header/RawBody 选择 Case
+            └─ 同步持久化 message/DLR 计划后，才由 Adapter 返回 Accepted/Rejected/畸形响应或保持连接超时
+
+持久化 scheduler ──按空闲 worker claim due task──▶ Adapter 指定 method/header/body 的厂商 DLR 到 Endpoint.callbackUrl
+                  └─ 2xx 成功；失败按指数退避重试；重复 DLR 的 deliveryNo 与网络 attemptNo 分开
+                  └─ 进程重启恢复过期 claim，非终态任务不被 OBSERVE_TTL_DAYS 清理
+```
+
+通用 HTTP Mock 只复用规则/概率选择器，不承载短信两阶段状态机。CM 小版本仅改响应/DLR 字段时可用受限模板；请求结构或语义变化新增 `CM/v2` Adapter，旧 Endpoint 继续使用 v1。新增厂商同样只注册新 Adapter，调度、持久化和页面共用。
+
 ## 五、技术栈与版本锁
 
 | 层 | 选型 |
@@ -128,14 +143,15 @@ call-center/call-bot：任务 confirmUrlBeforeDial 可选择已启用 Endpoint/C
 | `/trace` | CallTracePage | 通话链路：会话列表 + 事件时间线（可展开原始 SIP） |
 | `/callbacks` | CallbacksPage | Hermes 回调（webhook）接收与查询 |
 | `/http-mock` | HttpMockPage | 通用 HTTP Mock Endpoint：结构化命名 Case/请求条件/固定或概率结果编辑、真实 URL 调用示例、FULL 覆盖、调用记录与手工清理 |
+| `/sms-mock` | SmsMockPage | 短信厂商 Mock：协议/版本 Endpoint、语义化提交与 DLR Case、条件/概率规则、Arke 接入配置、消息与 callback attempt 观测、手工立即/重发/取消 |
 
 > 业务测试场景页共享公共模块：`components/scenario/utils.tsx`（ScenarioSummary/CallBoard/CallRows/RunSteps/JSONBlock/ReadyLabel + 工具）、`components/scenario/ScenarioHeader.tsx`（基于 PageHeader+InfoBanner）、`hooks/useScenarioMeta.ts`（机构/客户组/技能组/TTS/端口绑定/preflight 加载 + 派生选项 + 播种）。应用外壳与设计系统：`components/layout/{Sidebar,TopBar,PageHeader,InfoBanner,nav,useCurrentOrg}` + `constants/theme.ts`（slate/blue 色板 + Antd token 单一来源，与 `index.css` 的 CSS 变量对齐）。坐席软电话：`components/AgentSoftphone.tsx` + `sip/{index,controller,request}.ts`（多实例 jssip）。
 
-## 七、持久化（hermes_mock 库，12 张 mock_* 表）
+## 七、持久化（hermes_mock 库，15 张 mock_* 表）
 
 DDL：`deploy/ddl/hermes_mock.sql`（实体 gorm tag 为 schema 权威，DDL 为生成快照）。
 
-**配置域**：`mock_behavior_profile` · `mock_customer_group` · `mock_customer_override`（复合唯一 `group_code+number`）· `mock_line_binding`（`listen_port→组`）· `mock_org_config` · `mock_http_endpoint`（通用 HTTP Mock 规则/响应配置）
+**配置域**：`mock_behavior_profile` · `mock_customer_group` · `mock_customer_override`（复合唯一 `group_code+number`）· `mock_line_binding`（`listen_port→组`）· `mock_org_config` · `mock_http_endpoint`（通用 HTTP Mock 规则/响应配置）· `mock_sms_endpoint`（厂商/协议版本 + 厂商无关 Case/规则/DLR 配置）
 
 **记录域**（`call_uuid` 为聚合锚）：
 - `mock_call`（**聚合根**，一通电话 1 行）：发起面(scenario/source/org/task/run/customer/agent/line/expect_outcome) + 结果面(status/result/hangup/时间/duration)。被叫腿 `record_id == call_uuid`（INVITE 重传幂等合并）。
@@ -143,5 +159,6 @@ DDL：`deploy/ddl/hermes_mock.sql`（实体 gorm tag 为 schema 权威，DDL 为
 - `mock_trace_event`（单腿时间线 + 原始 SIP 报文）
 - `mock_callback`（Hermes webhook，按 `call_uuid` 关联）· `mock_test_run`（测试运行历史）
 - `mock_http_request`（通用 HTTP Mock 请求/命中规则/固定或概率选择模式、命中 Case/权重/最终响应；数据面异步写入）
+- `mock_sms_message`（厂商提交事实 + 同步响应 + 持久化 DLR 状态机；product token 脱敏）· `mock_sms_callback_attempt`（每次真实 DLR HTTP 投递，区分自动重复与网络重试）
 
-观测域（call/trace/callback/http_mock_request）按 `OBSERVE_TTL_DAYS`（默认 7）周期分批清理防膨胀；HTTP Mock 页面也支持按 Endpoint 手工清空调用记录。配置域不清理。
+观测域按 `OBSERVE_TTL_DAYS`（默认 7）周期分批清理防膨胀；短信 message 兼具任务属性，只有 `NOT_SCHEDULED/SUCCEEDED/FAILED/CANCELED` 终态可清，`WAITING_SUBMIT/PENDING/RETRY/DELIVERING` 永不按 TTL 删除。HTTP/SMS Mock 页面均支持 Endpoint 级手工清空；配置域不清理。

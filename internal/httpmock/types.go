@@ -79,6 +79,16 @@ type EndpointConfig struct {
 	Rules                []Rule                  `json:"rules,omitempty"`
 }
 
+// NormalizeEndpointConfig 返回经过与 Endpoint 保存时相同强校验的配置副本。
+// 短信 Mock 等协议适配器可借此复用通用 HTTP Mock 的规则/概率选择语义，
+// 而不必依赖 Endpoint 持久化模型。
+func NormalizeEndpointConfig(config EndpointConfig) (EndpointConfig, error) {
+	if err := config.normalizeAndValidate(); err != nil {
+		return EndpointConfig{}, err
+	}
+	return config, nil
+}
+
 // Endpoint API 层使用的强类型配置视图。
 type Endpoint struct {
 	ID          int64          `json:"id"`

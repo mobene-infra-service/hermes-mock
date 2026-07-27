@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -79,6 +80,47 @@ func TestHTTPMockEndpointCRUDAndRequestCascade(t *testing.T) {
 	}
 	if requests, _ := repo.ListHTTPMockRequests(ctx, entity.HTTPMockRequestFilter{EndpointID: endpoint.ID}); len(requests) != 0 {
 		t.Fatalf("调用记录未级联删除: %+v", requests)
+	}
+}
+
+func TestSMSMockEndpointAndMessageCascade(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := context.Background()
+	endpoint := entity.SMSMockEndpoint{
+		Token: "sms-token", Name: "CM", Enabled: true, Provider: "CM", ProtocolVersion: "v1",
+		ConfigJSON: `{"callbackUrl":"","defaultCase":"no-dlr","cases":{"no-dlr":{"submit":{},"receipt":{"enabled":false}}}}`,
+	}
+	if err := repo.UpsertSMSMockEndpoint(ctx, &endpoint); err != nil {
+		t.Fatal(err)
+	}
+	rows := []entity.SMSMockMessage{{
+		EndpointID: endpoint.ID, Token: endpoint.Token, Provider: "CM", ProtocolVersion: "v1",
+		Reference: "ref-cascade", ReceivedAt: time.Now().UTC(), SubmitState: entity.SMSMockSubmitResponded,
+		ReceiptStatus: entity.SMSMockReceiptSucceeded,
+	}}
+	if err := repo.CreateSMSMockMessages(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateSMSMockCallbackAttempt(ctx, &entity.SMSMockCallbackAttempt{
+		MessageID: rows[0].ID, Reference: rows[0].Reference, StartedAt: time.Now().UTC(), Success: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.DeleteSMSMockEndpoint(ctx, endpoint.ID); err != nil {
+		t.Fatal(err)
+	}
+	if endpoints, _ := repo.ListSMSMockEndpoints(ctx); len(endpoints) != 0 {
+		t.Fatalf("SMS endpoint 未删除: %+v", endpoints)
+	}
+	if messages, _ := repo.ListSMSMockMessages(ctx, entity.SMSMockMessageFilter{EndpointID: endpoint.ID}); len(messages) != 0 {
+		t.Fatalf("SMS message 未级联删除: %+v", messages)
+	}
+	if attempts, _ := repo.ListSMSMockCallbackAttempts(ctx, rows[0].ID, 10); len(attempts) != 0 {
+		t.Fatalf("SMS callback attempt 未级联删除: %+v", attempts)
+	}
+	endpoint.Name = "stale-writer"
+	if err := repo.UpsertSMSMockEndpoint(ctx, &endpoint); err == nil {
+		t.Fatal("多实例中的陈旧更新不应通过 GORM Save 重新插回已删除 Endpoint")
 	}
 }
 
@@ -317,5 +359,73 @@ func TestPruneObservations(t *testing.T) {
 	}
 	if requests, _ := repo.ListHTTPMockRequests(ctx, entity.HTTPMockRequestFilter{EndpointID: hm.ID}); len(requests) != 1 || !requests[0].ReceivedAt.Equal(fresh) {
 		t.Errorf("HTTP Mock 调用记录应只剩新记录: %+v", requests)
+	}
+}
+
+func TestPruneSMSMockKeepsEveryNonTerminalTask(t *testing.T) {
+	repo := newTestRepo(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	old := now.Add(-8 * 24 * time.Hour)
+	fresh := now.Add(-time.Hour)
+	before := now.Add(-7 * 24 * time.Hour)
+
+	endpoint := entity.SMSMockEndpoint{Token: "sms-ttl", Name: "CM", Enabled: true, Provider: "CM", ProtocolVersion: "v1", ConfigJSON: `{}`}
+	if err := repo.UpsertSMSMockEndpoint(ctx, &endpoint); err != nil {
+		t.Fatal(err)
+	}
+	terminal := []string{
+		entity.SMSMockReceiptNotScheduled, entity.SMSMockReceiptSucceeded,
+		entity.SMSMockReceiptFailed, entity.SMSMockReceiptCanceled,
+	}
+	nonTerminal := []string{
+		entity.SMSMockReceiptWaiting, entity.SMSMockReceiptPending,
+		entity.SMSMockReceiptRetry, entity.SMSMockReceiptDelivering,
+	}
+	var rows []entity.SMSMockMessage
+	for i, status := range terminal {
+		rows = append(rows, entity.SMSMockMessage{EndpointID: endpoint.ID, Reference: fmt.Sprintf("terminal-%d", i), ReceivedAt: old, ReceiptStatus: status})
+	}
+	for i, status := range nonTerminal {
+		rows = append(rows, entity.SMSMockMessage{EndpointID: endpoint.ID, Reference: fmt.Sprintf("active-%d", i), ReceivedAt: old, ReceiptStatus: status})
+	}
+	rows = append(rows, entity.SMSMockMessage{EndpointID: endpoint.ID, Reference: "fresh-terminal", ReceivedAt: fresh, ReceiptStatus: entity.SMSMockReceiptSucceeded})
+	if err := repo.CreateSMSMockMessages(ctx, rows); err != nil {
+		t.Fatal(err)
+	}
+	// 即使 attempt 很新，父消息按 TTL 删除后也必须在同轮清掉，不能留下孤儿。
+	if err := repo.CreateSMSMockCallbackAttempt(ctx, &entity.SMSMockCallbackAttempt{
+		MessageID: rows[1].ID, Reference: rows[1].Reference, StartedAt: fresh, Success: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	n, err := repo.PruneObservations(ctx, before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != int64(len(terminal)+1) {
+		t.Fatalf("应删除 %d 条终态消息 + 1 条孤儿 attempt，got %d", len(terminal), n)
+	}
+	remaining, err := repo.ListSMSMockMessages(ctx, entity.SMSMockMessageFilter{EndpointID: endpoint.ID, Limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != len(nonTerminal)+1 {
+		t.Fatalf("非终态与新终态应保留，got %+v", remaining)
+	}
+	statuses := make(map[string]bool, len(remaining))
+	for _, row := range remaining {
+		statuses[row.ReceiptStatus] = true
+	}
+	for _, status := range nonTerminal {
+		if !statuses[status] {
+			t.Errorf("非终态 %s 被 TTL 误删", status)
+		}
+	}
+	if attempts, _ := repo.ListSMSMockCallbackAttempts(ctx, rows[1].ID, 10); len(attempts) != 0 {
+		t.Fatalf("父消息已删但 attempt 残留: %+v", attempts)
+	}
+	if endpoints, _ := repo.ListSMSMockEndpoints(ctx); len(endpoints) != 1 {
+		t.Fatalf("Endpoint 配置不应被 TTL 清理: %+v", endpoints)
 	}
 }

@@ -3,6 +3,15 @@
 > 本项目改动按主题记录（倒序，最新在上）。决策原因见 [DECISIONS.md](DECISIONS.md)，当前状态见 [STATUS.md](STATUS.md)。
 ---
 
+## 2026-07-24
+
+- **新增 Hermes-Arke 短信厂商 Mock**：新增 `/sms-mock` 页面、`/api/sms-mocks/**` 控制面和 `ANY /sms-mock/{provider}/{token}` 数据面（当前 CM/v1 要求 POST JSON）。Endpoint 可配置语义化提交/DLR Case、priority AND 条件、固定或概率 Case；内置 Accepted-送达、Accepted-失败、提交拒绝、超时、畸形响应、无 DLR、重复 DLR。页面展示 Hermes `t_sms_vendor` 配置、消息决策和每次 callback attempt，并支持立即投递、完成后重发和取消等待任务。
+- **可演进协议架构**：短信核心只处理规范化消息、选择与持久化任务，具体线格式由 `provider/protocolVersion` Adapter 隔离；当前注册 `CM/v1`。Adapter 能力 API 同时提供版本、匹配字段、模板变量、默认配置和 Hermes 接入提示，新增厂商不需复制 worker/页面。响应/DLR 小字段变化可用受限模板，渲染后必须合法且包含精确 reference；请求结构或语义变化新增并存版本 Adapter。
+- **CM 真实契约与安全**：对照 Hermes `SmsCmService`/DTO 保留请求 reference，Accepted 响应回显 reference/to/parts，DLR 使用 `messages.msg`；成功回执按 Hermes 的 `errorCode.isBlank()` 发送空字符串，失败预置为 code 3/error 206。持久化前把 `producttoken` 替换为 `[REDACTED]`；请求体限制 1 MiB，回调只允许 http/https、禁 userinfo 与 redirect，并新增可选 `SMS_MOCK_CALLBACK_ALLOWED_HOSTS`。
+- **Adapter transport 与状态机并发收口**：提交 method/query/header/body、同步响应 Header、DLR method/header/body 全部下沉到版本化 Adapter，并用 PATCH 提交 + PUT/签名 Header DLR 的假厂商契约测试验证核心无需改动；provider/version 创建后不可变，升级须新建 Endpoint 以保留旧 token/用例。scheduler 改为只 claim 空闲 worker 数量，避免慢回调任务在内存队列等待超过 lease 后被其它实例重复认领；message/attempt 同步记录实际 DLR method 与 headers。客户端未收到 Accepted 或进程崩溃遗留的 stale `PENDING_RESPONSE` 会终止 WAITING DLR，提交 CAS 防旧执行流复活，避免非终态记录永久滞留。
+- **持久化 DLR 可靠性**：新增 `mock_sms_endpoint/message/callback_attempt`。Accepted 前先落 message，worker 用 DB CAS claim，失败指数退避，自动重复 `deliveryNo` 与网络重试 `attemptNo` 分开；`callback_claimed_at` lease 避免多实例抢正在执行的任务，崩溃后的过期 claim 按 at-least-once 恢复。短信数据面按 token 以 DB 为准刷新，另一副本创建/删除 Endpoint 可立即生效；清空/删除等待本进程在途投递并丢弃队列陈旧快照。只有终态消息参与 TTL，非终态永久保留，父消息删除时同步清孤儿 attempt。SQLite 启用 WAL/busy timeout，并消除读后写事务的 lock-upgrade 冲突。
+- **验证**：CM Adapter/Arke API 契约、规则概率/显式 Case、模板阶段变量与 reference 正确路径、不兼容批次、非 POST 新厂商 transport、重试重复手工重发、提交前取消/stale 恢复、多实例 lease、慢回调 claim 上限、清空竞态、回调 URL/redirect 安全、协议版本不可变、级联删除与 TTL 均有测试；定向 race 以 `-count=1` 通过，清空/恢复/新 Adapter 三项竞态连续 20 轮通过。`go test ./...`、`go vet ./...`、`go build ./...`、TypeScript/Vite build、embed 一致性与 `git diff --check` 全绿。本地临时 SQLite 服务经真实 HTTP 完成 Endpoint 创建 → CM Accepted → 自动 DLR → message `SUCCEEDED`/attempt HTTP 200，抓到成功 DLR `errorCode=""` 且数据库仅留脱敏 token。浏览器运行时无可用实例，未做页面点击截图；`npm run lint` 仍因仓库未安装 eslint 无法执行。
+
 ## 2026-07-21
 
 - **StratFlow 名单批量生成与 CSV 导入**：`/stratflow-mock` 的「选名单导入触发 run」新增连续手机号批量生成，支持覆盖或追加、保留 `+`/前导零，单次上限 10000 条；逐行名单改为导入 Org 页面下载的 CSV 模板，而不是 JSON 文件。CSV 保留手机号文本，支持标准双引号/逗号/CRLF/BOM；已知字段按 Key/显示名归一，已知数组字段按 `|` 拆分，未在当前集合发现的表头和值也原样写入 `bizFields` 提交，由 Hermes 作最终字段契约判定。导入成功后同步号码区并保留每行业务字段作为本次提交事实源。公共业务字段 JSON 仅用于手填/批量生成号码时给全部号码赋同一对象。

@@ -120,3 +120,27 @@ type HTTPMockRequestFilter struct {
 	Keyword      string
 	Limit        int
 }
+
+// SMSMockMessageFilter 短信厂商 Mock 消息筛选。
+type SMSMockMessageFilter struct {
+	EndpointID    int64
+	Reference     string
+	Recipient     string
+	SelectedCase  string
+	ReceiptStatus string
+	Keyword       string
+	Limit         int
+}
+
+// SMSMockCallbackUpdate 是 callback worker 对一条已 claim 消息的原子状态推进。
+type SMSMockCallbackUpdate struct {
+	MessageID           int64
+	NextStatus          string
+	NextDueAt           *time.Time
+	HTTPStatus          int
+	ResponseBody        string
+	LastError           string
+	IncrementSent       bool
+	ResetCurrentAttempt bool
+	CompletedAt         *time.Time
+}

@@ -61,6 +61,26 @@ type Repository interface {
 	ListHTTPMockRequests(ctx context.Context, f entity.HTTPMockRequestFilter) ([]entity.HTTPMockRequest, error)
 	DeleteHTTPMockRequests(ctx context.Context, endpointID int64) (int64, error)
 
+	// ---- 短信厂商 Mock（Endpoint 配置 + 持久化 DLR 状态机）----
+	ListSMSMockEndpoints(ctx context.Context) ([]entity.SMSMockEndpoint, error)
+	GetSMSMockEndpoint(ctx context.Context, id int64) (*entity.SMSMockEndpoint, error)
+	GetSMSMockEndpointByToken(ctx context.Context, token string) (*entity.SMSMockEndpoint, error)
+	UpsertSMSMockEndpoint(ctx context.Context, row *entity.SMSMockEndpoint) error
+	DeleteSMSMockEndpoint(ctx context.Context, id int64) error
+	CreateSMSMockMessages(ctx context.Context, rows []entity.SMSMockMessage) error
+	ListSMSMockMessages(ctx context.Context, f entity.SMSMockMessageFilter) ([]entity.SMSMockMessage, error)
+	GetSMSMockMessage(ctx context.Context, id int64) (*entity.SMSMockMessage, error)
+	DeleteSMSMockMessages(ctx context.Context, endpointID int64) (int64, error)
+	CompleteSMSMockSubmission(ctx context.Context, ids []int64, state string, completedAt time.Time, activateReceipt bool) error
+	RecoverSMSMockSubmissions(ctx context.Context, staleBefore, recoveredAt time.Time) (int64, error)
+	ClaimDueSMSMockCallbacks(ctx context.Context, now time.Time, limit int) ([]entity.SMSMockMessage, error)
+	UpdateSMSMockCallback(ctx context.Context, update entity.SMSMockCallbackUpdate) error
+	EnqueueSMSMockCallback(ctx context.Context, id int64, now time.Time) (*entity.SMSMockMessage, error)
+	CancelSMSMockCallback(ctx context.Context, id int64) error
+	RecoverSMSMockCallbacks(ctx context.Context, staleBefore, retryAt time.Time) (int64, error)
+	CreateSMSMockCallbackAttempt(ctx context.Context, row *entity.SMSMockCallbackAttempt) error
+	ListSMSMockCallbackAttempts(ctx context.Context, messageID int64, limit int) ([]entity.SMSMockCallbackAttempt, error)
+
 	// ---- 机构 OpenAPI 接入配置 ----
 	ListOrgConfigs(ctx context.Context) ([]entity.OrgConfig, error)
 	UpsertOrgConfig(ctx context.Context, c *entity.OrgConfig) error

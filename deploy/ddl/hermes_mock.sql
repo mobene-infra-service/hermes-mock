@@ -358,3 +358,112 @@ CREATE TABLE `mock_http_request` (
   KEY `idx_http_req_case` (`selected_case`),
   KEY `idx_http_req_selection` (`selection_mode`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='通用 HTTP Mock 调用记录';
+
+-- ============================================================
+-- mock_sms_endpoint：可插拔短信厂商协议 Endpoint 配置。
+-- provider + protocol_version 选择适配器；config_json 保存厂商无关 Case/规则/DLR 计划。
+-- ============================================================
+DROP TABLE IF EXISTS `mock_sms_endpoint`;
+CREATE TABLE `mock_sms_endpoint` (
+  `id`               bigint unsigned NOT NULL AUTO_INCREMENT,
+  `token`            varchar(32)  NOT NULL DEFAULT '',
+  `name`             varchar(128) NOT NULL DEFAULT '',
+  `enabled`          tinyint      NOT NULL DEFAULT 1,
+  `provider`         varchar(32)  NOT NULL DEFAULT '',
+  `protocol_version` varchar(32)  NOT NULL DEFAULT '',
+  `config_json`      json         NOT NULL,
+  `remark`           varchar(255) NOT NULL DEFAULT '',
+  `gmt_create`       datetime     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `gmt_modified`     datetime     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_sms_mock_token` (`token`),
+  KEY `idx_sms_mock_name` (`name`),
+  KEY `idx_sms_mock_protocol` (`provider`, `protocol_version`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='短信厂商 Mock Endpoint 配置';
+
+-- ============================================================
+-- mock_sms_message：短信提交观测 + 持久化 DLR 状态机。
+-- 非终态 WAITING_SUBMIT/PENDING/RETRY/DELIVERING 不受 TTL 清理，避免重启或长延迟丢回调。
+-- ============================================================
+DROP TABLE IF EXISTS `mock_sms_message`;
+CREATE TABLE `mock_sms_message` (
+  `id`                          bigint unsigned NOT NULL AUTO_INCREMENT,
+  `endpoint_id`                 bigint        NOT NULL DEFAULT 0,
+  `token`                       varchar(32)   NOT NULL DEFAULT '',
+  `provider`                    varchar(32)   NOT NULL DEFAULT '',
+  `protocol_version`            varchar(32)   NOT NULL DEFAULT '',
+  `reference`                   varchar(128)  NOT NULL DEFAULT '',
+  `recipient`                   varchar(64)   NOT NULL DEFAULT '',
+  `sender`                      varchar(128)  NOT NULL DEFAULT '',
+  `content`                     text          NULL,
+  `received_at`                 datetime(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  `remote`                      varchar(64)   NOT NULL DEFAULT '',
+  `request_body`                mediumtext    NULL COMMENT 'producttoken 已脱敏',
+  `matched_rule`                varchar(128)  NOT NULL DEFAULT '',
+  `selected_case`               varchar(64)   NOT NULL DEFAULT '',
+  `selection_mode`              varchar(24)   NOT NULL DEFAULT '',
+  `selected_weight`             int           NOT NULL DEFAULT 0,
+  `total_weight`                int           NOT NULL DEFAULT 0,
+  `submit_action`               varchar(16)   NOT NULL DEFAULT 'RESPOND',
+  `submit_state`                varchar(24)   NOT NULL DEFAULT 'PENDING_RESPONSE',
+  `submit_http_status`          int           NOT NULL DEFAULT 200,
+  `submit_response_body`        mediumtext    NULL,
+  `submit_completed_at`         datetime(3)   NULL,
+  `receipt_enabled`             tinyint       NOT NULL DEFAULT 0,
+  `receipt_status`              varchar(24)   NOT NULL DEFAULT 'NOT_SCHEDULED',
+  `receipt_delay_ms`            int           NOT NULL DEFAULT 0,
+  `receipt_due_at`              datetime(3)   NULL,
+  `receipt_target_count`        int           NOT NULL DEFAULT 0,
+  `receipt_sent_count`          int           NOT NULL DEFAULT 0,
+  `receipt_repeat_interval_ms`  int           NOT NULL DEFAULT 0,
+  `callback_url`                varchar(1024) NOT NULL DEFAULT '',
+  `callback_method`             varchar(16)   NOT NULL DEFAULT 'POST',
+  `callback_headers_json`       mediumtext    NULL,
+  `callback_body`               mediumtext    NULL,
+  `callback_timeout_ms`         int           NOT NULL DEFAULT 5000,
+  `callback_max_attempts`       int           NOT NULL DEFAULT 3,
+  `callback_retry_backoff_ms`   int           NOT NULL DEFAULT 1000,
+  `callback_claimed_at`         datetime(3)   NULL,
+  `callback_current_attempt`    int           NOT NULL DEFAULT 0,
+  `callback_attempts`           int           NOT NULL DEFAULT 0,
+  `callback_last_http_status`   int           NOT NULL DEFAULT 0,
+  `callback_last_response_body` mediumtext    NULL,
+  `callback_last_error`         text          NULL,
+  `callback_completed_at`       datetime(3)   NULL,
+  `gmt_modified`                datetime      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_sms_msg_endpoint_time` (`endpoint_id`, `received_at`),
+  KEY `idx_sms_msg_reference` (`reference`),
+  KEY `idx_sms_msg_recipient` (`recipient`),
+  KEY `idx_sms_msg_received` (`received_at`),
+  KEY `idx_sms_msg_case` (`selected_case`),
+  KEY `idx_sms_msg_submit_state` (`submit_state`),
+  KEY `idx_sms_msg_receipt_due` (`receipt_status`, `receipt_due_at`),
+  KEY `idx_sms_msg_callback_claimed` (`callback_claimed_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='短信厂商 Mock 消息与 DLR 状态机';
+
+-- ============================================================
+-- mock_sms_callback_attempt：每次 DLR HTTP 尝试；delivery_no 区分重复回调，attempt_no 区分重试。
+-- ============================================================
+DROP TABLE IF EXISTS `mock_sms_callback_attempt`;
+CREATE TABLE `mock_sms_callback_attempt` (
+  `id`            bigint unsigned NOT NULL AUTO_INCREMENT,
+  `message_id`    bigint        NOT NULL DEFAULT 0,
+  `reference`     varchar(128)  NOT NULL DEFAULT '',
+  `delivery_no`   int           NOT NULL DEFAULT 0,
+  `attempt_no`    int           NOT NULL DEFAULT 0,
+  `started_at`    datetime(3)   NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  `completed_at`  datetime(3)   NULL,
+  `url`           varchar(1024) NOT NULL DEFAULT '',
+  `method`        varchar(16)   NOT NULL DEFAULT 'POST',
+  `request_headers_json` mediumtext NULL,
+  `request_body`  mediumtext    NULL,
+  `http_status`   int           NOT NULL DEFAULT 0,
+  `response_body` mediumtext    NULL,
+  `error`         text          NULL,
+  `success`       tinyint       NOT NULL DEFAULT 0,
+  PRIMARY KEY (`id`),
+  KEY `idx_sms_attempt_message_time` (`message_id`, `started_at`),
+  KEY `idx_sms_attempt_reference` (`reference`),
+  KEY `idx_sms_attempt_time` (`started_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='短信厂商 Mock DLR 投递尝试';

@@ -17,6 +17,11 @@ type Config struct {
 	// HTTP Mock 数据面给外部服务访问的基地址（如 http://172.16.7.27:18080）。
 	// 空时管理 API 按当前请求的 forwarded proto/host 推导；跨网络部署建议显式配置。
 	HTTPMockPublicBaseURL string `env:"HTTP_MOCK_PUBLIC_BASE_URL" envDefault:""`
+	// SMS 厂商提交 URL 给 Hermes-Arke 访问的基地址；空时沿用 HTTP Mock 基地址/当前请求 host。
+	SMSMockPublicBaseURL string `env:"SMS_MOCK_PUBLIC_BASE_URL" envDefault:""`
+	// SMS Mock 会主动向 Hermes-Arke 投递厂商 DLR。非空时只允许回调到这些 host
+	//（逗号分隔，支持 *.example.com）；空表示不限制，适合本地但部署时会打印安全告警。
+	SMSMockCallbackAllowedHosts string `env:"SMS_MOCK_CALLBACK_ALLOWED_HOSTS" envDefault:""`
 
 	// ---- SIP agent（diago，被叫 UAS）----
 	// FS 把 INVITE 发到这里；mock 作被叫按客户集群行为应答。

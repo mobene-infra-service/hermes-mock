@@ -304,6 +304,117 @@ type HTTPMockRequest struct {
 
 func (HTTPMockRequest) TableName() string { return "mock_http_request" }
 
+// ---- 短信厂商 Mock ----
+
+const (
+	SMSMockSubmitPending        = "PENDING_RESPONSE"
+	SMSMockSubmitResponded      = "RESPONDED"
+	SMSMockSubmitTimedOut       = "TIMED_OUT"
+	SMSMockSubmitClientCanceled = "CLIENT_CANCELED"
+
+	SMSMockReceiptWaiting      = "WAITING_SUBMIT"
+	SMSMockReceiptNotScheduled = "NOT_SCHEDULED"
+	SMSMockReceiptPending      = "PENDING"
+	SMSMockReceiptDelivering   = "DELIVERING"
+	SMSMockReceiptRetry        = "RETRY"
+	SMSMockReceiptSucceeded    = "SUCCEEDED"
+	SMSMockReceiptFailed       = "FAILED"
+	SMSMockReceiptCanceled     = "CANCELED"
+)
+
+// SMSMockEndpoint 一条可编程短信厂商协议 Endpoint。provider/protocol_version 决定线协议适配器，
+// config_json 只保存厂商无关的 Case/规则/回执计划；运行时通过短 token 暴露数据面。
+type SMSMockEndpoint struct {
+	ID              int64     `json:"id" gorm:"column:id;primaryKey;autoIncrement"`
+	Token           string    `json:"token" gorm:"column:token;size:32;uniqueIndex:uk_sms_mock_token"`
+	Name            string    `json:"name" gorm:"column:name;size:128;index:idx_sms_mock_name"`
+	Enabled         bool      `json:"enabled" gorm:"column:enabled"`
+	Provider        string    `json:"provider" gorm:"column:provider;size:32;index:idx_sms_mock_protocol"`
+	ProtocolVersion string    `json:"protocolVersion" gorm:"column:protocol_version;size:32;index:idx_sms_mock_protocol"`
+	ConfigJSON      string    `json:"-" gorm:"column:config_json;type:json"`
+	Remark          string    `json:"remark" gorm:"column:remark;size:255"`
+	GmtCreate       time.Time `json:"gmtCreate" gorm:"column:gmt_create;autoCreateTime"`
+	GmtModified     time.Time `json:"gmtModified" gorm:"column:gmt_modified;autoUpdateTime"`
+}
+
+func (SMSMockEndpoint) TableName() string { return "mock_sms_endpoint" }
+
+// SMSMockMessage 一条厂商提交消息及其 DLR 执行状态。它既是观测记录也是持久化任务：
+// 只有先成功写入本表才会向调用方返回 Accepted，回调 worker 重启后可继续扫描 due_at。
+type SMSMockMessage struct {
+	ID              int64     `json:"id" gorm:"column:id;primaryKey;autoIncrement"`
+	EndpointID      int64     `json:"endpointId" gorm:"column:endpoint_id;index:idx_sms_msg_endpoint_time"`
+	Token           string    `json:"token" gorm:"column:token;size:32"`
+	Provider        string    `json:"provider" gorm:"column:provider;size:32"`
+	ProtocolVersion string    `json:"protocolVersion" gorm:"column:protocol_version;size:32"`
+	Reference       string    `json:"reference" gorm:"column:reference;size:128;index:idx_sms_msg_reference"`
+	Recipient       string    `json:"recipient" gorm:"column:recipient;size:64;index:idx_sms_msg_recipient"`
+	Sender          string    `json:"sender" gorm:"column:sender;size:128"`
+	Content         string    `json:"content" gorm:"column:content;type:text"`
+	ReceivedAt      time.Time `json:"receivedAt" gorm:"column:received_at;index:idx_sms_msg_received;index:idx_sms_msg_endpoint_time"`
+	Remote          string    `json:"remote" gorm:"column:remote;size:64"`
+	RequestBody     string    `json:"requestBody" gorm:"column:request_body;type:mediumtext"`
+
+	MatchedRule    string `json:"matchedRule" gorm:"column:matched_rule;size:128"`
+	SelectedCase   string `json:"selectedCase" gorm:"column:selected_case;size:64;index:idx_sms_msg_case"`
+	SelectionMode  string `json:"selectionMode" gorm:"column:selection_mode;size:24"`
+	SelectedWeight int    `json:"selectedWeight" gorm:"column:selected_weight"`
+	TotalWeight    int    `json:"totalWeight" gorm:"column:total_weight"`
+
+	SubmitAction       string     `json:"submitAction" gorm:"column:submit_action;size:16"`
+	SubmitState        string     `json:"submitState" gorm:"column:submit_state;size:24;index:idx_sms_msg_submit_state"`
+	SubmitHTTPStatus   int        `json:"submitHttpStatus" gorm:"column:submit_http_status"`
+	SubmitResponseBody string     `json:"submitResponseBody" gorm:"column:submit_response_body;type:mediumtext"`
+	SubmitCompletedAt  *time.Time `json:"submitCompletedAt" gorm:"column:submit_completed_at"`
+
+	ReceiptEnabled          bool       `json:"receiptEnabled" gorm:"column:receipt_enabled"`
+	ReceiptStatus           string     `json:"receiptStatus" gorm:"column:receipt_status;size:24;index:idx_sms_msg_receipt_due"`
+	ReceiptDelayMs          int        `json:"receiptDelayMs" gorm:"column:receipt_delay_ms"`
+	ReceiptDueAt            *time.Time `json:"receiptDueAt" gorm:"column:receipt_due_at;index:idx_sms_msg_receipt_due"`
+	ReceiptTargetCount      int        `json:"receiptTargetCount" gorm:"column:receipt_target_count"`
+	ReceiptSentCount        int        `json:"receiptSentCount" gorm:"column:receipt_sent_count"`
+	ReceiptRepeatIntervalMs int        `json:"receiptRepeatIntervalMs" gorm:"column:receipt_repeat_interval_ms"`
+
+	CallbackURL              string     `json:"callbackUrl" gorm:"column:callback_url;size:1024"`
+	CallbackMethod           string     `json:"callbackMethod" gorm:"column:callback_method;size:16"`
+	CallbackHeadersJSON      string     `json:"callbackHeadersJson" gorm:"column:callback_headers_json;type:mediumtext"`
+	CallbackBody             string     `json:"callbackBody" gorm:"column:callback_body;type:mediumtext"`
+	CallbackTimeoutMs        int        `json:"callbackTimeoutMs" gorm:"column:callback_timeout_ms"`
+	CallbackMaxAttempts      int        `json:"callbackMaxAttempts" gorm:"column:callback_max_attempts"`
+	CallbackRetryBackoffMs   int        `json:"callbackRetryBackoffMs" gorm:"column:callback_retry_backoff_ms"`
+	CallbackClaimedAt        *time.Time `json:"callbackClaimedAt,omitempty" gorm:"column:callback_claimed_at;index:idx_sms_msg_callback_claimed"`
+	CallbackCurrentAttempt   int        `json:"callbackCurrentAttempt" gorm:"column:callback_current_attempt"`
+	CallbackAttempts         int        `json:"callbackAttempts" gorm:"column:callback_attempts"`
+	CallbackLastHTTPStatus   int        `json:"callbackLastHttpStatus" gorm:"column:callback_last_http_status"`
+	CallbackLastResponseBody string     `json:"callbackLastResponseBody" gorm:"column:callback_last_response_body;type:mediumtext"`
+	CallbackLastError        string     `json:"callbackLastError" gorm:"column:callback_last_error;type:text"`
+	CallbackCompletedAt      *time.Time `json:"callbackCompletedAt" gorm:"column:callback_completed_at"`
+	GmtModified              time.Time  `json:"gmtModified" gorm:"column:gmt_modified;autoUpdateTime"`
+}
+
+func (SMSMockMessage) TableName() string { return "mock_sms_message" }
+
+// SMSMockCallbackAttempt 保存每一次真实 HTTP DLR 投递，区分自动重复与网络重试。
+type SMSMockCallbackAttempt struct {
+	ID                 int64      `json:"id" gorm:"column:id;primaryKey;autoIncrement"`
+	MessageID          int64      `json:"messageId" gorm:"column:message_id;index:idx_sms_attempt_message_time"`
+	Reference          string     `json:"reference" gorm:"column:reference;size:128;index:idx_sms_attempt_reference"`
+	DeliveryNo         int        `json:"deliveryNo" gorm:"column:delivery_no"`
+	AttemptNo          int        `json:"attemptNo" gorm:"column:attempt_no"`
+	StartedAt          time.Time  `json:"startedAt" gorm:"column:started_at;index:idx_sms_attempt_time;index:idx_sms_attempt_message_time"`
+	CompletedAt        *time.Time `json:"completedAt" gorm:"column:completed_at"`
+	URL                string     `json:"url" gorm:"column:url;size:1024"`
+	Method             string     `json:"method" gorm:"column:method;size:16"`
+	RequestHeadersJSON string     `json:"requestHeadersJson" gorm:"column:request_headers_json;type:mediumtext"`
+	RequestBody        string     `json:"requestBody" gorm:"column:request_body;type:mediumtext"`
+	HTTPStatus         int        `json:"httpStatus" gorm:"column:http_status"`
+	ResponseBody       string     `json:"responseBody" gorm:"column:response_body;type:mediumtext"`
+	Error              string     `json:"error" gorm:"column:error;type:text"`
+	Success            bool       `json:"success" gorm:"column:success"`
+}
+
+func (SMSMockCallbackAttempt) TableName() string { return "mock_sms_callback_attempt" }
+
 // ---- 机构 OpenAPI 接入配置 ----
 
 // OrgConfig 一个机构的接入配置（对应 mock_org_config）。

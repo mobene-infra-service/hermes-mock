@@ -79,3 +79,13 @@ mock 按预设的"客户行为档"应答，并采集真实 SIP 报文 + 落库�
 
 这项能力属于「测试控制面/外部依赖桩」，不改变两条 SIP 铁律：mock 后端仍不主动发起通话、不做 B2BUA、不模拟坐席话路。
 它也**不是**通用 API 网关、流量代理、录制回放平台或生产服务虚拟化平台；只做命名 Endpoint 的可控响应（固定/条件规则/权重随机）与轻量调用记录。
+
+## 八、边界注：短信厂商 Mock（有状态外部依赖桩）
+
+`/sms-mock` 页 + `ANY /sms-mock/{provider}/{token}` 模拟的是 **Hermes-Arke 所调用的外部短信厂商**（当前 CM/v1 Adapter 要求 POST JSON）。它需要先按厂商协议返回提交结果，再以相同 `reference` 异步回 DLR；因此是独立短信模块，而不是给通用 HTTP Mock 增加几个响应字段。两者只复用条件规则、命名 Case 和概率选择语义。
+
+短信核心只认识规范化消息、选择结果和持久化回执任务；具体线协议由 `provider/protocolVersion` Adapter 负责。当前 `CM/v1` 对齐 Hermes 实际 `SmsCmService` 的请求、响应和回调 DTO，支持 Accepted 后送达/失败、提交拒绝、超时、畸形响应、无 DLR、重复 DLR，以及持久化网络重试、重启恢复和手工立即/重发/取消。CM 成功 DLR 的 `errorCode` 必须为空，这是 Hermes 当前成功判定的真实契约。
+
+协议演进分两级处理：仅响应/DLR 增删字段时可使用页面里的受限模板（必须保留精确 `reference`）；请求结构或语义变化新增版本 Adapter，使旧 Endpoint 继续可复测。提交请求与同步响应的 method/header/body、DLR 的 method/header/body 都由 Adapter 持有；其它厂商新增 Adapter 后复用同一状态机、表和页面，不复制一套 worker。
+
+该模块会主动发出的只有**厂商 HTTP DLR**，不发起 SIP 呼叫，故不突破“mock 后端不当 SIP UAC”的铁律。它不是生产短信网关、不代理真实厂商流量、不保存真实产品 token，也不负责 Arke 回业务方的最终通知；只用于可控测试外部依赖行为。

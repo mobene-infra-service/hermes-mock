@@ -11,6 +11,7 @@ import OtpPage from './pages/OtpPage'
 import AgentCallSdkPage from './pages/AgentCallSdkPage'
 import StratflowMockPage from './pages/StratflowMockPage'
 import HttpMockPage from './pages/HttpMockPage'
+import SmsMockPage from './pages/SmsMockPage'
 import AgentSoftphone from './components/AgentSoftphone'
 import Sidebar from './components/layout/Sidebar'
 import TopBar from './components/layout/TopBar'
@@ -54,6 +55,7 @@ export default function App() {
               <Route path="/trace" element={<CallTracePage />} />
               <Route path="/callbacks" element={<CallbacksPage />} />
               <Route path="/http-mock" element={<HttpMockPage />} />
+              <Route path="/sms-mock" element={<SmsMockPage />} />
               <Route path="*" element={<Navigate to="/overview" replace />} />
             </Routes>
           </div>

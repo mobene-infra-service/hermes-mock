@@ -11,7 +11,8 @@ func allEntities() []any {
 	return []any{
 		BehaviorProfile{}, CustomerGroup{}, CustomerOverride{}, LineBinding{},
 		MockCall{}, TestRun{}, TraceLeg{}, TraceEvent{}, Callback{},
-		HTTPMockEndpoint{}, HTTPMockRequest{}, OrgConfig{},
+		HTTPMockEndpoint{}, HTTPMockRequest{},
+		SMSMockEndpoint{}, SMSMockMessage{}, SMSMockCallbackAttempt{}, OrgConfig{},
 	}
 }
 

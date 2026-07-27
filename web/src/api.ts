@@ -9,6 +9,7 @@ import type {
   BehaviorProfile, CustomerGroup, CustomerOverride, LineBinding,
   OrgConfig, OrgsResp, TtsVoice, AgentGroupAgg, CallbackRecord,
   HTTPMockEndpoint, HTTPMockRequestRecord,
+  SMSMockEndpoint, SMSMockProviderInfo, SMSMockMessage, SMSMockCallbackAttempt,
 } from './types'
 
 const base = '/api'
@@ -291,6 +292,27 @@ export const listHTTPMockRequests = (id: number, f?: { method?: string; matchedR
 }
 export const clearHTTPMockRequests = (id: number) =>
   delJSONBody<{ ok: boolean; deleted: number }>(`/http-mocks/${id}/requests?confirm=true`)
+
+// ===== 可插拔短信厂商 Mock =====
+export const listSMSMockProviders = () => getJSON<{ providers: SMSMockProviderInfo[] }>('/sms-mocks/providers')
+export const listSMSMocks = () => getJSON<{ endpoints: SMSMockEndpoint[] }>('/sms-mocks')
+export const getSMSMock = (id: number) => getJSON<SMSMockEndpoint>(`/sms-mocks/${id}`)
+export const createSMSMock = (endpoint: SMSMockEndpoint) => postJSON<SMSMockEndpoint>('/sms-mocks', endpoint)
+export const updateSMSMock = (id: number, endpoint: SMSMockEndpoint) => putJSON<SMSMockEndpoint>(`/sms-mocks/${id}`, endpoint)
+export const deleteSMSMock = (id: number) => delJSONBody<{ ok: boolean }>(`/sms-mocks/${id}`)
+export const listSMSMockMessages = (id: number, f?: { reference?: string; recipient?: string; selectedCase?: string; receiptStatus?: string; keyword?: string; limit?: number }) => {
+  const q = new URLSearchParams()
+  Object.entries(f || {}).forEach(([k, v]) => { if (v !== undefined && v !== '') q.set(k, String(v)) })
+  return getJSON<{ messages: SMSMockMessage[] }>(`/sms-mocks/${id}/messages${q.toString() ? `?${q}` : ''}`)
+}
+export const clearSMSMockMessages = (id: number) =>
+  delJSONBody<{ ok: boolean; deleted: number }>(`/sms-mocks/${id}/messages?confirm=true`)
+export const listSMSMockAttempts = (messageId: number) =>
+  getJSON<{ attempts: SMSMockCallbackAttempt[] }>(`/sms-mock-messages/${messageId}/attempts`)
+export const enqueueSMSMockCallback = (messageId: number) =>
+  postJSON<SMSMockMessage>(`/sms-mock-messages/${messageId}/callback`, {})
+export const cancelSMSMockCallback = (messageId: number) =>
+  postJSON<{ ok: boolean }>(`/sms-mock-messages/${messageId}/cancel`, {})
 
 // ===== 策略流应用层 mock 编排（透传 hermes-stratflow /openapi/mock）=====
 import type {

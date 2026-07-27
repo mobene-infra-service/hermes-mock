@@ -32,6 +32,7 @@ import (
 	"hermes-mock/internal/orchestrator"
 	"hermes-mock/internal/orgcfg"
 	"hermes-mock/internal/preflight"
+	"hermes-mock/internal/smsmock"
 	"hermes-mock/internal/testkit"
 	"hermes-mock/internal/tracelog"
 )
@@ -47,12 +48,13 @@ type Deps struct {
 	Orgs     *orgcfg.Store
 	CB       *callbacks.Store
 	HTTPMock *httpmock.Store
+	SMSMock  *smsmock.Store
 	Orch     *orchestrator.Orchestrator
 }
 
 // Register 注册 REST 路由。
-func Register(r *gin.Engine, cfg *config.Config, repo model.Repository, clu *cluster.Store, tracker *calltrace.Tracker, kit *testkit.Kit, bus *tracelog.Bus, orgs *orgcfg.Store, cb *callbacks.Store, hm *httpmock.Store, orch *orchestrator.Orchestrator) {
-	d := &Deps{Cfg: cfg, Repo: repo, Cluster: clu, Tracker: tracker, Kit: kit, Bus: bus, Orgs: orgs, CB: cb, HTTPMock: hm, Orch: orch}
+func Register(r *gin.Engine, cfg *config.Config, repo model.Repository, clu *cluster.Store, tracker *calltrace.Tracker, kit *testkit.Kit, bus *tracelog.Bus, orgs *orgcfg.Store, cb *callbacks.Store, hm *httpmock.Store, sm *smsmock.Store, orch *orchestrator.Orchestrator) {
+	d := &Deps{Cfg: cfg, Repo: repo, Cluster: clu, Tracker: tracker, Kit: kit, Bus: bus, Orgs: orgs, CB: cb, HTTPMock: hm, SMSMock: sm, Orch: orch}
 	g := r.Group("/api")
 	g.GET("/health", func(c *gin.Context) { c.JSON(200, gin.H{"status": "ok", "mode": cfg.Mode}) })
 
@@ -88,6 +90,20 @@ func Register(r *gin.Engine, cfg *config.Config, repo model.Repository, clu *clu
 	g.GET("/http-mocks/:id/requests", d.listHTTPMockRequests)
 	g.DELETE("/http-mocks/:id/requests", d.deleteHTTPMockRequests)
 	r.Any("/mock/:token", d.invokeHTTPMock)
+
+	// 可插拔短信厂商 Mock：控制面与通用 HTTP Mock 分离，状态机/重试由 SMS Mock 持久化 worker 承担。
+	g.GET("/sms-mocks/providers", d.listSMSMockProviders)
+	g.GET("/sms-mocks", d.listSMSMocks)
+	g.POST("/sms-mocks", d.createSMSMock)
+	g.GET("/sms-mocks/:id", d.getSMSMock)
+	g.PUT("/sms-mocks/:id", d.updateSMSMock)
+	g.DELETE("/sms-mocks/:id", d.deleteSMSMock)
+	g.GET("/sms-mocks/:id/messages", d.listSMSMockMessages)
+	g.DELETE("/sms-mocks/:id/messages", d.deleteSMSMockMessages)
+	g.GET("/sms-mock-messages/:messageId/attempts", d.listSMSMockAttempts)
+	g.POST("/sms-mock-messages/:messageId/callback", d.enqueueSMSMockCallback)
+	g.POST("/sms-mock-messages/:messageId/cancel", d.cancelSMSMockCallback)
+	r.Any("/sms-mock/:provider/:token", d.invokeSMSMock)
 	// mock 自有呼叫记录（任务预期 + 真实 SIP 观测聚合），不从 Hermes 拉记录。
 	g.GET("/call-records", d.queryCallRecords)
 	g.POST("/call-records", d.saveCallRecord) // 前端坐席软电话外呼结束回存坐席侧记录 + 断言
