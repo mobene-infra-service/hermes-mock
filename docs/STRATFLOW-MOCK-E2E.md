@@ -220,7 +220,7 @@ Content-Type: application/json
 ### 5.6 进度断言
 
 ```http
-GET /api/stratflow/collections/{collectionCode}/runs/{runCode}/progress
+GET /api/stratflow/collections/{collectionCode}/executions/{runCode}/progress
     ?uploadStartTime=2026-07-10%2000:00:00
     &uploadEndTime=2026-07-11%2000:00:00
 ```

@@ -635,9 +635,37 @@ export interface SfField {
   scale?: number | null
 }
 export interface SfBinding { defCode: string; defName: string; status: number }
+export interface SfVersionRun {
+  code: string
+  collectionCode: string
+  defCode: string
+  defName?: string | null
+  bindingStatus: number
+  versionCode: string
+  versionNo: number
+  result: number
+  status: number
+  numberCount: number
+  reachedEndCount: number
+  terminalCount: number
+  expiredCount: number
+  canceledCount: number
+  firstConsumedAt?: unknown
+  terminalAt?: unknown
+  anomalyFlags?: string[] | null
+  createdAt?: unknown
+  updatedAt?: unknown
+  failFields?: string[] | null
+  contractFailure?: unknown
+  localCancelPending: boolean
+  executionCount: number
+  unsettledExecutionCount: number
+}
+export interface SfVersionRunPage { records: SfVersionRun[]; total: number; size: number; current: number; pages: number }
 export interface SfRun { code: string; collectionCode: string; defCode: string; defName: string; versionCode: string; status: number; numberCount: number; reachedEndCount: number; terminalCount: number; expiredCount: number; canceledCount: number }
 export interface SfRunNode { nodeId: string; inflow: number; processed: number; processing: number; edgeFlow: Record<string, number> }
-export interface SfRunProgress { run: SfRun; nodes: SfRunNode[] }
+export interface SfRunProgress { run: SfRun; nodes: SfRunNode[]; callDispatchedCount: number; smsDispatchedCount: number }
+export interface SfVersionRunProgress { run: SfVersionRun; window: { start: string; end: string }; nodes: SfRunNode[]; callDispatchedCount: number; smsDispatchedCount: number }
 export interface SfMockStep { delayMs: number; status: string; failureReason?: string | null; data?: Record<string, unknown> }
 export type SfPlanStatus = 'PENDING' | 'DEAD' | 'DONE'
 export interface SfActionPlan { actionCode: string; runCode: string; nodeId: string; entryCode: string; channel: string; outcomeKey: string; outcomeLabel?: string | null; selectionMode?: string | null; matchedRule?: string | null; selectedWeight?: number | null; totalWeight?: number | null; baseMs?: number | null; idx?: number | null; steps?: SfMockStep[] | null; status: SfPlanStatus; nextDueAt: string; retryCount: number; lastError?: string | null }

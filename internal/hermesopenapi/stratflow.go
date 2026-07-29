@@ -12,7 +12,7 @@ import (
 //
 // 契约权威源：hermes 仓 docs/reference/api-reference.md 的 hermes-stratflow Mock 小节。本文件只做 Go 侧消费：
 //   - mock 管理：gate 开关 / per-node 结局配置 / 在途计划观测 / 一键清空（/openapi/mock/*）
-//   - 发现：方案·版本·名单·字段·绑定·run 列表·run 进度（/openapi/mock/*，仅 mock-downstream.enabled 装配）
+//   - 发现：方案·版本·名单·字段·绑定·版本运行记录·物理 execution 及进度（/openapi/mock/*）
 //   - 触发：导名单生成 run（/openapi/collections/{code}/import）
 //
 // 全部经 prodStratflow 产品前缀（gateway 模式 → /stratflow/**；direct 模式 → StratflowURL）。
@@ -236,7 +236,45 @@ type SfBinding struct {
 	Status  int    `json:"status"`
 }
 
-// SfRun run 列表/进度里的漏斗汇总。code = runCode。
+// SfVersionRun 页面版本运行记录。一行聚合同一 collection/def/version 下全部已提交物理 Run；
+// code 固定等于 versionCode，版本级不存在唯一 batchCode。
+type SfVersionRun struct {
+	Code                    string   `json:"code"`
+	CollectionCode          string   `json:"collectionCode"`
+	DefCode                 string   `json:"defCode"`
+	DefName                 *string  `json:"defName"`
+	BindingStatus           int      `json:"bindingStatus"`
+	VersionCode             string   `json:"versionCode"`
+	VersionNo               int      `json:"versionNo"`
+	Result                  int      `json:"result"`
+	Status                  int      `json:"status"`
+	NumberCount             int64    `json:"numberCount"`
+	ReachedEndCount         int64    `json:"reachedEndCount"`
+	TerminalCount           int64    `json:"terminalCount"`
+	ExpiredCount            int64    `json:"expiredCount"`
+	CanceledCount           int64    `json:"canceledCount"`
+	FirstConsumedAt         any      `json:"firstConsumedAt"`
+	TerminalAt              any      `json:"terminalAt"`
+	AnomalyFlags            []string `json:"anomalyFlags"`
+	CreatedAt               any      `json:"createdAt"`
+	UpdatedAt               any      `json:"updatedAt"`
+	FailFields              []string `json:"failFields"`
+	ContractFailure         any      `json:"contractFailure"`
+	LocalCancelPending      bool     `json:"localCancelPending"`
+	ExecutionCount          int64    `json:"executionCount"`
+	UnsettledExecutionCount int64    `json:"unsettledExecutionCount"`
+}
+
+// SfVersionRunPage 对齐 MyBatis-Plus PageDTO 的 JSON 结构。
+type SfVersionRunPage struct {
+	Records []SfVersionRun `json:"records"`
+	Total   int64          `json:"total"`
+	Size    int64          `json:"size"`
+	Current int64          `json:"current"`
+	Pages   int64          `json:"pages"`
+}
+
+// SfRun 物理 execution 列表/进度里的漏斗汇总。code = runCode。
 type SfRun struct {
 	Code            string  `json:"code"`
 	CollectionCode  string  `json:"collectionCode"`
@@ -265,8 +303,19 @@ type SfRunNode struct {
 
 // SfRunProgress run 进度：漏斗汇总 + 各节点边流量。
 type SfRunProgress struct {
-	Run   SfRun       `json:"run"`
-	Nodes []SfRunNode `json:"nodes"`
+	Run                 SfRun       `json:"run"`
+	Nodes               []SfRunNode `json:"nodes"`
+	CallDispatchedCount int64       `json:"callDispatchedCount"`
+	SmsDispatchedCount  int64       `json:"smsDispatchedCount"`
+}
+
+// SfVersionRunProgress 版本运行进度。run 是版本聚合；window 内五项计数按上传时间过滤。
+type SfVersionRunProgress struct {
+	Run                 SfVersionRun `json:"run"`
+	Window              any          `json:"window"`
+	Nodes               []SfRunNode  `json:"nodes"`
+	CallDispatchedCount int64        `json:"callDispatchedCount"`
+	SmsDispatchedCount  int64        `json:"smsDispatchedCount"`
 }
 
 // SfImportRow 导入行（phone 明文 tokenize 后即丢；bizFields 按集合字段类型落原生值）。
@@ -520,21 +569,51 @@ func (c *Client) StratflowCollectionBindings(ctx context.Context, code string) (
 	return out, err
 }
 
-// StratflowRuns 某集合下 run 列表（最近创建在前；code=runCode）。
-func (c *Client) StratflowRuns(ctx context.Context, code string) ([]SfRun, error) {
-	var out []SfRun
-	err := c.sfCall(ctx, "GET", "/openapi/mock/collections/"+url.PathEscape(code)+"/runs", nil, &out)
+// StratflowVersionRuns 某集合下按方案版本聚合的运行记录；code=versionCode，顶层无 batchCode。
+func (c *Client) StratflowVersionRuns(ctx context.Context, code string, pageNumber, pageSize int) (SfVersionRunPage, error) {
+	q := url.Values{
+		"pageNumber": {strconv.Itoa(pageNumber)},
+		"pageSize":   {strconv.Itoa(pageSize)},
+	}
+	path := "/openapi/mock/collections/" + url.PathEscape(code) + "/version-runs?" + q.Encode()
+	var out SfVersionRunPage
+	err := c.sfCall(ctx, "GET", path, nil, &out)
 	return out, err
 }
 
-// StratflowRunProgress run 进度（断言分支）。uploadStart/End = UTC "yyyy-MM-dd HH:mm:ss"，跨度 ≤31 天，必填。
-func (c *Client) StratflowRunProgress(ctx context.Context, code, runCode, uploadStart, uploadEnd string) (SfRunProgress, error) {
+// StratflowExecutions 某集合下物理 execution 发现；Mock plan/decision 继续使用这里的 runCode。
+func (c *Client) StratflowExecutions(ctx context.Context, code string) ([]SfRun, error) {
+	var out []SfRun
+	err := c.sfCall(ctx, "GET", "/openapi/mock/collections/"+url.PathEscape(code)+"/executions", nil, &out)
+	return out, err
+}
+
+// StratflowExecutionProgress 单个物理 execution 进度（Mock 当前导入断言）。
+// uploadStart/End = UTC "yyyy-MM-dd HH:mm:ss"，跨度 ≤31 天，必填。
+func (c *Client) StratflowExecutionProgress(ctx context.Context, code, runCode, uploadStart, uploadEnd string) (SfRunProgress, error) {
 	q := url.Values{}
 	q.Set("uploadStartTime", uploadStart)
 	q.Set("uploadEndTime", uploadEnd)
-	path := fmt.Sprintf("/openapi/mock/collections/%s/runs/%s/progress?%s",
+	path := fmt.Sprintf("/openapi/mock/collections/%s/executions/%s/progress?%s",
 		url.PathEscape(code), url.PathEscape(runCode), q.Encode())
 	var v SfRunProgress
+	err := c.sfCall(ctx, "GET", path, nil, &v)
+	return v, err
+}
+
+// StratflowVersionRunProgress 同一方案版本全部已提交物理 Run 的聚合进度。
+// uploadStart/End 使用 ISO-8601 UTC instant，左闭右开，跨度最大 30 天。
+func (c *Client) StratflowVersionRunProgress(
+	ctx context.Context,
+	code, defCode, versionCode, uploadStart, uploadEnd string,
+) (SfVersionRunProgress, error) {
+	q := url.Values{
+		"uploadStart": {uploadStart},
+		"uploadEnd":   {uploadEnd},
+	}
+	path := fmt.Sprintf("/openapi/mock/collections/%s/version-runs/%s/%s/progress?%s",
+		url.PathEscape(code), url.PathEscape(defCode), url.PathEscape(versionCode), q.Encode())
+	var v SfVersionRunProgress
 	err := c.sfCall(ctx, "GET", path, nil, &v)
 	return v, err
 }

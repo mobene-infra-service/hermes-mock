@@ -317,7 +317,8 @@ export const cancelSMSMockCallback = (messageId: number) =>
 // ===== 策略流应用层 mock 编排（透传 hermes-stratflow /openapi/mock）=====
 import type {
   SfGateView, SfNode, SfNodeConfig, SfWorkflow, SfWorkflowDetail,
-  SfCollection, SfField, SfBinding, SfRun, SfRunProgress, SfActionPlan, SfDecisionPage, SfImportResult, SfImportRow, SfDispatchMode,
+  SfCollection, SfField, SfBinding, SfRun, SfRunProgress, SfVersionRunPage, SfVersionRunProgress,
+  SfActionPlan, SfDecisionPage, SfImportResult, SfImportRow, SfDispatchMode,
 } from './types'
 
 // ① gate
@@ -362,10 +363,20 @@ export const sfCollections = (name?: string, status?: string) => {
 }
 export const sfCollectionFields = (code: string) => getJSON<{ fields: SfField[] }>(`/stratflow/collections/${encodeURIComponent(code)}/fields`)
 export const sfCollectionBindings = (code: string) => getJSON<{ bindings: SfBinding[] }>(`/stratflow/collections/${encodeURIComponent(code)}/bindings`)
-export const sfRuns = (code: string) => getJSON<{ runs: SfRun[] }>(`/stratflow/collections/${encodeURIComponent(code)}/runs`)
-export const sfRunProgress = (code: string, runCode: string, uploadStartTime: string, uploadEndTime: string) => {
+export const sfVersionRuns = (code: string, pageNumber = 1, pageSize = 20) => {
+  const q = new URLSearchParams({ pageNumber: String(pageNumber), pageSize: String(pageSize) })
+  return getJSON<SfVersionRunPage>(`/stratflow/collections/${encodeURIComponent(code)}/version-runs?${q}`)
+}
+export const sfExecutions = (code: string) => getJSON<{ executions: SfRun[] }>(`/stratflow/collections/${encodeURIComponent(code)}/executions`)
+export const sfExecutionProgress = (code: string, runCode: string, uploadStartTime: string, uploadEndTime: string) => {
   const q = new URLSearchParams({ uploadStartTime, uploadEndTime })
-  return getJSON<SfRunProgress>(`/stratflow/collections/${encodeURIComponent(code)}/runs/${encodeURIComponent(runCode)}/progress?${q}`)
+  return getJSON<SfRunProgress>(`/stratflow/collections/${encodeURIComponent(code)}/executions/${encodeURIComponent(runCode)}/progress?${q}`)
+}
+export const sfVersionRunProgress = (code: string, defCode: string, versionCode: string, uploadStart: string, uploadEnd: string) => {
+  const q = new URLSearchParams({ uploadStart, uploadEnd })
+  return getJSON<SfVersionRunProgress>(
+    `/stratflow/collections/${encodeURIComponent(code)}/version-runs/${encodeURIComponent(defCode)}/${encodeURIComponent(versionCode)}/progress?${q}`,
+  )
 }
 // ⑤ 触发
 export const sfImport = (code: string, req: { rows: SfImportRow[]; idempotencyKey?: string }) =>

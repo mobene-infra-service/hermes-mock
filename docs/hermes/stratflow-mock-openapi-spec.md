@@ -8,13 +8,13 @@
 
 ## 1. 落地结论（我方两个阻塞点已解）
 
-- **versionCode 语义已钉死**：`GET /openapi/mock/workflows/{defCode}` 返回的 `versionCode` = **当前启用发布版本**（= 新 run 实际绑定版本，非草稿），且与 `import.plans[].versionCode`、`runs[].versionCode` 一致 → 三方可交叉核对，配置不会静默失效。
+- **versionCode 语义已钉死**：`GET /openapi/mock/workflows/{defCode}` 返回的 `versionCode` = **当前启用发布版本**（= 新 run 实际绑定版本，非草稿），且与 `import.plans[].versionCode`、`version-runs[].versionCode` 和物理 `executions[].versionCode` 一致 → 多方可交叉核对，配置不会静默失效。
 - **import 回带 runCode 已加**：`POST /openapi/collections/{code}/import` 响应 `data.plans[].runCode`（`result==1` 时非空），断言闭环可直接拿到 run。
 
-## 2. ⚠️ 与最初方案不同、Go client / 前端**必须按实际改**的 4 点
+## 2. ⚠️ 与最初方案不同、Go client / 前端**必须按实际改**的 5 点
 
-1. **run 进度必须带时间窗**
-   `GET /openapi/mock/collections/{code}/runs/{rid}/progress?uploadStartTime=&uploadEndTime=`
+1. **物理 execution 进度必须带时间窗**
+   `GET /openapi/mock/collections/{code}/executions/{rid}/progress?uploadStartTime=&uploadEndTime=`
    - UTC，格式 `yyyy-MM-dd HH:mm:ss`；**最大跨度 31 天**；URL 空格需编码（`2026-07-08%2000:00:00`）。
    - 实务：窗取 `[import.data.gmtCreate, now+1d]`（或用户可调），确保覆盖本次 run 上传时刻。
    - `{rid}` 传 `runCode`。
@@ -34,6 +34,11 @@
    - `bindings`：`[{defCode, defName, status}]`（active 绑定）。
    - `Response` 信封含 `time` 字段；Go `encoding/json` 忽略未知字段，DTO 不必声明。
 
+5. **版本记录与物理 execution 必须分开**
+   - `GET /openapi/mock/collections/{code}/version-runs?pageNumber=&pageSize=` 返回数据库分组分页后的版本运行记录；一行身份为 `collectionCode + defCode + versionCode`，其中顶层 `code` 固定等于 `versionCode`，不存在唯一 `batchCode`。
+   - `GET /openapi/mock/collections/{code}/version-runs/{defCode}/{versionCode}/progress?uploadStart=&uploadEnd=` 返回版本聚合进度，窗口参数为 ISO-8601 UTC instant、左闭右开且最大 30 天。
+   - `GET /openapi/mock/collections/{code}/executions` 与 `/executions/{runCode}/progress` 保留物理身份。Mock plan、decision、DEAD requeue 和“本次导入”断言必须继续用物理 `runCode`，不能拿版本记录 `code` 代替。
+
 ## 3. 不变的坑（沿用手册）
 
 - **gate 为三态且缺配置 fail-safe PAUSED**：进编排台先 `GET /openapi/mock/gate` 探 `master`+`mode/schemeModes`；旧 `global/schemes` 仅兼容二态。REAL/MOCK 写请求同时携带 `mode+enabled` 兼容旧 Hermes，PAUSED 不允许降级。`master=false` 整台只读。
@@ -44,7 +49,7 @@
 ## 4. hermes-mock 侧落地清单（据已落地契约收敛）
 
 - Go client（`internal/hermesopenapi`，复用共用网关/凭据）：
-  gate 组、类型化 `config` 组、`plans`、分页 `decisions`、`all`；发现组 `workflows / workflows/{defCode} / collections[?name&status] / collections/{code}/fields / collections/{code}/bindings / collections/{code}/runs / runs/{rid}/progress[?uploadStartTime&uploadEndTime]`；触发 `import`（解析 `plans[].{result,runCode,versionCode,failFields}`）。
+  gate 组、类型化 `config` 组、`plans`、分页 `decisions`、`all`；发现组 `workflows / workflows/{defCode} / collections[?name&status] / collections/{code}/fields / collections/{code}/bindings / collections/{code}/version-runs / version-runs/{defCode}/{versionCode}/progress / collections/{code}/executions / executions/{runCode}/progress`；触发 `import`（解析 `plans[].{result,runCode,versionCode,failFields}`）。
 - api：`/api/stratflow/mock/*` 透传；`api.Deps` 复用同一 `Client`。
 - 前端「策略流 Mock 编排」页：gate 探测/开关 → 选方案(得 versionCode) → 结局配置表 → 选名单+字段拼 rows → import → **进度按 edgeFlow 断言 + 传时间窗** → 清场。
 - 落地前补 `docs/DECISIONS.md`（为何把 stratflow 应用层 mock 编排台放进 hermes-mock）+ `docs/SCOPE.md` 一句注（编排能力、非被叫腿核心）。

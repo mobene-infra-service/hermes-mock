@@ -62,7 +62,31 @@ func TestSfImportResultParse(t *testing.T) {
 	}
 }
 
-// run 进度解析：断言看 nodes[].edgeFlow。
+// 版本记录解析：code 直接使用 versionCode，顶层不携带 batchCode。
+func TestSfVersionRunPageParse(t *testing.T) {
+	raw := `{
+	  "records":[{"code":"VER_1","collectionCode":"COL","defCode":"DEF","versionCode":"VER_1","versionNo":3,
+	    "result":1,"status":1,"numberCount":12,"terminalCount":9,"localCancelPending":true,
+	    "executionCount":4,"unsettledExecutionCount":2}],
+	  "total":1,"size":20,"current":1,"pages":1
+	}`
+	var page SfVersionRunPage
+	if err := json.Unmarshal([]byte(raw), &page); err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Records) != 1 || page.Records[0].Code != "VER_1" || page.Records[0].Code != page.Records[0].VersionCode {
+		t.Fatalf("版本记录身份解析错: %+v", page)
+	}
+	encoded, err := json.Marshal(page.Records[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte(`"batchCode"`)) {
+		t.Fatalf("版本记录顶层不应出现 batchCode: %s", encoded)
+	}
+}
+
+// 物理 execution 进度解析：断言看 nodes[].edgeFlow。
 func TestSfRunProgressParse(t *testing.T) {
 	raw := `{
 	  "run":{"code":"RUN_1","versionCode":"VER","status":1,"numberCount":10,"terminalCount":3},
@@ -248,10 +272,47 @@ func TestStratflowRequeuePlanRequest(t *testing.T) {
 	}
 }
 
-// 进度必须带 uploadStartTime/uploadEndTime。
-func TestStratflowRunProgressCarriesTimeWindow(t *testing.T) {
+func TestStratflowVersionRunsCarriesPaging(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/openapi/mock/collections/COL/runs/RUN_1/progress" {
+		if r.URL.Path != "/openapi/mock/collections/COL/version-runs" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		if r.URL.Query().Get("pageNumber") != "2" || r.URL.Query().Get("pageSize") != "25" {
+			t.Fatalf("分页参数未透传: %s", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":{"records":[{"code":"VER_1","versionCode":"VER_1"}],"total":1,"size":25,"current":2,"pages":1}}`))
+	}))
+	defer srv.Close()
+	page, err := New(Cred{Mode: "direct", OrgCode: "o1", StratflowURL: srv.URL}).StratflowVersionRuns(t.Context(), "COL", 2, 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Current != 2 || len(page.Records) != 1 || page.Records[0].Code != "VER_1" {
+		t.Fatalf("版本记录分页解析错: %+v", page)
+	}
+}
+
+func TestStratflowExecutionsUsesPhysicalDiscoveryPath(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/openapi/mock/collections/COL/executions" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":[{"code":"RUN_1","versionCode":"VER_1"}]}`))
+	}))
+	defer srv.Close()
+	runs, err := New(Cred{Mode: "direct", OrgCode: "o1", StratflowURL: srv.URL}).StratflowExecutions(t.Context(), "COL")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(runs) != 1 || runs[0].Code != "RUN_1" {
+		t.Fatalf("物理 execution 解析错: %+v", runs)
+	}
+}
+
+// 物理 execution 进度必须带 uploadStartTime/uploadEndTime。
+func TestStratflowExecutionProgressCarriesTimeWindow(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/openapi/mock/collections/COL/executions/RUN_1/progress" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
 		if r.URL.Query().Get("uploadStartTime") != "2026-07-08 00:00:00" || r.URL.Query().Get("uploadEndTime") != "2026-07-09 00:00:00" {
@@ -260,10 +321,31 @@ func TestStratflowRunProgressCarriesTimeWindow(t *testing.T) {
 		_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":{"run":{"code":"RUN_1"},"nodes":[]}}`))
 	}))
 	defer srv.Close()
-	_, err := New(Cred{Mode: "direct", OrgCode: "o1", StratflowURL: srv.URL}).StratflowRunProgress(
+	_, err := New(Cred{Mode: "direct", OrgCode: "o1", StratflowURL: srv.URL}).StratflowExecutionProgress(
 		t.Context(), "COL", "RUN_1", "2026-07-08 00:00:00", "2026-07-09 00:00:00")
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestStratflowVersionRunProgressCarriesVersionIdentityAndInstantWindow(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/openapi/mock/collections/COL/version-runs/DEF_1/VER_1/progress" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		if r.URL.Query().Get("uploadStart") != "2026-07-08T00:00:00Z" || r.URL.Query().Get("uploadEnd") != "2026-07-09T00:00:00Z" {
+			t.Fatalf("版本进度时间窗未透传: %s", r.URL.RawQuery)
+		}
+		_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":{"run":{"code":"VER_1","defCode":"DEF_1","versionCode":"VER_1"},"nodes":[]}}`))
+	}))
+	defer srv.Close()
+	progress, err := New(Cred{Mode: "direct", OrgCode: "o1", StratflowURL: srv.URL}).StratflowVersionRunProgress(
+		t.Context(), "COL", "DEF_1", "VER_1", "2026-07-08T00:00:00Z", "2026-07-09T00:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if progress.Run.Code != "VER_1" || progress.Run.Code != progress.Run.VersionCode {
+		t.Fatalf("版本进度身份解析错: %+v", progress.Run)
 	}
 }
 

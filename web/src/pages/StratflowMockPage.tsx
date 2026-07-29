@@ -7,7 +7,7 @@ import { ReloadOutlined, ThunderboltOutlined, ClearOutlined, PlusOutlined, Uploa
 import {
   sfGate, sfSetGlobalGate, sfSetSchemeGate, sfClearSchemeGate, sfSetDeliveryPaused, sfSetReceiptWindow,
   sfListConfig, sfPutConfig, sfDeleteConfig, sfClearMock, sfListPlans, sfListDecisions, sfRequeuePlan,
-  sfWorkflows, sfWorkflowDetail, sfCollections, sfCollectionFields, sfCollectionBindings, sfRunProgress, sfImport,
+  sfWorkflows, sfWorkflowDetail, sfCollections, sfCollectionFields, sfCollectionBindings, sfExecutionProgress, sfImport,
   CURRENT_ORG_STORAGE_KEY,
 } from '../api'
 import type {
@@ -458,7 +458,7 @@ export default function StratflowMockPage() {
             if (generation !== observeGenerationRef.current) return
             setDecisions([]); setDecisionTotal(0); message.error(`决策记录查询失败：${String(e)}`)
           }),
-        sfRunProgress(collCode, code, timeWin[0], timeWin[1])
+        sfExecutionProgress(collCode, code, timeWin[0], timeWin[1])
           .then((next) => { if (generation === observeGenerationRef.current) setProgress(next) })
           .catch((e) => {
             if (generation !== observeGenerationRef.current) return

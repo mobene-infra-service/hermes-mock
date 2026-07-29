@@ -3,6 +3,11 @@
 > 本项目改动按主题记录（倒序，最新在上）。决策原因见 [DECISIONS.md](DECISIONS.md)，当前状态见 [STATUS.md](STATUS.md)。
 ---
 
+## 2026-07-29
+
+- **同步 StratFlow 版本运行记录模型**：将旧 `/openapi/mock/collections/{code}/runs` 发现接口拆为分页 `version-runs` 和物理 `executions`。新增版本记录/Page/进度 DTO，明确顶层 `code=versionCode` 且不含 `batchCode`；同时保留物理 `runCode` 供 Mock plan、decision、requeue 和单次导入断言使用。hermes-mock 自身代理路由与 TypeScript API 同步去除旧 `/runs` 路径，页面原有结构不变，当前进度查询切到 `/executions/{runCode}/progress`。
+- **契约验证**：新增版本分页参数、版本身份、无 `batchCode`、物理 execution 发现、版本/物理两种进度时间窗及旧路由不再注册的测试。`go test ./...`、`go vet ./...`、`go build ./...`、`npm --prefix web run build` 与 embed 一致性通过（Vite 仅既有大 chunk warning）；`npm --prefix web run lint` 因仓库未安装 `eslint` 未执行，真实新版 Hermes 联调待执行。
+
 ## 2026-07-24
 
 - **新增 Hermes-Arke 短信厂商 Mock**：新增 `/sms-mock` 页面、`/api/sms-mocks/**` 控制面和 `ANY /sms-mock/{provider}/{token}` 数据面（当前 CM/v1 要求 POST JSON）。Endpoint 可配置语义化提交/DLR Case、priority AND 条件、固定或概率 Case；内置 Accepted-送达、Accepted-失败、提交拒绝、超时、畸形响应、无 DLR、重复 DLR。页面展示 Hermes `t_sms_vendor` 配置、消息决策和每次 callback attempt，并支持立即投递、完成后重发和取消等待任务。

@@ -22,13 +22,33 @@ func TestStratflowRoutesRegister(t *testing.T) {
 	registerStratflowRoutes(g, d)
 
 	got := 0
+	paths := make(map[string]bool)
 	for _, ri := range r.Routes() {
 		if len(ri.Path) >= 14 && ri.Path[:14] == "/api/stratflow" {
 			got++
+			paths[ri.Path] = true
 		}
 	}
-	if got != 21 {
-		t.Fatalf("期望 21 条 stratflow 路由，实际 %d", got)
+	if got != 23 {
+		t.Fatalf("期望 23 条 stratflow 路由，实际 %d", got)
+	}
+	for _, path := range []string{
+		"/api/stratflow/collections/:code/version-runs",
+		"/api/stratflow/collections/:code/version-runs/:defCode/:versionCode/progress",
+		"/api/stratflow/collections/:code/executions",
+		"/api/stratflow/collections/:code/executions/:rid/progress",
+	} {
+		if !paths[path] {
+			t.Fatalf("缺少 StratFlow 新运行模型路由 %s", path)
+		}
+	}
+	for _, path := range []string{
+		"/api/stratflow/collections/:code/runs",
+		"/api/stratflow/collections/:code/runs/:rid/progress",
+	} {
+		if paths[path] {
+			t.Fatalf("不应继续注册旧物理 run 路由 %s", path)
+		}
 	}
 }
 
@@ -99,6 +119,9 @@ func TestSfControlRejectsInvalidInputBeforeResolvingClient(t *testing.T) {
 		{"decisions missing run", http.MethodGet, "/decisions", func(d *Deps, c *gin.Context) { d.sfListDecisions(c) }},
 		{"decisions invalid page", http.MethodGet, "/decisions?runCode=R1&pageNo=0", func(d *Deps, c *gin.Context) { d.sfListDecisions(c) }},
 		{"decisions invalid status", http.MethodGet, "/decisions?runCode=R1&status=UNKNOWN", func(d *Deps, c *gin.Context) { d.sfListDecisions(c) }},
+		{"version runs invalid page", http.MethodGet, "/version-runs?pageSize=501", func(d *Deps, c *gin.Context) { d.sfVersionRuns(c) }},
+		{"execution progress missing window", http.MethodGet, "/executions/R1/progress", func(d *Deps, c *gin.Context) { d.sfExecutionProgress(c) }},
+		{"version progress missing window", http.MethodGet, "/version-runs/D1/V1/progress", func(d *Deps, c *gin.Context) { d.sfVersionRunProgress(c) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

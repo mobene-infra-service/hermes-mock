@@ -32,8 +32,10 @@ func registerStratflowRoutes(g *gin.RouterGroup, d *Deps) {
 	g.GET("/stratflow/collections", d.sfCollections)
 	g.GET("/stratflow/collections/:code/fields", d.sfCollectionFields)
 	g.GET("/stratflow/collections/:code/bindings", d.sfCollectionBindings)
-	g.GET("/stratflow/collections/:code/runs", d.sfRuns)
-	g.GET("/stratflow/collections/:code/runs/:rid/progress", d.sfRunProgress)
+	g.GET("/stratflow/collections/:code/version-runs", d.sfVersionRuns)
+	g.GET("/stratflow/collections/:code/version-runs/:defCode/:versionCode/progress", d.sfVersionRunProgress)
+	g.GET("/stratflow/collections/:code/executions", d.sfExecutions)
+	g.GET("/stratflow/collections/:code/executions/:rid/progress", d.sfExecutionProgress)
 	g.POST("/stratflow/collections/:code/import", d.sfImport)
 }
 
@@ -416,29 +418,71 @@ func (d *Deps) sfCollectionBindings(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"bindings": list})
 }
 
-func (d *Deps) sfRuns(c *gin.Context) {
+func (d *Deps) sfVersionRuns(c *gin.Context) {
+	pageNumber, errNumber := strconv.Atoi(c.DefaultQuery("pageNumber", "1"))
+	pageSize, errSize := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
+	if errNumber != nil || errSize != nil || pageNumber < 1 || pageSize < 1 || pageSize > 500 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "pageNumber 须 >=1，pageSize 须为 1-500"})
+		return
+	}
 	cli, ok := d.sfClient(c)
 	if !ok {
 		return
 	}
-	list, err := cli.StratflowRuns(c.Request.Context(), c.Param("code"))
+	page, err := cli.StratflowVersionRuns(c.Request.Context(), c.Param("code"), pageNumber, pageSize)
 	if sfErr(c, err) {
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"runs": list})
+	c.JSON(http.StatusOK, page)
 }
 
-func (d *Deps) sfRunProgress(c *gin.Context) {
+func (d *Deps) sfExecutions(c *gin.Context) {
 	cli, ok := d.sfClient(c)
 	if !ok {
 		return
 	}
+	list, err := cli.StratflowExecutions(c.Request.Context(), c.Param("code"))
+	if sfErr(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"executions": list})
+}
+
+func (d *Deps) sfExecutionProgress(c *gin.Context) {
 	start, end := c.Query("uploadStartTime"), c.Query("uploadEndTime")
 	if start == "" || end == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "需提供 uploadStartTime/uploadEndTime（UTC yyyy-MM-dd HH:mm:ss，跨度≤31天）"})
 		return
 	}
-	v, err := cli.StratflowRunProgress(c.Request.Context(), c.Param("code"), c.Param("rid"), start, end)
+	cli, ok := d.sfClient(c)
+	if !ok {
+		return
+	}
+	v, err := cli.StratflowExecutionProgress(c.Request.Context(), c.Param("code"), c.Param("rid"), start, end)
+	if sfErr(c, err) {
+		return
+	}
+	c.JSON(http.StatusOK, v)
+}
+
+func (d *Deps) sfVersionRunProgress(c *gin.Context) {
+	start, end := c.Query("uploadStart"), c.Query("uploadEnd")
+	if start == "" || end == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "需提供 uploadStart/uploadEnd（ISO-8601 UTC instant，左闭右开且跨度≤30天）"})
+		return
+	}
+	cli, ok := d.sfClient(c)
+	if !ok {
+		return
+	}
+	v, err := cli.StratflowVersionRunProgress(
+		c.Request.Context(),
+		c.Param("code"),
+		c.Param("defCode"),
+		c.Param("versionCode"),
+		start,
+		end,
+	)
 	if sfErr(c, err) {
 		return
 	}
