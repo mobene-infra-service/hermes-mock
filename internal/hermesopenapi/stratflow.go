@@ -339,17 +339,35 @@ type SfImportPlan struct {
 	FailFields  []string `json:"failFields"`
 }
 
+// SfImportFieldError 是稳定英文 reason + 可选定位参数；原始字段值不会由 Hermes 返回。
+type SfImportFieldError struct {
+	FieldKey     string `json:"fieldKey"`
+	Reason       string `json:"reason"`
+	ItemIndex    *int   `json:"itemIndex,omitempty"`
+	MaxLength    *int   `json:"maxLength,omitempty"`
+	ActualLength *int   `json:"actualLength,omitempty"`
+	MaxScale     *int   `json:"maxScale,omitempty"`
+	ActualScale  *int   `json:"actualScale,omitempty"`
+}
+
+type SfImportRowError struct {
+	RowNo  int                  `json:"rowNo"`
+	Errors []SfImportFieldError `json:"errors"`
+}
+
 // SfImportResult 导入响应（批次顶层字段 + plans）。取 result==1 的 plans[].runCode 进入断言。
 type SfImportResult struct {
-	Code           string         `json:"code"`
-	BatchCode      string         `json:"batchCode"`
-	CollectionCode string         `json:"collectionCode"`
-	IdempotencyKey string         `json:"idempotencyKey"`
-	Status         int            `json:"status"`
-	Total          int            `json:"total"`
-	Success        int            `json:"success"`
-	Fail           int            `json:"fail"`
-	Plans          []SfImportPlan `json:"plans"`
+	Code            string             `json:"code"`
+	BatchCode       string             `json:"batchCode"`
+	CollectionCode  string             `json:"collectionCode"`
+	IdempotencyKey  string             `json:"idempotencyKey"`
+	Status          int                `json:"status"`
+	Total           int                `json:"total"`
+	Success         int                `json:"success"`
+	Fail            int                `json:"fail"`
+	Plans           []SfImportPlan     `json:"plans"`
+	Errors          []SfImportRowError `json:"errors"`
+	ErrorsTruncated bool               `json:"errorsTruncated"`
 }
 
 // 导入结果码常量（对齐实现文档 §5）。

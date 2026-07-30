@@ -3,6 +3,12 @@
 > 本项目改动按主题记录（倒序，最新在上）。决策原因见 [DECISIONS.md](DECISIONS.md)，当前状态见 [STATUS.md](STATUS.md)。
 ---
 
+## 2026-07-30
+
+- **同步 StratFlow 名单导入部分成功合同**：Go 导入 DTO 增加结构化 `errors/errorsTruncated`；通用上游错误载体保留 Hermes 的业务 `data`，StratFlow 代理对 `42011` 等拒绝稳定返回 `error/upstreamCode/upstreamData`，并移除本地空 rows 短路。浏览器 API 使用带 `upstreamCode/upstreamData` 的类型化错误，导入页按 errorCode 展示请求级提示、原始行号、字段定位参数、截断状态与幂等重放“原因未保留”状态。
+- **收窄本地导入门禁并保持重复身份**：JSON/CSV 只以无法可靠构造请求的语法、行对象和表格结构问题阻止提交；号码、必填、未知字段、类型、长度、枚举、数组和行数限制改为非阻塞提示，原始行顺序、空号和重复号码均提交给 Hermes 最终裁决。部分成功不因 `fail>0` 停止观测，继续选择 `plans[].result==1` 的物理 `runCode`。
+- **验证**：Web 7 项导入合同测试、`go test ./...`、`go vet ./...`、`go build ./...`、`make web` 和 embed 一致性通过；隔离本地 Hermes 栈真实验证“重复合法、非法、重复合法”得到 `total/success/fail=3/2/1`、原始 Entry 行号 `1/3`、同 key 重放 `errors=[]/errorsTruncated=true`、全非法 `upstreamCode=42011` 且零落库，成功 Run 最终 `numberCount/terminalCount/reachedEndCount=2/2/2`。
+
 ## 2026-07-29
 
 - **同步 StratFlow 版本运行记录模型**：将旧 `/openapi/mock/collections/{code}/runs` 发现接口拆为分页 `version-runs` 和物理 `executions`。新增版本记录/Page/进度 DTO，明确顶层 `code=versionCode` 且不含 `batchCode`；同时保留物理 `runCode` 供 Mock plan、decision、requeue 和单次导入断言使用。hermes-mock 自身代理路由与 TypeScript API 同步去除旧 `/runs` 路径，页面原有结构不变，当前进度查询切到 `/executions/{runCode}/progress`。

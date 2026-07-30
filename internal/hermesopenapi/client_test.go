@@ -30,6 +30,34 @@ func TestCallWithPreservesHTTP4xxEnvelope(t *testing.T) {
 	}
 }
 
+func TestCallWithPreservesBusinessErrorData(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"code":42011,"msg":"No valid rows to import","data":{"total":2,"success":0,"fail":2,"errors":[{"rowNo":1,"errors":[{"fieldKey":"phone","reason":"Phone number cannot be empty"}]}],"errorsTruncated":true}}`))
+	}))
+	defer srv.Close()
+
+	client := New(Cred{Mode: "direct", OrgCode: "org001", BasicURL: srv.URL})
+	_, err := client.callWith(t.Context(), http.MethodPost, srv.URL+"/import", nil, nil)
+	if err == nil {
+		t.Fatal("expected upstream business error")
+	}
+	var upstream *UpstreamError
+	if !errors.As(err, &upstream) {
+		t.Fatalf("error type = %T, want *UpstreamError", err)
+	}
+	var data struct {
+		Total           int  `json:"total"`
+		Fail            int  `json:"fail"`
+		ErrorsTruncated bool `json:"errorsTruncated"`
+	}
+	if err := json.Unmarshal(upstream.Data, &data); err != nil {
+		t.Fatalf("invalid upstream data: %v", err)
+	}
+	if upstream.BusinessCode != 42011 || data.Total != 2 || data.Fail != 2 || !data.ErrorsTruncated {
+		t.Fatalf("upstream error data lost: error=%+v data=%+v", upstream, data)
+	}
+}
+
 // direct 模式：URL=服务地址+path，注入 ORG_CODE_KEY/ORG_NAME_KEY 头（网关本会注入的）。
 func TestEndpointDirect(t *testing.T) {
 	c := New(Cred{

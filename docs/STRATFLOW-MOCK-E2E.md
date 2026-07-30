@@ -217,7 +217,57 @@ Content-Type: application/json
 - `2`：字段契约失败，检查 `failFields`；
 - `3`：无可用绑定。
 
-### 5.6 进度断言
+### 5.6 部分成功、零合法行与幂等重放
+
+用“合法、非法、合法”三行验证部分成功，前后两行可故意使用同一个合法号码：
+
+```json
+{
+  "idempotencyKey": "sf-e2e-partial-<date>",
+  "rows": [
+    {"phone":"4155552671","bizFields":{"sf_e2e_case_id":"SF-PARTIAL-1","sf_e2e_seq":1}},
+    {"phone":"bad-number","bizFields":{"sf_e2e_case_id":"SF-PARTIAL-2","sf_e2e_seq":2}},
+    {"phone":"4155552671","bizFields":{"sf_e2e_case_id":"SF-PARTIAL-3","sf_e2e_seq":3}}
+  ]
+}
+```
+
+首次响应断言：
+
+- `total=3/success=2/fail=1`，`errors[0].rowNo=2`，号码 reason 为固定英文 `Contains invalid characters`；
+- `errorsTruncated=false`，且 `plans[].result==1` 的 `runCode` 仍被选中进入观测；
+- 数据库 Entry 的原始 `row_no` 为 `1、3`，两个 Entry code 不同；相同号码不在 mock 或 Hermes 导入层合并。
+
+用完全相同的 `idempotencyKey` 重放后断言 batch/run 不变，统计仍为 `3/2/1`，但 `errors=[]/errorsTruncated=true`。失败明细没有持久化，不能把重放解释成“原批次没有失败原因”。
+
+再用新的 key 提交全部非法行，代理应返回 HTTP 400，响应中保留：
+
+```json
+{
+  "error": "No valid rows to import",
+  "upstreamCode": 42011,
+  "upstreamData": {
+    "total": 1,
+    "success": 0,
+    "fail": 1,
+    "errors": [
+      {
+        "rowNo": 1,
+        "errors": [
+          {"fieldKey":"phone","reason":"Contains invalid characters"}
+        ]
+      }
+    ],
+    "errorsTruncated": false
+  }
+}
+```
+
+同时确认没有创建 batch/entry/run。`error` 是 Hermes 固定英文消息，页面逻辑只按 `upstreamCode` 分支。
+
+本地 JSON/CSV 解析可以显示号码或字段语义提示，但不得因此禁用提交、过滤失败行或重排重复行；只有 JSON 语法、行对象形状、CSV 表头/列结构等无法可靠构造请求的问题才可本地阻止。
+
+### 5.7 进度断言
 
 ```http
 GET /api/stratflow/collections/{collectionCode}/executions/{runCode}/progress
@@ -232,7 +282,7 @@ GET /api/stratflow/collections/{collectionCode}/executions/{runCode}/progress
 
 超时结局不会生成 mock plan，plans 为空不等于没有派发。
 
-### 5.7 数据库事实核验
+### 5.8 数据库事实核验
 
 run 漏斗：
 
@@ -377,3 +427,14 @@ DELETE /api/stratflow/mock/all?scope=config
 - 旧部署的 mock 控制项没有租户隔离；修复版已按当前机构隔离并增加资源归属校验，待跨机构 E2E。
 - 幂等仅按 key 去重：相同 key 始终返回首次 batch/run，不比较 payload。
 - 本地 `go test ./...`、Hermes `:hermes-stratflow:test`、`npm --prefix web run build` 全部通过；远端未部署，原 499/500 结果仍有效。
+
+## 9. 2026-07-30 名单导入合同本地联调结果
+
+本轮使用隔离的 MySQL、Redis、Basic/crypto stub、hermes-mock 和本地 profile StratFlow，不修改共享测试环境。临时机构/集合/方案构成 `Start → End` 最小图，验证结果如下：
+
+- 直接调用 StratFlow 提交“重复合法号、非法号、重复合法号”：`code=0`、`total=3/success=2/fail=1`，唯一错误为原始第 2 行，reason=`Contains invalid characters`。
+- 数据库只创建原始行号 `1、3` 的两个 Entry；两行号码规整/tokenize 结果相同，但 Entry code 不同。Run 有两个独立 cursor，最终 `number_count=2/terminal_count=2/reached_end_count=2`。
+- 同 key 重放返回相同 batch/run 和完整统计，`errors=[]/errorsTruncated=true`。
+- 全部非法的新请求返回 `42011`、固定英文 `No valid rows to import` 和结构化行明细，且对应 key 的 batch 数为 0；库内仍只有前一批的 1 个 batch、2 个 Entry、1 个 Run。
+- 经 hermes-mock 代理执行同一部分成功用例得到 `3/2/1` 和第 2 行明细；代理重放保持 `errors=[]/errorsTruncated=true`，全部非法时以 HTTP 400 保留 `upstreamCode=42011/upstreamData`。
+- 代理返回的物理 Run `53517cde25373c7aaeac32973d88d5bc` 可继续查询进度：Start 与 End 均 `inflow=2/processed=2`，Run 为 `numberCount=2/terminalCount=2/reachedEndCount=2`。这证明部分失败不会阻断成功重复行的独立执行与观测。

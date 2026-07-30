@@ -14,6 +14,35 @@ import type {
 
 const base = '/api'
 
+type ApiErrorPayload = {
+  error?: string
+  upstreamCode?: number
+  upstreamData?: unknown
+}
+
+/** 代理请求错误；StratFlow 等调用方必须按 upstreamCode 分支，error 仅作未知错误兜底。 */
+export class ApiRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly upstreamCode?: number,
+    readonly upstreamData?: unknown,
+  ) {
+    super(message)
+    this.name = 'ApiRequestError'
+  }
+}
+
+async function throwApiRequestError(response: Response, fallback: string): Promise<never> {
+  const payload = await response.json().catch(() => ({})) as ApiErrorPayload
+  throw new ApiRequestError(
+    payload.error || fallback,
+    response.status,
+    payload.upstreamCode,
+    payload.upstreamData,
+  )
+}
+
 export async function listAudio(): Promise<AudioFile[]> {
   const r = await fetch(`${base}/audio`)
   if (!r.ok) throw new Error(`listAudio: ${r.status}`)
@@ -180,8 +209,7 @@ const withOrgHeader = (headers?: HeadersInit): Headers => {
 async function getJSON<T>(path: string, init?: RequestInit): Promise<T> {
   const r = await fetch(`${base}${path}`, { ...init, headers: withOrgHeader(init?.headers) })
   if (!r.ok) {
-    const e = await r.json().catch(() => ({}))
-    throw new Error((e as { error?: string }).error || `${path}: ${r.status}`)
+    return throwApiRequestError(r, `${path}: ${r.status}`)
   }
   return r.json()
 }
@@ -190,8 +218,7 @@ async function postJSON<T>(path: string, body: unknown): Promise<T> {
     method: 'POST', headers: withOrgHeader({ 'Content-Type': 'application/json' }), body: JSON.stringify(body),
   })
   if (!r.ok) {
-    const e = await r.json().catch(() => ({}))
-    throw new Error((e as { error?: string }).error || `${path}: ${r.status}`)
+    return throwApiRequestError(r, `${path}: ${r.status}`)
   }
   return r.json()
 }
@@ -201,16 +228,14 @@ async function putJSON<T>(path: string, body?: unknown): Promise<T> {
     body: body === undefined ? undefined : JSON.stringify(body),
   })
   if (!r.ok) {
-    const e = await r.json().catch(() => ({}))
-    throw new Error((e as { error?: string }).error || `${path}: ${r.status}`)
+    return throwApiRequestError(r, `${path}: ${r.status}`)
   }
   return r.json()
 }
 async function delJSONBody<T>(path: string): Promise<T> {
   const r = await fetch(`${base}${path}`, { method: 'DELETE', headers: withOrgHeader() })
   if (!r.ok) {
-    const e = await r.json().catch(() => ({}))
-    throw new Error((e as { error?: string }).error || `${path}: ${r.status}`)
+    return throwApiRequestError(r, `${path}: ${r.status}`)
   }
   return r.json()
 }
@@ -229,8 +254,7 @@ export const upsertBinding = (b: LineBinding) => postJSON<LineBinding>('/cluster
 const delJSON = async (path: string): Promise<void> => {
   const r = await fetch(`${base}${path}`, { method: 'DELETE', headers: withOrgHeader() })
   if (!r.ok) {
-    const e = await r.json().catch(() => ({}))
-    throw new Error((e as { error?: string }).error || `${path}: ${r.status}`)
+    return throwApiRequestError(r, `${path}: ${r.status}`)
   }
 }
 export const deleteProfile = (code: string) => delJSON(`/cluster/profiles/${encodeURIComponent(code)}`)

@@ -29,6 +29,7 @@ type UpstreamError struct {
 	HTTPStatus   int
 	BusinessCode int
 	Message      string
+	Data         json.RawMessage
 	Err          error
 }
 
@@ -176,7 +177,10 @@ func (c *Client) callWith(ctx context.Context, method, urlStr string, headers ma
 	if resp.StatusCode >= 300 {
 		var env Resp
 		if json.Unmarshal(raw, &env) == nil && env.Code != 0 {
-			return nil, &UpstreamError{Kind: "http", HTTPStatus: resp.StatusCode, BusinessCode: env.Code, Message: env.Msg}
+			return nil, &UpstreamError{
+				Kind: "http", HTTPStatus: resp.StatusCode, BusinessCode: env.Code,
+				Message: env.Msg, Data: append(json.RawMessage(nil), env.Data...),
+			}
 		}
 		return nil, &UpstreamError{Kind: "http", HTTPStatus: resp.StatusCode, Message: clip(string(raw), 200)}
 	}
@@ -185,7 +189,10 @@ func (c *Client) callWith(ctx context.Context, method, urlStr string, headers ma
 		return nil, fmt.Errorf("响应非标准包络: %s", clip(string(raw), 200))
 	}
 	if env.Code != 0 {
-		return nil, &UpstreamError{Kind: "business", BusinessCode: env.Code, Message: env.Msg}
+		return nil, &UpstreamError{
+			Kind: "business", BusinessCode: env.Code, Message: env.Msg,
+			Data: append(json.RawMessage(nil), env.Data...),
+		}
 	}
 	return env.Data, nil
 }

@@ -7,6 +7,14 @@
 
 ---
 
+## 2026-07-30 · StratFlow 导入由 Hermes 裁决，Mock 只透传且不保存失败明细
+
+- **背景**：Hermes 的 Web/OpenAPI 名单导入已统一为逐行校验与部分成功；成功响应新增结构化 `errors/errorsTruncated`，零合法行以业务码 `42011` 携带同一结构。若 hermes-mock 继续在浏览器或 Go 代理层拦截空号码、字段类型等业务问题，会遮蔽 Hermes 的真实合同；若为支持幂等重放而在 Mock 再保存失败明细，又会制造第二份历史事实和额外清理生命周期。
+- **决策**：JSON/CSV 本地门禁只阻止无法可靠构造请求的结构错误，例如 JSON 语法错误、名单行不是对象、CSV 表头歧义或列数损坏；号码、必填、未知字段、类型、长度、枚举、数组及行数限制只作为非阻塞提示，原始行顺序和重复行原样提交。Go client 解析成功响应的 `total/success/fail/errors/errorsTruncated`；上游业务拒绝保留 `BusinessCode`、固定英文 `Message` 和原始结构化 `Data`，代理稳定输出 `error/upstreamCode/upstreamData`，页面只按 `upstreamCode` 分支，不能解析英文文案。
+- **失败明细边界**：hermes-mock 不持久化导入结果或失败原因。首次响应直接展示 Hermes 返回的有界明细；幂等重放若为 `errors=[]/errorsTruncated=true`，明确提示“统计来自原批次，失败原因未保留”。这与 Hermes 的无持久化合同一致，不在 Mock 侧尝试用重放 payload 重建历史错误。
+- **重复与观测**：相同号码的多行不去重、不合并也不重排；部分成功只要 `plans[].result==1`，仍选择对应物理 `runCode` 继续查询 progress。失败行不会启动触达，成功的重复行继续作为独立名单和独立触达事实。
+- **影响**：涉及 `internal/hermesopenapi` 错误载体与导入 DTO、`internal/api` 薄代理、StratFlow 页面导入解析和结果展示；不新增数据库表，不改变 Hermes 业务码，也不改变 callback/回执关联逻辑。
+
 ## 2026-07-24 · 短信 Mock 使用独立状态机 + 版本化厂商 Adapter，不塞进通用 HTTP Mock
 
 - **根本问题**：Hermes-Arke 调厂商并非一次请求/响应结束，而是“同步提交结果 → 稍后以同一 reference 异步 DLR”的两阶段协议；还要覆盖延迟、丢回执、重复回执、网络失败重试和重启恢复。通用 HTTP Mock 是单次无状态响应桩，直接扩展会把回调调度、关联和生命周期混进其数据面。

@@ -679,7 +679,10 @@ export interface SfDecision {
 }
 export interface SfDecisionPage { records: SfDecision[]; total: number; pageNo: number; pageSize: number }
 export interface SfImportPlan { defCode: string; versionCode: string; result: number; runCode: string; failFields?: string[] | null }
-export interface SfImportResult { code: string; batchCode: string; collectionCode: string; status: number; total: number; success: number; fail: number; plans: SfImportPlan[] }
+export interface SfImportFieldError { fieldKey: string; reason: string; itemIndex?: number | null; maxLength?: number | null; actualLength?: number | null; maxScale?: number | null; actualScale?: number | null }
+export interface SfImportRowError { rowNo: number; errors: SfImportFieldError[] }
+export interface SfImportFailureData { total: number; success: number; fail: number; errors: SfImportRowError[]; errorsTruncated: boolean }
+export interface SfImportResult { code: string; batchCode: string; collectionCode: string; status: number; total: number; success: number; fail: number; plans: SfImportPlan[]; errors: SfImportRowError[]; errorsTruncated: boolean }
 export interface SfImportRow { phone: string; bizFields?: Record<string, unknown> }
 // import result 码：1=已生成 run / 2=字段契约失败(failFields) / 3=无可用绑定
 export const SF_IMPORT_RUN_CREATED = 1

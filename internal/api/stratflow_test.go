@@ -1,12 +1,16 @@
 package api
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"hermes-mock/internal/hermesopenapi"
+	"hermes-mock/internal/orgcfg"
 
 	"github.com/gin-gonic/gin"
 )
@@ -49,6 +53,68 @@ func TestStratflowRoutesRegister(t *testing.T) {
 		if paths[path] {
 			t.Fatalf("不应继续注册旧物理 run 路由 %s", path)
 		}
+	}
+}
+
+func TestSfErrPreservesUpstreamData(t *testing.T) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	data := json.RawMessage(`{"total":1,"success":0,"fail":1,"errors":[],"errorsTruncated":true}`)
+	if !sfErr(c, &hermesopenapi.UpstreamError{
+		Kind: "business", BusinessCode: 42011, Message: "No valid rows to import", Data: data,
+	}) {
+		t.Fatal("sfErr should handle upstream error")
+	}
+	var body struct {
+		UpstreamCode int             `json:"upstreamCode"`
+		UpstreamData json.RawMessage `json:"upstreamData"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.UpstreamCode != 42011 || !bytes.Equal(body.UpstreamData, data) {
+		t.Fatalf("upstream data lost: %s", w.Body.String())
+	}
+}
+
+func TestSfImportLetsHermesRejectEmptyRows(t *testing.T) {
+	called := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		if r.URL.Path != "/openapi/collections/COL/import" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"code":42006,"msg":"Import rows cannot be empty","data":null}`))
+	}))
+	defer upstream.Close()
+
+	orgs := orgcfg.NewMemory()
+	if _, err := orgs.Upsert(orgcfg.OrgConfig{
+		OrgCode: "org1", Mode: "direct", StratflowURL: upstream.URL,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	d := &Deps{Orgs: orgs}
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.POST("/api/stratflow/collections/:code/import", d.sfImport)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/stratflow/collections/COL/import", strings.NewReader(`{"rows":[]}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Hermes-Mock-Org", "org1")
+	router.ServeHTTP(w, req)
+
+	if !called {
+		t.Fatal("empty rows were blocked locally instead of reaching Hermes")
+	}
+	var body struct {
+		UpstreamCode int `json:"upstreamCode"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != http.StatusBadRequest || body.UpstreamCode != 42006 {
+		t.Fatalf("unexpected proxy response: status=%d body=%s", w.Code, w.Body.String())
 	}
 }
 

@@ -9,9 +9,12 @@ export interface SfImportComposeResult {
   rows: SfImportRow[]
   mode: SfImportSourceMode
   fieldKeys: string[]
-  errors: string[]
-  errorCount: number
-  errorsTruncated: boolean
+  blockingErrors: string[]
+  blockingErrorCount: number
+  blockingErrorsTruncated: boolean
+  semanticWarnings: string[]
+  semanticWarningCount: number
+  semanticWarningsTruncated: boolean
 }
 
 type JsonRecord = Record<string, unknown>
@@ -87,9 +90,12 @@ function importErrorResult(mode: SfImportSourceMode, messages: string[]): SfImpo
     rows: [],
     mode,
     fieldKeys: [],
-    errors: messages.slice(0, MAX_ERROR_DETAILS),
-    errorCount: messages.length,
-    errorsTruncated: messages.length > MAX_ERROR_DETAILS,
+    blockingErrors: messages.slice(0, MAX_ERROR_DETAILS),
+    blockingErrorCount: messages.length,
+    blockingErrorsTruncated: messages.length > MAX_ERROR_DETAILS,
+    semanticWarnings: [],
+    semanticWarningCount: 0,
+    semanticWarningsTruncated: false,
   }
 }
 
@@ -141,9 +147,18 @@ export function parseStratflowImportCsv(content: string, fields: SfField[]): SfI
   if (headerErrors.length > 0) return importErrorResult('CSV', headerErrors)
 
   const dataRows = parsed.grid.slice(1)
-  if (dataRows.length > MAX_STRATFLOW_IMPORT_ROWS) {
-    return importErrorResult('CSV', [`单次最多导入 ${MAX_STRATFLOW_IMPORT_ROWS} 条，当前 ${dataRows.length} 条`])
+  const semanticWarnings: string[] = []
+  let semanticWarningCount = 0
+  const addSemanticWarning = (warning: string) => {
+    semanticWarningCount += 1
+    if (semanticWarnings.length < MAX_ERROR_DETAILS) semanticWarnings.push(warning)
   }
+  if (dataRows.length > MAX_STRATFLOW_IMPORT_ROWS) {
+    addSemanticWarning(`名单共 ${dataRows.length} 条，超过 Hermes 单次上限 ${MAX_STRATFLOW_IMPORT_ROWS} 条`)
+  }
+  fieldColumns.forEach((column) => {
+    if (!column.field) addSemanticWarning(`存在未定义字段 ${column.key}`)
+  })
 
   const rowErrors: string[] = []
   const rows: SfImportRow[] = dataRows.map((cells, index) => {
@@ -162,13 +177,18 @@ export function parseStratflowImportCsv(content: string, fields: SfField[]): SfI
     return { phone: cells[phoneIndexes[0]]?.trim() || '', bizFields }
   })
 
+  collectSemanticWarnings(rows, fields, addSemanticWarning)
+
   return {
     rows,
     mode: 'CSV',
     fieldKeys: [...fieldColumns.values()].map((column) => column.key).sort(),
-    errors: rowErrors.slice(0, MAX_ERROR_DETAILS),
-    errorCount: rowErrors.length,
-    errorsTruncated: rowErrors.length > MAX_ERROR_DETAILS,
+    blockingErrors: rowErrors.slice(0, MAX_ERROR_DETAILS),
+    blockingErrorCount: rowErrors.length,
+    blockingErrorsTruncated: rowErrors.length > MAX_ERROR_DETAILS,
+    semanticWarnings,
+    semanticWarningCount,
+    semanticWarningsTruncated: semanticWarningCount > semanticWarnings.length,
   }
 }
 
@@ -268,6 +288,31 @@ function validateTypedValue(field: SfField, value: unknown): string | null {
   }
 }
 
+function collectSemanticWarnings(
+  rows: SfImportRow[],
+  fields: SfField[],
+  addWarning: (warning: string) => void,
+) {
+  rows.forEach((row, index) => {
+    const rowNo = index + 1
+    if (!row.phone.trim()) {
+      addWarning(`第 ${rowNo} 行：手机号为空`)
+    } else if (!/^\+?\d+$/.test(row.phone)) {
+      addWarning(`第 ${rowNo} 行：手机号包含非数字字符`)
+    }
+    fields.forEach((field) => {
+      const value = row.bizFields?.[field.key]
+      const blank = value == null || (typeof value === 'string' && value.trim() === '')
+      if (blank) {
+        if (field.required) addWarning(`第 ${rowNo} 行：必填字段「${field.displayName}（${field.key}）」为空`)
+        return
+      }
+      const fieldError = validateTypedValue(field, value)
+      if (fieldError) addWarning(`第 ${rowNo} 行：字段「${field.displayName}（${field.key}）」${fieldError}`)
+    })
+  })
+}
+
 function phoneFromJson(value: unknown): string {
   if (typeof value === 'string' || typeof value === 'number') return String(value).trim()
   return ''
@@ -287,22 +332,39 @@ export function composeStratflowImportRows(
   fields: SfField[],
 ): SfImportComposeResult {
   const phones = splitStratflowPhones(phonesText)
-  const errors: string[] = []
-  let errorCount = 0
-  const addError = (error: string) => {
-    errorCount += 1
-    if (errors.length < MAX_ERROR_DETAILS) errors.push(error)
+  const blockingErrors: string[] = []
+  const semanticWarnings: string[] = []
+  let blockingErrorCount = 0
+  let semanticWarningCount = 0
+  const addBlockingError = (error: string) => {
+    blockingErrorCount += 1
+    if (blockingErrors.length < MAX_ERROR_DETAILS) blockingErrors.push(error)
   }
+  const addSemanticWarning = (warning: string) => {
+    semanticWarningCount += 1
+    if (semanticWarnings.length < MAX_ERROR_DETAILS) semanticWarnings.push(warning)
+  }
+  const result = (rows: SfImportRow[], mode: SfImportSourceMode, fieldKeys: string[]): SfImportComposeResult => ({
+    rows,
+    mode,
+    fieldKeys,
+    blockingErrors,
+    blockingErrorCount,
+    blockingErrorsTruncated: blockingErrorCount > blockingErrors.length,
+    semanticWarnings,
+    semanticWarningCount,
+    semanticWarningsTruncated: semanticWarningCount > semanticWarnings.length,
+  })
 
-  if (fields.length === 0) addError('当前集合未配置业务字段，不能导入')
+  if (fields.length === 0) addSemanticWarning('当前集合未配置业务字段，Hermes 将拒绝本次导入')
 
   let parsed: unknown = {}
   if (bizText.trim()) {
     try {
       parsed = JSON.parse(bizText.trim())
     } catch (error) {
-      addError(`业务字段 JSON 格式错误：${error instanceof Error ? error.message : String(error)}`)
-      return { rows: [], mode: 'COMMON', fieldKeys: [], errors, errorCount, errorsTruncated: errorCount > errors.length }
+      addBlockingError(`业务字段 JSON 格式错误：${error instanceof Error ? error.message : String(error)}`)
+      return result([], 'COMMON', [])
     }
   }
 
@@ -317,7 +379,7 @@ export function composeStratflowImportRows(
 
   const normalizeBizFields = (source: unknown, rowNo: number): Record<string, unknown> => {
     if (!isRecord(source)) {
-      addError(`第 ${rowNo} 行：业务字段应为 JSON 对象`)
+      addBlockingError(`第 ${rowNo} 行：业务字段应为 JSON 对象`)
       return {}
     }
     const normalized: Record<string, unknown> = {}
@@ -325,15 +387,17 @@ export function composeStratflowImportRows(
       const lookup = rawKey.trim().toLowerCase()
       const field = fieldsByKey.get(lookup) ?? fieldsByDisplayName.get(lookup)
       if (field === null) {
-        addError(`第 ${rowNo} 行：字段名「${rawKey}」对应多个集合字段，请改用字段 Key`)
+        addBlockingError(`第 ${rowNo} 行：字段名「${rawKey}」对应多个集合字段，请改用字段 Key`)
         return
       }
       if (!field) {
-        addError(`第 ${rowNo} 行：存在未定义字段 ${rawKey}`)
+        addSemanticWarning(`第 ${rowNo} 行：存在未定义字段 ${rawKey}`)
+        normalized[rawKey] = value
+        usedFieldKeys.add(rawKey)
         return
       }
       if (Object.prototype.hasOwnProperty.call(normalized, field.key)) {
-        addError(`第 ${rowNo} 行：字段「${field.key}」被重复提供（Key/显示名冲突）`)
+        addBlockingError(`第 ${rowNo} 行：字段「${field.key}」被重复提供（Key/显示名冲突）`)
         return
       }
       normalized[field.key] = value
@@ -349,9 +413,10 @@ export function composeStratflowImportRows(
 
   if (jsonRows) {
     mode = 'ROWS'
-    if (jsonRows.length === 0) addError('逐行 JSON 不能为空数组')
-    if (jsonRows.length > MAX_STRATFLOW_IMPORT_ROWS) addError(`单次最多导入 ${MAX_STRATFLOW_IMPORT_ROWS} 条`)
-    const rowsToParse = jsonRows.slice(0, MAX_STRATFLOW_IMPORT_ROWS)
+    if (jsonRows.length > MAX_STRATFLOW_IMPORT_ROWS) {
+      addSemanticWarning(`名单共 ${jsonRows.length} 条，超过 Hermes 单次上限 ${MAX_STRATFLOW_IMPORT_ROWS} 条`)
+    }
+    const rowsToParse = jsonRows
 
     const explicitPhoneCount = rowsToParse.reduce((count, item) => {
       if (!isRecord(item)) return count
@@ -359,25 +424,24 @@ export function composeStratflowImportRows(
       return count + (phoneKey && phoneFromJson(item[phoneKey]) ? 1 : 0)
     }, 0)
     if (explicitPhoneCount === 0 && phones.length !== jsonRows.length) {
-      addError(`逐行 JSON 共 ${jsonRows.length} 条、号码区共 ${phones.length} 条；JSON 不含 phone 时数量必须一致`)
+      addBlockingError(`逐行 JSON 共 ${jsonRows.length} 条、号码区共 ${phones.length} 条；JSON 不含 phone 时数量必须一致`)
     }
 
     rows = rowsToParse.map((item, index) => {
       const rowNo = index + 1
       if (!isRecord(item)) {
-        addError(`第 ${rowNo} 行：名单行应为 JSON 对象`)
+        addBlockingError(`第 ${rowNo} 行：名单行应为 JSON 对象`)
         return { phone: phones[index] ?? '', bizFields: {} }
       }
       const phoneKey = Object.keys(item).find((key) => PHONE_KEYS.has(key.trim().toLowerCase()))
       const phone = phoneKey ? phoneFromJson(item[phoneKey]) : (phones[index] ?? '')
-      if (!phone) addError(`第 ${rowNo} 行：手机号为空`)
 
       let source: unknown
       if (Object.prototype.hasOwnProperty.call(item, 'bizFields')) {
         source = item.bizFields
-        if (!isRecord(source)) addError(`第 ${rowNo} 行：bizFields 应为 JSON 对象`)
+        if (!isRecord(source)) addBlockingError(`第 ${rowNo} 行：bizFields 应为 JSON 对象`)
         const flatKeys = Object.keys(item).filter((key) => key !== 'bizFields' && !PHONE_KEYS.has(key.trim().toLowerCase()))
-        if (flatKeys.length > 0) addError(`第 ${rowNo} 行：已使用 bizFields，不能再平铺业务字段 ${flatKeys.join('、')}`)
+        if (flatKeys.length > 0) addBlockingError(`第 ${rowNo} 行：已使用 bizFields，不能再平铺业务字段 ${flatKeys.join('、')}`)
       } else {
         source = Object.fromEntries(Object.entries(item).filter(([key]) => !PHONE_KEYS.has(key.trim().toLowerCase())))
       }
@@ -386,33 +450,15 @@ export function composeStratflowImportRows(
   } else if (isRecord(parsed)) {
     const commonSource = Object.keys(parsed).length === 1 && isRecord(parsed.bizFields) ? parsed.bizFields : parsed
     const common = normalizeBizFields(commonSource, 1)
-    if (phones.length === 0) addError('至少填一个号码，或改用带 phone 的逐行 JSON 数组')
-    if (phones.length > MAX_STRATFLOW_IMPORT_ROWS) addError(`单次最多导入 ${MAX_STRATFLOW_IMPORT_ROWS} 条`)
+    if (phones.length === 0) addSemanticWarning('未提供名单行，Hermes 将返回空名单错误')
+    if (phones.length > MAX_STRATFLOW_IMPORT_ROWS) {
+      addSemanticWarning(`名单共 ${phones.length} 条，超过 Hermes 单次上限 ${MAX_STRATFLOW_IMPORT_ROWS} 条`)
+    }
     rows = phones.map((phone) => ({ phone, bizFields: { ...common } }))
   } else {
-    addError('业务字段 JSON 顶层须为对象、数组或 {"rows":[...]}')
+    addBlockingError('业务字段 JSON 顶层须为对象、数组或 {"rows":[...]}')
   }
 
-  rows.forEach((row, index) => {
-    const rowNo = index + 1
-    fields.forEach((field) => {
-      const value = row.bizFields?.[field.key]
-      const blank = value == null || (typeof value === 'string' && value.trim() === '')
-      if (blank) {
-        if (field.required) addError(`第 ${rowNo} 行：必填字段「${field.displayName}（${field.key}）」为空`)
-        return
-      }
-      const fieldError = validateTypedValue(field, value)
-      if (fieldError) addError(`第 ${rowNo} 行：字段「${field.displayName}（${field.key}）」${fieldError}`)
-    })
-  })
-
-  return {
-    rows,
-    mode,
-    fieldKeys: [...usedFieldKeys].sort(),
-    errors,
-    errorCount,
-    errorsTruncated: errorCount > errors.length,
-  }
+  collectSemanticWarnings(rows, fields, addSemanticWarning)
+  return result(rows, mode, [...usedFieldKeys].sort())
 }

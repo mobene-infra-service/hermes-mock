@@ -359,7 +359,7 @@ func TestStratflowImportRequest(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
 			t.Fatal(err)
 		}
-		_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":{"plans":[{"result":1,"runCode":"RUN_1"}]}}`))
+		_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":{"total":3,"success":2,"fail":1,"errors":[{"rowNo":2,"errors":[{"fieldKey":"phone","reason":"Contains invalid characters"}]}],"errorsTruncated":false,"plans":[{"result":1,"runCode":"RUN_1"}]}}`))
 	}))
 	defer srv.Close()
 	res, err := New(Cred{Mode: "direct", OrgCode: "o1", StratflowURL: srv.URL}).StratflowImport(
@@ -372,5 +372,8 @@ func TestStratflowImportRequest(t *testing.T) {
 	}
 	if len(res.Plans) != 1 || res.Plans[0].RunCode != "RUN_1" {
 		t.Fatalf("import 响应错: %+v", res)
+	}
+	if res.Total != 3 || res.Success != 2 || res.Fail != 1 || len(res.Errors) != 1 || res.Errors[0].RowNo != 2 || res.ErrorsTruncated {
+		t.Fatalf("import 部分成功明细解析错: %+v", res)
 	}
 }

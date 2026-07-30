@@ -8,11 +8,12 @@ import {
   sfGate, sfSetGlobalGate, sfSetSchemeGate, sfClearSchemeGate, sfSetDeliveryPaused, sfSetReceiptWindow,
   sfListConfig, sfPutConfig, sfDeleteConfig, sfClearMock, sfListPlans, sfListDecisions, sfRequeuePlan,
   sfWorkflows, sfWorkflowDetail, sfCollections, sfCollectionFields, sfCollectionBindings, sfExecutionProgress, sfImport,
-  CURRENT_ORG_STORAGE_KEY,
+  CURRENT_ORG_STORAGE_KEY, ApiRequestError,
 } from '../api'
 import type {
   SfGateView, SfNode, SfNodeConfig, SfWorkflow, SfWorkflowDetail,
-  SfCollection, SfField, SfActionPlan, SfDecision, SfImportResult, SfRunProgress, SfRunNode, SfBinding, SfImportRow, SfDispatchMode,
+  SfCollection, SfField, SfActionPlan, SfDecision, SfImportFailureData, SfImportResult, SfImportRowError,
+  SfRunProgress, SfRunNode, SfBinding, SfImportRow, SfDispatchMode,
 } from '../types'
 import { SF_IMPORT_RUN_CREATED, SF_IMPORT_FIELD_FAIL } from '../types'
 import { PageHeader } from '../components/layout/PageHeader'
@@ -24,8 +25,62 @@ import {
   composeStratflowImportRows, generateSequentialPhones, MAX_STRATFLOW_IMPORT_ROWS, parseStratflowImportCsv, splitStratflowPhones,
   type SfImportComposeResult,
 } from './stratflow-import'
+import { importErrorDetailState, selectImportedRun } from './stratflow-import-result'
 
 const { Text, Paragraph } = Typography
+
+const SF_IMPORT_REQUEST_MESSAGES: Record<number, string> = {
+  42002: '集合已禁用，请先启用后再导入',
+  42003: '集合尚未配置字段',
+  42004: '集合暂无可用绑定方案',
+  42006: '导入名单不能为空',
+  42008: '没有可运行方案',
+  42011: '名单没有任何合法行',
+  42012: '名单行数超过单次导入上限',
+  42013: 'idempotencyKey 长度超过上限',
+  42014: '可运行方案数超过单批上限',
+  42015: '集合不存在或当前机构无权访问',
+  42016: '集合字段配置无效，请先修正字段配置',
+}
+
+type SfImportRequestFailureView = {
+  code?: number
+  message: string
+  data?: SfImportFailureData
+}
+
+function isSfImportFailureData(value: unknown): value is SfImportFailureData {
+  if (!value || typeof value !== 'object') return false
+  const data = value as Partial<SfImportFailureData>
+  return typeof data.total === 'number' && typeof data.success === 'number'
+    && typeof data.fail === 'number' && Array.isArray(data.errors)
+    && typeof data.errorsTruncated === 'boolean'
+}
+
+function formatImportRowError(error: SfImportRowError): string {
+  return error.errors.map((field) => {
+    const location = `${field.fieldKey}${field.itemIndex == null ? '' : `[${field.itemIndex}]`}`
+    const params = [
+      field.maxLength == null ? '' : `maxLength=${field.maxLength}`,
+      field.actualLength == null ? '' : `actualLength=${field.actualLength}`,
+      field.maxScale == null ? '' : `maxScale=${field.maxScale}`,
+      field.actualScale == null ? '' : `actualScale=${field.actualScale}`,
+    ].filter(Boolean)
+    return `${location}: ${field.reason}${params.length ? ` (${params.join(', ')})` : ''}`
+  }).join('；')
+}
+
+function importRequestFailureView(error: unknown): SfImportRequestFailureView {
+  if (error instanceof ApiRequestError) {
+    const code = error.upstreamCode
+    return {
+      code,
+      message: code == null ? error.message : (SF_IMPORT_REQUEST_MESSAGES[code] || error.message),
+      data: code === 42011 && isSfImportFailureData(error.upstreamData) ? error.upstreamData : undefined,
+    }
+  }
+  return { message: error instanceof Error ? error.message : String(error) }
+}
 
 // 把 Date 格式化成 UTC "yyyy-MM-dd HH:mm:ss"（run 进度接口窗口参数用）。
 function fmtUTC(d: Date): string {
@@ -77,6 +132,7 @@ export default function StratflowMockPage() {
   const [idemKey, setIdemKey] = useState('')
   const [importing, setImporting] = useState(false)
   const [importRes, setImportRes] = useState<SfImportResult | null>(null)
+  const [importRequestFailure, setImportRequestFailure] = useState<SfImportRequestFailureView | null>(null)
   const [importPreview, setImportPreview] = useState<SfImportComposeResult | null>(null)
   const [csvFileName, setCsvFileName] = useState('')
   const [phoneGeneratorOpen, setPhoneGeneratorOpen] = useState(false)
@@ -226,7 +282,7 @@ export default function StratflowMockPage() {
       observingRef.current = false
       setGate(null); setGateErr(''); setWorkflows([]); setDefCode(undefined); setDetail(null)
       setNodes([]); setEdits({}); setConfigErr(''); setCollections([]); setCollCode(undefined); setFields([]); setBindings([])
-      setPhonesText(''); setBizText(''); setIdemKey(''); setImportRes(null); setImportPreview(null); setCsvFileName(''); setImporting(false)
+      setPhonesText(''); setBizText(''); setIdemKey(''); setImportRes(null); setImportRequestFailure(null); setImportPreview(null); setCsvFileName(''); setImporting(false)
       setPhoneGeneratorOpen(false)
       setRunCode(''); setPlans([]); setDecisions([]); setDecisionTotal(0); setDecisionPage(1); setPlansErr(''); setProgress(null); setAutoObserve(false)
       Modal.destroyAll()
@@ -244,7 +300,7 @@ export default function StratflowMockPage() {
   const pickCollection = async (code: string) => {
     const generation = ++collectionGenerationRef.current
     observeGenerationRef.current++; observingRef.current = false
-    setCollCode(code); setFields([]); setBindings([]); setImportPreview(null); setCsvFileName(''); setImportRes(null)
+    setCollCode(code); setFields([]); setBindings([]); setImportPreview(null); setCsvFileName(''); setImportRes(null); setImportRequestFailure(null)
     setRunCode(''); setPlans([]); setDecisions([]); setDecisionTotal(0); setDecisionPage(1); setPlansErr(''); setProgress(null)
     try {
       const [f, b] = await Promise.all([sfCollectionFields(code), sfCollectionBindings(code)])
@@ -302,12 +358,17 @@ export default function StratflowMockPage() {
     setImportPreview(result)
     setCsvFileName('')
     setImportRes(null)
-    if (result.errorCount > 0) {
-      message.error(`解析/校验未通过，共 ${result.errorCount} 个问题`)
+    setImportRequestFailure(null)
+    if (result.blockingErrorCount > 0) {
+      message.error(`结构解析失败，共 ${result.blockingErrorCount} 个问题`)
       return result
     }
     if (syncPhones && result.mode === 'ROWS') setPhonesText(result.rows.map((row) => row.phone).join('\n'))
-    message.success(`已解析 ${result.rows.length} 条名单`)
+    if (result.semanticWarningCount > 0) {
+      message.warning(`已解析 ${result.rows.length} 条名单；${result.semanticWarningCount} 个语义问题将由 Hermes 最终校验`)
+    } else {
+      message.success(`已解析 ${result.rows.length} 条名单`)
+    }
     return result
   }
 
@@ -325,13 +386,18 @@ export default function StratflowMockPage() {
       setImportPreview(result)
       setCsvFileName(file.name)
       setImportRes(null)
-      if (result.errorCount > 0) {
-        message.error(`CSV 结构解析失败，共 ${result.errorCount} 个问题`)
+      setImportRequestFailure(null)
+      if (result.blockingErrorCount > 0) {
+        message.error(`CSV 结构解析失败，共 ${result.blockingErrorCount} 个问题`)
         return
       }
       setPhonesText(result.rows.map((row) => row.phone).join('\n'))
       setBizText('')
-      message.success(`已从 ${file.name} 解析 ${result.rows.length} 条名单`)
+      if (result.semanticWarningCount > 0) {
+        message.warning(`已从 ${file.name} 解析 ${result.rows.length} 条名单；${result.semanticWarningCount} 个语义问题将由 Hermes 最终校验`)
+      } else {
+        message.success(`已从 ${file.name} 解析 ${result.rows.length} 条名单`)
+      }
     } catch (e) {
       if (orgGeneration === orgGenerationRef.current && collectionGeneration === collectionGenerationRef.current) {
         message.error(`读取 CSV 文件失败：${String(e)}`)
@@ -352,6 +418,7 @@ export default function StratflowMockPage() {
       setImportPreview(null)
       setCsvFileName('')
       setImportRes(null)
+      setImportRequestFailure(null)
       setPhoneGeneratorOpen(false)
       message.success(`${phoneGeneratorMode === 'append' ? '已追加' : '已生成'} ${generated.length} 个号码`)
     } catch (e) {
@@ -365,8 +432,8 @@ export default function StratflowMockPage() {
       ? importPreview
       : composeStratflowImportRows(phonesText, bizText, fields)
     setImportPreview(composed)
-    if (composed.errorCount > 0) {
-      message.error(`解析/校验未通过，共 ${composed.errorCount} 个问题`)
+    if (composed.blockingErrorCount > 0) {
+      message.error(`结构解析失败，共 ${composed.blockingErrorCount} 个问题`)
       return
     }
     const code = collCode
@@ -400,6 +467,8 @@ export default function StratflowMockPage() {
     const orgGeneration = orgGenerationRef.current
     const collectionGeneration = collectionGenerationRef.current
     setImporting(true)
+    setImportRes(null)
+    setImportRequestFailure(null)
     try {
       const res = await sfImport(code, {
         idempotencyKey: idemKey || undefined,
@@ -407,23 +476,33 @@ export default function StratflowMockPage() {
       })
       if (orgGeneration !== orgGenerationRef.current || collectionGeneration !== collectionGenerationRef.current) return
       setImportRes(res)
+      setImportRequestFailure(null)
       // 多绑定名单会为每个绑定方案各返回一条 plan：优先取"本页选中并配置的方案 defCode"那条 run，
       // 否则回退首条成功——否则可能观测到别的方案的 run，令你为选中方案配的强制结局看似不生效。
-      const plans = res.plans || []
-      const ok = plans.find((p) => p.defCode === defCode && p.result === SF_IMPORT_RUN_CREATED && p.runCode)
-        ?? plans.find((p) => p.result === SF_IMPORT_RUN_CREATED && p.runCode)
+      const ok = selectImportedRun(res, defCode)
+      const errorState = importErrorDetailState(res)
       if (ok) {
         observeGenerationRef.current++; observingRef.current = false
         setRunCode(ok.runCode)
         setPlans([]); setDecisions([]); setDecisionTotal(0); setDecisionPage(1); setPlansErr(''); setProgress(null)
-        message.success(`已生成 run ${ok.runCode}`)
+        if (errorState.kind === 'not-retained') {
+          message.warning(`命中原幂等批次，已取得 run ${ok.runCode}；失败原因未保留`)
+        } else if (res.fail > 0) {
+          message.warning(`部分导入成功：成功 ${res.success} 行、失败 ${res.fail} 行；已取得 run ${ok.runCode}`)
+        } else {
+          message.success(`已生成 run ${ok.runCode}`)
+        }
         void observe(ok.runCode, 1)
       } else {
         const fail = (res.plans || [])[0]
         message.warning(fail?.result === SF_IMPORT_FIELD_FAIL ? `字段契约失败：${(fail.failFields || []).join(', ')}` : '无可用绑定/未生成 run，看导入结果')
       }
     } catch (e) {
-      if (orgGeneration === orgGenerationRef.current && collectionGeneration === collectionGenerationRef.current) message.error(String(e))
+      if (orgGeneration === orgGenerationRef.current && collectionGeneration === collectionGenerationRef.current) {
+        const failure = importRequestFailureView(e)
+        setImportRequestFailure(failure)
+        message.error(failure.message)
+      }
     } finally {
       if (orgGeneration === orgGenerationRef.current && collectionGeneration === collectionGenerationRef.current) setImporting(false)
     }
@@ -535,6 +614,12 @@ export default function StratflowMockPage() {
       : undefined
   const requiredFields = useMemo(() => fields.filter((f) => f.required), [fields])
   const phoneCount = useMemo(() => splitStratflowPhones(phonesText).length, [phonesText])
+  const importErrorSummary = importRes && importRes.fail > 0
+    ? importRes
+    : importRequestFailure?.data && importRequestFailure.data.fail > 0
+      ? importRequestFailure.data
+      : null
+  const importErrorState = importErrorSummary ? importErrorDetailState(importErrorSummary) : null
 
   return (
     <div className="page-container">
@@ -631,7 +716,7 @@ export default function StratflowMockPage() {
           {collCode && (
             <>
               {requiredFields.length > 0 && (
-                <Alert type="info" showIcon message={<span>必填业务字段：{requiredFields.map((f) => <Tag key={f.key}>{f.displayName}（{f.key}）</Tag>)} —— 缺失时会在导入前拦截。</span>} />
+                <Alert type="info" showIcon message={<span>必填业务字段：{requiredFields.map((f) => <Tag key={f.key}>{f.displayName}（{f.key}）</Tag>)} —— 缺失行会由 Hermes 标记为失败，不影响其它合法行。</span>} />
               )}
               <Text type="secondary" style={{ fontSize: 12 }}>
                 绑定方案：{bindings.length === 0 ? '无（导入不会生成 run）' : bindings.map((b) => (
@@ -656,16 +741,16 @@ export default function StratflowMockPage() {
                     <Text type="secondary">号码（每行一个） · 已填 {phoneCount} 条</Text>
                     <Space size={6}>
                       <Button size="small" icon={<PlusOutlined />} onClick={() => setPhoneGeneratorOpen(true)}>批量生成</Button>
-                      <Upload accept=".csv,text/csv" showUploadList={false} disabled={fields.length === 0} beforeUpload={(file) => {
+                      <Upload accept=".csv,text/csv" showUploadList={false} beforeUpload={(file) => {
                         void importCsvFile(file)
                         return false
                       }}>
-                        <Button size="small" disabled={fields.length === 0} icon={<UploadOutlined />}>导入 CSV</Button>
+                        <Button size="small" icon={<UploadOutlined />}>导入 CSV</Button>
                       </Upload>
                     </Space>
                   </Space>
                   <Input.TextArea rows={8} style={{ width: '100%' }} value={phonesText} onChange={(e) => {
-                    setPhonesText(e.target.value); setImportPreview(null); setCsvFileName(''); setImportRes(null)
+                    setPhonesText(e.target.value); setImportPreview(null); setCsvFileName(''); setImportRes(null); setImportRequestFailure(null)
                   }} placeholder={'13800138000\n13800138001'} />
                 </div>
                 <div style={{ width: 560, maxWidth: '100%' }}>
@@ -674,7 +759,7 @@ export default function StratflowMockPage() {
                     <Button size="small" disabled={fields.length === 0} onClick={() => previewImportRows()}>校验公共字段</Button>
                   </Space>
                   <Input.TextArea rows={8} style={{ width: '100%', fontFamily: 'monospace' }} value={bizText} onChange={(e) => {
-                    setBizText(e.target.value); setImportPreview(null); setCsvFileName(''); setImportRes(null)
+                    setBizText(e.target.value); setImportPreview(null); setCsvFileName(''); setImportRes(null); setImportRequestFailure(null)
                   }} placeholder={'{"customer_name":"张三","tags":["vip"]}'} />
                   <Text type="secondary" style={{ display: 'block', marginTop: 4, fontSize: 12 }}>
                     公共对象会应用到号码区的全部号码。逐行号码与业务字段请使用「导入 CSV」：表头为 <Text code>phone</Text> + 业务字段；已知数组字段用 <Text code>|</Text> 分隔，未在当前集合发现的列也会按原表头提交，由 Hermes 最终校验。
@@ -682,31 +767,48 @@ export default function StratflowMockPage() {
                 </div>
                 <div style={{ width: 240, maxWidth: '100%' }}>
                   <Text type="secondary">idempotencyKey（可空）</Text>
-                  <Input maxLength={128} style={{ width: '100%', display: 'block', marginTop: 4 }} value={idemKey} onChange={(e) => setIdemKey(e.target.value)} placeholder="防重复提交" />
+                  <Input maxLength={128} style={{ width: '100%', display: 'block', marginTop: 4 }} value={idemKey} onChange={(e) => {
+                    setIdemKey(e.target.value); setImportRes(null); setImportRequestFailure(null)
+                  }} placeholder="防重复提交" />
                 </div>
               </div>
               {importPreview && (
                 <Card size="small" title={`解析预览 · ${importPreview.rows.length} 条`}>
-                  <Space wrap style={{ marginBottom: importPreview.errorCount > 0 ? 8 : 12 }}>
+                  <Space wrap style={{ marginBottom: importPreview.blockingErrorCount > 0 || importPreview.semanticWarningCount > 0 ? 8 : 12 }}>
                     <Tag color={importPreview.mode === 'CSV' ? 'blue' : importPreview.mode === 'ROWS' ? 'purple' : 'default'}>
                       {importPreview.mode === 'CSV' ? `CSV${csvFileName ? ` · ${csvFileName}` : ''}` : importPreview.mode === 'ROWS' ? '逐行数据' : '公共字段'}
                     </Tag>
                     <Text type="secondary">已识别字段：{importPreview.fieldKeys.length ? importPreview.fieldKeys.join('、') : '无'}</Text>
-                    <Tag color={importPreview.errorCount > 0 ? 'red' : 'green'}>
-                      {importPreview.errorCount > 0 ? `${importPreview.errorCount} 个问题` : importPreview.mode === 'CSV' ? '解析通过 · 待 Hermes 校验' : '校验通过'}
-                    </Tag>
+                    {importPreview.blockingErrorCount > 0 && <Tag color="red">{importPreview.blockingErrorCount} 个结构错误</Tag>}
+                    {importPreview.semanticWarningCount > 0 && <Tag color="gold">{importPreview.semanticWarningCount} 个语义提示</Tag>}
+                    {importPreview.blockingErrorCount === 0 && importPreview.semanticWarningCount === 0 && (
+                      <Tag color="green">{importPreview.mode === 'CSV' ? '解析通过 · 待 Hermes 校验' : '校验通过'}</Tag>
+                    )}
                   </Space>
-                  {importPreview.errorCount > 0 ? (
-                    <Alert type="error" showIcon message="请修正后再导入" description={(
+                  {importPreview.blockingErrorCount > 0 && (
+                    <Alert type="error" showIcon message="请修正结构错误后再导入" description={(
                       <>
                         <ol style={{ margin: '6px 0 0', paddingLeft: 20 }}>
-                          {importPreview.errors.slice(0, 20).map((error, index) => <li key={`${index}-${error}`}>{error}</li>)}
+                          {importPreview.blockingErrors.slice(0, 20).map((error, index) => <li key={`${index}-${error}`}>{error}</li>)}
                         </ol>
-                        {importPreview.errorCount > 20 && <Text type="secondary">这里只展示前 20 个问题；共 {importPreview.errorCount} 个{importPreview.errorsTruncated ? '，详细错误已截断' : ''}。</Text>}
+                        {importPreview.blockingErrorCount > 20 && <Text type="secondary">这里只展示前 20 个问题；共 {importPreview.blockingErrorCount} 个{importPreview.blockingErrorsTruncated ? '，详细错误已截断' : ''}。</Text>}
                       </>
                     )} />
-                  ) : (
+                  )}
+                  {importPreview.semanticWarningCount > 0 && (
+                    <Alert type="warning" showIcon style={{ marginTop: importPreview.blockingErrorCount > 0 ? 8 : 0 }}
+                      message="以下是本地语义提示，不会阻止提交" description={(
+                        <>
+                          <ol style={{ margin: '6px 0 0', paddingLeft: 20 }}>
+                            {importPreview.semanticWarnings.slice(0, 20).map((warning, index) => <li key={`${index}-${warning}`}>{warning}</li>)}
+                          </ol>
+                          {importPreview.semanticWarningCount > 20 && <Text type="secondary">这里只展示前 20 个提示；共 {importPreview.semanticWarningCount} 个{importPreview.semanticWarningsTruncated ? '，详细提示已截断' : ''}。Hermes 会按原始行号最终校验。</Text>}
+                        </>
+                      )} />
+                  )}
+                  {importPreview.blockingErrorCount === 0 && (
                     <Table size="small" pagination={false} rowKey="rowNo"
+                      style={{ marginTop: importPreview.semanticWarningCount > 0 ? 8 : 0 }}
                       dataSource={importPreview.rows.slice(0, 5).map((row, index) => ({ ...row, rowNo: index + 1 }))}
                       columns={[
                         { title: '#', dataIndex: 'rowNo', width: 54 },
@@ -714,14 +816,19 @@ export default function StratflowMockPage() {
                         { title: 'bizFields', dataIndex: 'bizFields', render: (value: Record<string, unknown>) => <Text code style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify(value)}</Text> },
                       ]} />
                   )}
-                  {importPreview.errorCount === 0 && importPreview.rows.length > 5 && <Text type="secondary">仅预览前 5 条，提交时会导入全部 {importPreview.rows.length} 条。</Text>}
+                  {importPreview.blockingErrorCount === 0 && importPreview.rows.length > 5 && <Text type="secondary">仅预览前 5 条，提交时会按原顺序导入全部 {importPreview.rows.length} 条。</Text>}
                 </Card>
               )}
               <Button type="primary" icon={<ThunderboltOutlined />} loading={importing} onClick={doImport}>导入并触发 run</Button>
+              {importRequestFailure && (
+                <Alert type="error" showIcon
+                  message={importRequestFailure.code == null ? '导入请求失败' : `导入请求失败（errorCode ${importRequestFailure.code}）`}
+                  description={importRequestFailure.message} />
+              )}
               {importRes && (
                 <Descriptions size="small" bordered column={2} style={{ marginTop: 8 }}>
                   <Descriptions.Item label="批次">{importRes.batchCode || importRes.code}</Descriptions.Item>
-                  <Descriptions.Item label="成功/总数">{importRes.success}/{importRes.total}</Descriptions.Item>
+                  <Descriptions.Item label="成功/失败/总数">{importRes.success}/{importRes.fail}/{importRes.total}</Descriptions.Item>
                   <Descriptions.Item label="plans" span={2}>
                     {(importRes.plans || []).map((p, i) => (
                       <Tag key={i} color={p.result === SF_IMPORT_RUN_CREATED ? 'green' : p.result === SF_IMPORT_FIELD_FAIL ? 'red' : 'orange'}>
@@ -730,6 +837,25 @@ export default function StratflowMockPage() {
                     ))}
                   </Descriptions.Item>
                 </Descriptions>
+              )}
+              {importErrorSummary && importErrorState && (
+                <Card size="small" title={`失败明细 · ${importErrorSummary.fail} 行`}>
+                  {importErrorState.kind === 'not-retained' && (
+                    <Alert type="warning" showIcon style={{ marginBottom: 8 }}
+                      message="命中幂等重放：统计来自原批次，失败原因未保留" />
+                  )}
+                  {importErrorState.kind === 'truncated' && (
+                    <Alert type="warning" showIcon style={{ marginBottom: 8 }}
+                      message={`失败共 ${importErrorState.fail} 行，仅返回前 ${importErrorState.shown} 行明细`} />
+                  )}
+                  {importErrorSummary.errors.length > 0 && (
+                    <Table size="small" pagination={false} rowKey="rowNo" dataSource={importErrorSummary.errors}
+                      scroll={{ y: 240 }} columns={[
+                        { title: '原始行号', dataIndex: 'rowNo', width: 100 },
+                        { title: '错误原因', render: (_: unknown, row: SfImportRowError) => formatImportRowError(row) },
+                      ]} />
+                  )}
+                </Card>
               )}
             </>
           )}

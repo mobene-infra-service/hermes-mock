@@ -71,6 +71,7 @@ func sfErr(c *gin.Context, err error) bool {
 	if errors.As(err, &upstream) {
 		if upstream.BusinessCode != 0 {
 			body["upstreamCode"] = upstream.BusinessCode
+			body["upstreamData"] = upstream.Data
 		}
 		switch upstream.Kind {
 		case "timeout":
@@ -499,10 +500,6 @@ func (d *Deps) sfImport(c *gin.Context) {
 	var req hermesopenapi.SfImportReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	if len(req.Rows) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "rows 不能为空"})
 		return
 	}
 	res, err := cli.StratflowImport(c.Request.Context(), c.Param("code"), req)

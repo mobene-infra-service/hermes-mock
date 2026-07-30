@@ -11,7 +11,7 @@
 - **versionCode 语义已钉死**：`GET /openapi/mock/workflows/{defCode}` 返回的 `versionCode` = **当前启用发布版本**（= 新 run 实际绑定版本，非草稿），且与 `import.plans[].versionCode`、`version-runs[].versionCode` 和物理 `executions[].versionCode` 一致 → 多方可交叉核对，配置不会静默失效。
 - **import 回带 runCode 已加**：`POST /openapi/collections/{code}/import` 响应 `data.plans[].runCode`（`result==1` 时非空），断言闭环可直接拿到 run。
 
-## 2. ⚠️ 与最初方案不同、Go client / 前端**必须按实际改**的 5 点
+## 2. ⚠️ 与最初方案不同、Go client / 前端**必须按实际改**的 6 点
 
 1. **物理 execution 进度必须带时间窗**
    `GET /openapi/mock/collections/{code}/executions/{rid}/progress?uploadStartTime=&uploadEndTime=`
@@ -39,6 +39,13 @@
    - `GET /openapi/mock/collections/{code}/version-runs/{defCode}/{versionCode}/progress?uploadStart=&uploadEnd=` 返回版本聚合进度，窗口参数为 ISO-8601 UTC instant、左闭右开且最大 30 天。
    - `GET /openapi/mock/collections/{code}/executions` 与 `/executions/{runCode}/progress` 保留物理身份。Mock plan、decision、DEAD requeue 和“本次导入”断言必须继续用物理 `runCode`，不能拿版本记录 `code` 代替。
 
+6. **名单导入是部分成功合同，失败明细只在响应中存在**
+   - 成功包解析 `total/success/fail/errors/errorsTruncated`；失败行的 `rowNo` 是原始 1-based 行号，不能因过滤非法行而压缩。
+   - `success>0` 时即使 `fail>0` 也继续按 `plans[].result==1` 选择物理 `runCode` 观测；相同号码的重复行保持独立，不在 hermes-mock 去重、合并或重排。
+   - `success==0` 时 Hermes 返回业务码 `42011` 和结构化 `data`。Go 代理以 HTTP 400 暴露 `error/upstreamCode/upstreamData`，Web 必须按 `upstreamCode` 分支，不能比较固定英文 `error` 文本。
+   - Hermes 不持久化失败明细：首次响应展示有界 `errors`；命中已有部分成功批次的幂等重放返回 `errors=[]/errorsTruncated=true`。hermes-mock 不另建持久化副本。
+   - 浏览器只拦无法构造请求的 JSON/CSV 结构问题；号码、必填、未知字段、类型、长度、枚举、数组及行数限制可以提示，但必须把原始行提交给 Hermes 作最终裁决。
+
 ## 3. 不变的坑（沿用手册）
 
 - **gate 为三态且缺配置 fail-safe PAUSED**：进编排台先 `GET /openapi/mock/gate` 探 `master`+`mode/schemeModes`；旧 `global/schemes` 仅兼容二态。REAL/MOCK 写请求同时携带 `mode+enabled` 兼容旧 Hermes，PAUSED 不允许降级。`master=false` 整台只读。
@@ -49,8 +56,7 @@
 ## 4. hermes-mock 侧落地清单（据已落地契约收敛）
 
 - Go client（`internal/hermesopenapi`，复用共用网关/凭据）：
-  gate 组、类型化 `config` 组、`plans`、分页 `decisions`、`all`；发现组 `workflows / workflows/{defCode} / collections[?name&status] / collections/{code}/fields / collections/{code}/bindings / collections/{code}/version-runs / version-runs/{defCode}/{versionCode}/progress / collections/{code}/executions / executions/{runCode}/progress`；触发 `import`（解析 `plans[].{result,runCode,versionCode,failFields}`）。
+  gate 组、类型化 `config` 组、`plans`、分页 `decisions`、`all`；发现组 `workflows / workflows/{defCode} / collections[?name&status] / collections/{code}/fields / collections/{code}/bindings / collections/{code}/version-runs / version-runs/{defCode}/{versionCode}/progress / collections/{code}/executions / executions/{runCode}/progress`；触发 `import`（解析计数、结构化失败明细及 `plans[].{result,runCode,versionCode,failFields}`）。
 - api：`/api/stratflow/mock/*` 透传；`api.Deps` 复用同一 `Client`。
 - 前端「策略流 Mock 编排」页：gate 探测/开关 → 选方案(得 versionCode) → 结局配置表 → 选名单+字段拼 rows → import → **进度按 edgeFlow 断言 + 传时间窗** → 清场。
-- 落地前补 `docs/DECISIONS.md`（为何把 stratflow 应用层 mock 编排台放进 hermes-mock）+ `docs/SCOPE.md` 一句注（编排能力、非被叫腿核心）。
-</content>
+- 边界决策见 `docs/DECISIONS.md`；`docs/SCOPE.md` 保持“编排能力、非被叫腿核心”的定位。
