@@ -15,35 +15,53 @@ func Resolve(cfg EndpointConfig, req IncomingRequest) (Decision, error) {
 }
 
 func resolveWithPicker(cfg EndpointConfig, req IncomingRequest, pick func(int) int) (Decision, error) {
+	return resolve(cfg, req, pick, "")
+}
+
+func resolveWithSequence(cfg EndpointConfig, req IncomingRequest, sequenceCase string) (Decision, error) {
+	return resolve(cfg, req, rand.Intn, sequenceCase)
+}
+
+func resolve(cfg EndpointConfig, req IncomingRequest, pick func(int) int, sequenceCase string) (Decision, error) {
 	decision := Decision{
 		Response: cfg.DefaultResponse, SelectedCase: "default", SelectionMode: SelectionDefault,
 	}
-	rules := append([]Rule(nil), cfg.Rules...)
-	sort.SliceStable(rules, func(i, j int) bool { return rules[i].Priority > rules[j].Priority })
-	matched := false
-	for _, rule := range rules {
-		if matchesRule(rule, req) {
-			matched = true
-			decision.MatchedRule = rule.Name
-			if len(rule.WeightedCases) > 0 {
-				if err := applyWeightedSelection(&decision, cfg.Cases, rule.WeightedCases, SelectionRuleWeighted, pick); err != nil {
-					return Decision{}, fmt.Errorf("rule %s: %w", rule.Name, err)
-				}
-			} else {
-				response, ok := cfg.Cases[rule.Case]
-				if !ok {
-					return Decision{}, fmt.Errorf("rule %s 引用了不存在的 case %q", rule.Name, rule.Case)
-				}
-				decision.Response = response
-				decision.SelectedCase = rule.Case
-				decision.SelectionMode = SelectionRuleFixed
-			}
-			break
+	if sequenceCase != "" {
+		response, ok := cfg.Cases[sequenceCase]
+		if !ok {
+			return Decision{}, fmt.Errorf("sequenceCases 引用了不存在的 case %q", sequenceCase)
 		}
-	}
-	if !matched && len(cfg.DefaultWeightedCases) > 0 {
-		if err := applyWeightedSelection(&decision, cfg.Cases, cfg.DefaultWeightedCases, SelectionDefaultWeighted, pick); err != nil {
-			return Decision{}, fmt.Errorf("defaultWeightedCases: %w", err)
+		decision.Response = response
+		decision.SelectedCase = sequenceCase
+		decision.SelectionMode = SelectionSequence
+	} else {
+		rules := append([]Rule(nil), cfg.Rules...)
+		sort.SliceStable(rules, func(i, j int) bool { return rules[i].Priority > rules[j].Priority })
+		matched := false
+		for _, rule := range rules {
+			if matchesRule(rule, req) {
+				matched = true
+				decision.MatchedRule = rule.Name
+				if len(rule.WeightedCases) > 0 {
+					if err := applyWeightedSelection(&decision, cfg.Cases, rule.WeightedCases, SelectionRuleWeighted, pick); err != nil {
+						return Decision{}, fmt.Errorf("rule %s: %w", rule.Name, err)
+					}
+				} else {
+					response, ok := cfg.Cases[rule.Case]
+					if !ok {
+						return Decision{}, fmt.Errorf("rule %s 引用了不存在的 case %q", rule.Name, rule.Case)
+					}
+					decision.Response = response
+					decision.SelectedCase = rule.Case
+					decision.SelectionMode = SelectionRuleFixed
+				}
+				break
+			}
+		}
+		if !matched && len(cfg.DefaultWeightedCases) > 0 {
+			if err := applyWeightedSelection(&decision, cfg.Cases, cfg.DefaultWeightedCases, SelectionDefaultWeighted, pick); err != nil {
+				return Decision{}, fmt.Errorf("defaultWeightedCases: %w", err)
+			}
 		}
 	}
 

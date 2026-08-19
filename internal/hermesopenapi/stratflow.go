@@ -32,17 +32,36 @@ type SfMockGateView struct {
 }
 
 type SfMockCaseResult struct {
-	Type              string  `json:"type"`
-	Status            string  `json:"status"`
-	TerminalAttemptNo *int    `json:"terminalAttemptNo,omitempty"`
-	RetryRingStatus   *string `json:"retryRingStatus,omitempty"`
-	RingStatus        *string `json:"ringStatus,omitempty"`
-	Intention         *string `json:"intention,omitempty"`
-	TalkDurationSec   *int    `json:"talkDurationSec,omitempty"`
-	FailureReason     *string `json:"failureReason,omitempty"`
-	ErrorCode         *string `json:"errorCode,omitempty"`
-	ErrorDesc         *string `json:"errorDesc,omitempty"`
-	PartCount         *int    `json:"partCount,omitempty"`
+	Type              string         `json:"type"`
+	Status            string         `json:"status"`
+	TerminalAttemptNo *int           `json:"terminalAttemptNo,omitempty"`
+	RetryRingStatus   *string        `json:"retryRingStatus,omitempty"`
+	RingStatus        *string        `json:"ringStatus,omitempty"`
+	Intention         *string        `json:"intention,omitempty"`
+	TalkDurationSec   *int           `json:"talkDurationSec,omitempty"`
+	FailureReason     *string        `json:"failureReason,omitempty"`
+	ErrorCode         *string        `json:"errorCode,omitempty"`
+	ErrorDesc         *string        `json:"errorDesc,omitempty"`
+	PartCount         *int           `json:"partCount,omitempty"`
+	CallbackOverrides map[string]any `json:"callbackOverrides,omitempty"`
+}
+
+type SfAPIPushFieldOption struct {
+	Value         any    `json:"value"`
+	I18nKey       string `json:"i18nKey"`
+	FallbackLabel string `json:"fallbackLabel"`
+}
+
+type SfAPIPushFieldDefinition struct {
+	Path            string                 `json:"path"`
+	Type            string                 `json:"type"`
+	I18nKey         string                 `json:"i18nKey"`
+	FallbackLabel   string                 `json:"fallbackLabel"`
+	Required        bool                   `json:"required"`
+	Sensitive       bool                   `json:"sensitive"`
+	DefaultSelected bool                   `json:"defaultSelected"`
+	Sample          any                    `json:"sample"`
+	Options         []SfAPIPushFieldOption `json:"options"`
 }
 
 type SfMockCase struct {
@@ -124,14 +143,15 @@ type SfMockCasePreview struct {
 
 // SfMockNodeView 某触达节点的有效配置、可编辑 Schema 与逐 Case 编译预览。
 type SfMockNodeView struct {
-	NodeID       string                       `json:"nodeId"`
-	Type         string                       `json:"type"`
-	Channel      *string                      `json:"channel"`
-	Configured   bool                         `json:"configured"`
-	ResultSchema SfMockResultSchema           `json:"resultSchema"`
-	MatchSchema  SfMockMatchSchema            `json:"matchSchema"`
-	Config       SfMockNodeConfig             `json:"config"`
-	Previews     map[string]SfMockCasePreview `json:"previews"`
+	NodeID         string                       `json:"nodeId"`
+	Type           string                       `json:"type"`
+	Channel        *string                      `json:"channel"`
+	Configured     bool                         `json:"configured"`
+	ResultSchema   SfMockResultSchema           `json:"resultSchema"`
+	MatchSchema    SfMockMatchSchema            `json:"matchSchema"`
+	CallbackFields []SfAPIPushFieldDefinition   `json:"callbackFields"`
+	Config         SfMockNodeConfig             `json:"config"`
+	Previews       map[string]SfMockCasePreview `json:"previews"`
 }
 
 // SfMockActionPlan per-action 计划；DEAD 仍返回，便于观测和人工恢复。
@@ -318,10 +338,14 @@ type SfVersionRunProgress struct {
 	SmsDispatchedCount  int64        `json:"smsDispatchedCount"`
 }
 
-// SfImportRow 导入行（phone 明文 tokenize 后即丢；bizFields 按集合字段类型落原生值）。
+// SfImportRow 导入行；四个业务标识与 phone 同级，指针保留“未传”和显式空串的区别。
 type SfImportRow struct {
-	Phone     string         `json:"phone"`
-	BizFields map[string]any `json:"bizFields,omitempty"`
+	Phone      string         `json:"phone"`
+	BusinessID *string        `json:"businessId,omitempty"`
+	TicketID   *string        `json:"ticketId,omitempty"`
+	OrderID    *string        `json:"orderId,omitempty"`
+	UserID     *string        `json:"userId,omitempty"`
+	BizFields  map[string]any `json:"bizFields,omitempty"`
 }
 
 // SfImportReq 导名单请求（idempotencyKey 防重复提交）。
@@ -470,12 +494,13 @@ func validateTypedMockNode(node SfMockNodeView) error {
 		node.ResultSchema.Intentions == nil ||
 		node.MatchSchema.Fields == nil ||
 		node.MatchSchema.Operators == nil ||
+		node.CallbackFields == nil ||
 		len(node.Config.Cases) == 0 ||
 		node.Config.DefaultSelection == nil ||
 		node.Config.Rules == nil ||
 		node.Previews == nil {
 		return fmt.Errorf(
-			"Hermes StratFlow Mock 配置协议不兼容：节点 %s 未返回类型化 cases/defaultSelection/schema/previews；"+
+			"Hermes StratFlow Mock 配置协议不兼容：节点 %s 未返回类型化 cases/defaultSelection/schema/callbackFields/previews；"+
 				"请先部署配套 Hermes 后端并清理旧 sf:mock:cfg:* 配置",
 			node.NodeID,
 		)

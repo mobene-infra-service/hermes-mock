@@ -247,7 +247,7 @@ func (d *Deps) invokeHTTPMock(c *gin.Context) {
 		Method: c.Request.Method, Query: map[string][]string(c.Request.URL.Query()),
 		Header: c.Request.Header.Clone(), RawBody: body, JSONBody: jsonBody,
 	}
-	decision, err := httpmock.Resolve(endpoint.Config, request)
+	decision, err := d.HTTPMock.Resolve(endpoint.ID, request)
 	if err != nil {
 		decision = httpmock.Decision{Response: httpmock.ResponseSpec{
 			Action: httpmock.ActionRespond, Status: http.StatusBadRequest,

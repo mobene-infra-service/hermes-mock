@@ -180,3 +180,47 @@ func TestEndpointValidationRejectsUnsafeHeader(t *testing.T) {
 		t.Fatal("应拒绝 Content-Length")
 	}
 }
+
+func TestStoreResolveSequenceAndReset(t *testing.T) {
+	store, err := New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint, err := store.Upsert(Endpoint{
+		Name: "retry-sequence", Enabled: true,
+		Config: EndpointConfig{
+			OverridePolicy:  OverrideCaseOnly,
+			DefaultResponse: ResponseSpec{Status: 200},
+			Cases: map[string]ResponseSpec{
+				"limited": {Status: 429},
+				"ok":      {Status: 200},
+			},
+			SequenceCases: []string{"limited", "ok"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := IncomingRequest{Query: map[string][]string{}, Header: http.Header{}}
+	for index, want := range []string{"limited", "ok", "ok"} {
+		decision, err := store.Resolve(endpoint.ID, req)
+		if err != nil || decision.SelectedCase != want || decision.SelectionMode != SelectionSequence {
+			t.Fatalf("第 %d 次顺序响应错误: decision=%+v err=%v", index+1, decision, err)
+		}
+	}
+
+	req.Query["__mock_case"] = []string{"limited"}
+	decision, err := store.Resolve(endpoint.ID, req)
+	if err != nil || decision.SelectionMode != SelectionExplicitCase {
+		t.Fatalf("显式 Case 响应错误: decision=%+v err=%v", decision, err)
+	}
+	delete(req.Query, "__mock_case")
+	updated := *endpoint
+	if _, err := store.Upsert(updated); err != nil {
+		t.Fatal(err)
+	}
+	decision, err = store.Resolve(endpoint.ID, req)
+	if err != nil || decision.SelectedCase != "limited" {
+		t.Fatalf("保存后应从第一项重新开始: decision=%+v err=%v", decision, err)
+	}
+}

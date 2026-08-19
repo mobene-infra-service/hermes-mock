@@ -109,7 +109,8 @@ func TestSfMockNodeViewParse(t *testing.T) {
 	raw := `[{"nodeId":"voicebot_1","type":"VoicebotCall","channel":"CALL","configured":true,
 	  "resultSchema":{"type":"CALL","statuses":["CONNECTED","NO_RECEIPT"],"ringStatuses":["answered"],"intentions":["A","Z"],"maxAttemptNo":3,"retryStepGapMs":800},
 	  "matchSchema":{"fields":[{"key":"segment","type":"string"}],"operators":{"string":["eq"]}},
-	  "config":{"forcedCaseKey":null,"cases":[{"key":"connected_z","name":"接通-Z","delayMs":1000,"result":{"type":"CALL","status":"CONNECTED","intention":"Z"}}],"defaultSelection":{"mode":"FIXED","caseKey":"connected_z"},"rules":[]},
+	  "callbackFields":[{"path":"call.ringType","type":"enum","i18nKey":"ring","fallbackLabel":"Ring type","required":false,"sensitive":false,"defaultSelected":false,"sample":"answered","options":[{"value":"answered","i18nKey":"answered","fallbackLabel":"Answered"}]}],
+	  "config":{"forcedCaseKey":null,"cases":[{"key":"connected_z","name":"接通-Z","delayMs":1000,"result":{"type":"CALL","status":"CONNECTED","intention":"Z","callbackOverrides":{"call.ringType":"answered"}}}],"defaultSelection":{"mode":"FIXED","caseKey":"connected_z"},"rules":[]},
 	  "previews":{"connected_z":{"steps":[{"delayMs":1000,"status":"CONNECTED","data":{"intention":"Z"}}],"actionFinal":"SUCCESS","nodePort":"out","expectedVars":{"intention":"Z"},"dynamicVars":[]}}}]`
 	var out []SfMockNodeView
 	if err := json.Unmarshal([]byte(raw), &out); err != nil {
@@ -123,6 +124,9 @@ func TestSfMockNodeViewParse(t *testing.T) {
 	}
 	if out[0].Previews["connected_z"].NodePort != "out" || out[0].ResultSchema.MaxAttemptNo == nil || *out[0].ResultSchema.MaxAttemptNo != 3 {
 		t.Fatalf("Schema/preview 解析错: %+v", out[0])
+	}
+	if len(out[0].CallbackFields) != 1 || out[0].Config.Cases[0].Result.CallbackOverrides["call.ringType"] != "answered" {
+		t.Fatalf("callbackFields/overrides 解析错: %+v", out[0])
 	}
 	if err := validateTypedMockNode(out[0]); err != nil {
 		t.Fatalf("完整类型化响应不应被判为旧协议: %v", err)
@@ -362,13 +366,20 @@ func TestStratflowImportRequest(t *testing.T) {
 		_, _ = w.Write([]byte(`{"code":0,"msg":"ok","data":{"total":3,"success":2,"fail":1,"errors":[{"rowNo":2,"errors":[{"fieldKey":"phone","reason":"Contains invalid characters"}]}],"errorsTruncated":false,"plans":[{"result":1,"runCode":"RUN_1"}]}}`))
 	}))
 	defer srv.Close()
+	blank := ""
+	businessID := "  B123  "
 	res, err := New(Cred{Mode: "direct", OrgCode: "o1", StratflowURL: srv.URL}).StratflowImport(
-		t.Context(), "COL", SfImportReq{IdempotencyKey: "k1", Rows: []SfImportRow{{Phone: "138", BizFields: map[string]any{"n": "张三"}}}})
+		t.Context(), "COL", SfImportReq{IdempotencyKey: "k1", Rows: []SfImportRow{{
+			Phone: "138", BusinessID: &businessID, TicketID: &blank, BizFields: map[string]any{"n": "张三"},
+		}}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.IdempotencyKey != "k1" || len(got.Rows) != 1 || got.Rows[0].Phone != "138" {
 		t.Fatalf("import 请求体错: %+v", got)
+	}
+	if got.Rows[0].BusinessID == nil || *got.Rows[0].BusinessID != "  B123  " || got.Rows[0].TicketID == nil || *got.Rows[0].TicketID != "" {
+		t.Fatalf("业务标识应保留首尾空格和显式空串: %+v", got.Rows[0])
 	}
 	if len(res.Plans) != 1 || res.Plans[0].RunCode != "RUN_1" {
 		t.Fatalf("import 响应错: %+v", res)

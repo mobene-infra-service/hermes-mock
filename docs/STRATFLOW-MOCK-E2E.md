@@ -19,7 +19,16 @@
   → 逐节点清理配置并恢复共享状态
 ```
 
-不在本手册范围：真实 SIP/媒体、坐席软电话、群呼或 call-bot 真实下游质量。
+P2 节点按下面的边界测试：
+
+| 节点/能力 | 测试方式 |
+|---|---|
+| Splitter | 直接执行 Hermes 真实分流，不配置专用 Mock |
+| API Query / API Push | 执行真实节点、重试与持久化逻辑，只把 HTTP URL 指向 `/mock/{token}` |
+| CALL / SMS → API Push | 类型化 Case 根据真实下发请求自动生成 `callbackPayload`；仅按字段目录部分覆盖 |
+| 主动获取 | 本轮不覆盖 |
+
+不在本手册范围：真实 SIP/媒体、坐席软电话、群呼或 call-bot 真实下游质量，以及 connection reset、TLS/DNS、畸形 HTTP 报文和大响应等底层传输故障。
 
 ## 2. 两组 API 前缀不要混用
 
@@ -201,6 +210,10 @@ Content-Type: application/json
   "rows": [
     {
       "phone": "13000000001",
+      "businessId": "B123",
+      "ticketId": "T123",
+      "orderId": "O123",
+      "userId": "U123",
       "bizFields": {
         "sf_e2e_case_id": "SF-E2E-001",
         "sf_e2e_seq": 1,
@@ -210,6 +223,8 @@ Content-Type: application/json
   ]
 }
 ```
+
+四个业务标识与 `phone` 同级，不进入 `bizFields`。页面支持逐行 JSON、CSV 独立列及公共 JSON；显式空串和首尾空格会原样发送，由 Hermes 最终保存。
 
 按 `plans[].result` 分流：
 
@@ -267,7 +282,25 @@ Content-Type: application/json
 
 本地 JSON/CSV 解析可以显示号码或字段语义提示，但不得因此禁用提交、过滤失败行或重排重复行；只有 JSON 语法、行对象形状、CSV 表头/列结构等无法可靠构造请求的问题才可本地阻止。
 
-### 5.7 进度断言
+### 5.7 API Query / API Push 顺序重试
+
+在 `/http-mock` 创建两个命名 Case，例如 `limited=HTTP 429`、`ok=HTTP 200`，顺序响应配置为：
+
+```text
+limited → ok
+```
+
+让 API Query 或 API Push 节点调用该 Endpoint，并只导入一条名单。断言：
+
+- 节点走真实 HTTP、成功条件、Attempt 和重试逻辑；hermes-mock 不直接合成 API 节点结果；
+- 调用记录依次命中 `limited`、`ok`，选择方式为 `SEQUENCE`；序列耗尽后继续返回 `ok`；
+- `__mock_case` / `X-Mock-Case` 可临时指定 Case 且不消耗顺序位置；
+- 保存 Endpoint 或重启 hermes-mock 后，下一次请求重新从 `limited` 开始；
+- 多请求并发共享同一个 Endpoint 顺序，因此重试验收使用单条名单，避免把“第几次请求”误当成“某条名单第几次 Attempt”。
+
+CALL/SMS 上游 Case 若需覆盖 API Push 业务字段，只在节点 Case 的“API Push 回调字段覆盖”中选择目录字段；不得粘贴完整 Kafka 回调 JSON。未覆盖字段由 Hermes 自动生成，无来源字段为 `null`。
+
+### 5.8 进度断言
 
 ```http
 GET /api/stratflow/collections/{collectionCode}/executions/{runCode}/progress

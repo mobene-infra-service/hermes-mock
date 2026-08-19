@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import type { SfField } from '../types'
-import { composeStratflowImportRows } from './stratflow-import'
+import { composeStratflowImportRows, parseStratflowImportCsv } from './stratflow-import'
 
 const fields: SfField[] = [
   {
@@ -36,4 +36,37 @@ test('an explicit empty rows request is not blocked locally', () => {
 
   assert.deepEqual(result.rows, [])
   assert.equal(result.blockingErrorCount, 0)
+})
+
+test('row JSON keeps business identifiers beside phone and out of bizFields', () => {
+  const result = composeStratflowImportRows('', JSON.stringify({ rows: [{
+    phone: '4155552671', businessId: '  B123  ', ticketId: '', amount: '12.34',
+  }] }), fields)
+
+  assert.equal(result.blockingErrorCount, 0)
+  assert.equal(result.rows[0].businessId, '  B123  ')
+  assert.equal(result.rows[0].ticketId, '')
+  assert.deepEqual(result.rows[0].bizFields, { amount: '12.34' })
+})
+
+test('common JSON business identifiers apply to every phone', () => {
+  const result = composeStratflowImportRows('4155552671\n4155552672', JSON.stringify({
+    businessId: 'B123', userId: null, bizFields: { amount: '12.34' },
+  }), fields)
+
+  assert.equal(result.blockingErrorCount, 0)
+  assert.deepEqual(result.rows.map((row) => row.businessId), ['B123', 'B123'])
+  assert.deepEqual(result.rows.map((row) => row.userId), [null, null])
+})
+
+test('CSV preserves business identifier whitespace and explicit empty string', () => {
+  const result = parseStratflowImportCsv(
+    'phone,businessId,ticketId,amount\n4155552671,"  B123  ",,12.34\n',
+    fields,
+  )
+
+  assert.equal(result.blockingErrorCount, 0)
+  assert.equal(result.rows[0].businessId, '  B123  ')
+  assert.equal(result.rows[0].ticketId, '')
+  assert.deepEqual(result.rows[0].bizFields, { amount: '12.34' })
 })

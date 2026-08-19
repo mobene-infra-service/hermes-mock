@@ -1,7 +1,7 @@
 import { Alert, AutoComplete, Button, Card, Collapse, Descriptions, Divider, Input, InputNumber, Select, Space, Table, Tag, Typography } from 'antd'
 import { CopyOutlined, DeleteOutlined, PlusOutlined, SaveOutlined, UndoOutlined } from '@ant-design/icons'
 import type {
-  SfMatchCondition, SfMockCase, SfMockCaseResult, SfNode, SfNodeConfig, SfSelection,
+  SfAPIPushFieldDefinition, SfMatchCondition, SfMockCase, SfMockCaseResult, SfNode, SfNodeConfig, SfSelection,
 } from '../types'
 
 const { Text } = Typography
@@ -41,15 +41,16 @@ function defaultResult(node: SfNode): SfMockCaseResult {
 }
 
 function resetForStatus(result: SfMockCaseResult, status: string): SfMockCaseResult {
+  const keepOverrides = (next: SfMockCaseResult) => ({ ...next, callbackOverrides: result.callbackOverrides })
   if (result.type === 'CALL') {
-    if (status === 'CONNECTED') return { type: 'CALL', status, terminalAttemptNo: 1, retryRingStatus: 'no_answer', intention: 'A', talkDurationSec: 30 }
-    if (status === 'NOT_CONNECTED') return { type: 'CALL', status, retryRingStatus: 'no_answer', ringStatus: 'no_answer' }
-    if (status === 'CANCELLED') return { type: 'CALL', status, terminalAttemptNo: 1, retryRingStatus: 'no_answer' }
-    if (status === 'NOT_DIALED') return { type: 'CALL', status, terminalAttemptNo: 1 }
+    if (status === 'CONNECTED') return keepOverrides({ type: 'CALL', status, terminalAttemptNo: 1, retryRingStatus: 'no_answer', intention: 'A', talkDurationSec: 30 })
+    if (status === 'NOT_CONNECTED') return keepOverrides({ type: 'CALL', status, retryRingStatus: 'no_answer', ringStatus: 'no_answer' })
+    if (status === 'CANCELLED') return keepOverrides({ type: 'CALL', status, terminalAttemptNo: 1, retryRingStatus: 'no_answer' })
+    if (status === 'NOT_DIALED') return keepOverrides({ type: 'CALL', status, terminalAttemptNo: 1 })
     return { type: 'CALL', status }
   }
-  if (status === 'DELIVERED') return { type: 'SMS', status, partCount: 1 }
-  if (status === 'FAILED') return { type: 'SMS', status, errorCode: 'MOCK_FAILED', errorDesc: 'Mock 短信失败' }
+  if (status === 'DELIVERED') return keepOverrides({ type: 'SMS', status, partCount: 1 })
+  if (status === 'FAILED') return keepOverrides({ type: 'SMS', status, errorCode: 'MOCK_FAILED', errorDesc: 'Mock 短信失败' })
   return { type: 'SMS', status }
 }
 
@@ -134,6 +135,60 @@ function ConditionValue({ condition, onChange }: { condition: SfMatchCondition; 
   return <Input style={{ width: 240 }} value={String(condition.value ?? '')} onChange={(e) => onChange(parseScalar(valueType, e.target.value))} />
 }
 
+function CallbackValue({ field, value, onChange }: {
+  field: SfAPIPushFieldDefinition; value: unknown; onChange: (value: unknown) => void
+}) {
+  if (field.options?.length) {
+    return <Select allowClear style={{ width: 240 }} value={value ?? undefined} placeholder="null"
+      options={field.options.map((option) => ({ value: option.value as string | number, label: `${option.fallbackLabel}（${String(option.value)}）` }))}
+      onChange={(next) => onChange(next ?? null)} />
+  }
+  if (field.type === 'bool') {
+    return <Select allowClear style={{ width: 140 }} value={typeof value === 'boolean' ? String(value) : undefined} placeholder="null"
+      options={[{ value: 'true', label: 'true' }, { value: 'false', label: 'false' }]}
+      onChange={(next) => onChange(next == null ? null : next === 'true')} />
+  }
+  if (field.type === 'int' || field.type === 'float') {
+    return <InputNumber style={{ width: 180 }} value={typeof value === 'number' ? value : undefined}
+      placeholder="null" onChange={(next) => onChange(next ?? null)} />
+  }
+  return <Input style={{ width: 280 }} value={value == null ? '' : String(value)}
+    placeholder={field.type === 'datetime' ? 'yyyy-MM-dd HH:mm:ss' : '输入覆盖值'}
+    onChange={(event) => onChange(event.target.value)} />
+}
+
+function CallbackOverridesEditor({ fields, value, onChange }: {
+  fields: SfAPIPushFieldDefinition[]; value?: Record<string, unknown>; onChange: (value: Record<string, unknown>) => void
+}) {
+  const overrides = value || {}
+  const entries = Object.entries(overrides)
+  const byPath = new Map(fields.map((field) => [field.path, field]))
+  const used = new Set(entries.map(([path]) => path))
+  const options = fields.filter((field) => !used.has(field.path)).map((field) => ({
+    value: field.path, label: `${field.fallbackLabel}（${field.path}）· ${field.type}`,
+  }))
+  return <Card size="small" type="inner" title="API Push 回调字段覆盖（可选）">
+    <Space direction="vertical" style={{ width: '100%' }} size={8}>
+      {entries.map(([path, current]) => {
+        const field = byPath.get(path)
+        if (!field) return null
+        return <Space key={path} wrap>
+          <Text style={{ width: 260 }}>{field.fallbackLabel} <Text code>{path}</Text> <Tag>{field.type}</Tag></Text>
+          <CallbackValue field={field} value={current} onChange={(nextValue) => onChange({ ...overrides, [path]: nextValue })} />
+          <Button size="small" onClick={() => onChange({ ...overrides, [path]: null })}>设为 null</Button>
+          <Button size="small" danger icon={<DeleteOutlined />} onClick={() => {
+            const next = { ...overrides }; delete next[path]; onChange(next)
+          }} />
+        </Space>
+      })}
+      <Select showSearch optionFilterProp="label" style={{ width: 420 }} value={undefined}
+        disabled={!options.length} placeholder={options.length ? '添加要覆盖的回调字段' : '所有回调字段均已覆盖'} options={options}
+        onChange={(path: string) => onChange({ ...overrides, [path]: byPath.get(path)?.sample ?? null })} />
+      <Text type="secondary">未覆盖字段由 Hermes 根据真实下发请求和 Case 自动生成；没有来源的字段为 null。</Text>
+    </Space>
+  </Card>
+}
+
 export function StratflowMockNodeEditor({ node, value, disabled, onChange, onSave, onReset }: {
   node: SfNode; value: SfNodeConfig; disabled?: boolean
   onChange: (value: SfNodeConfig) => void; onSave: () => void; onReset: () => void
@@ -142,9 +197,9 @@ export function StratflowMockNodeEditor({ node, value, disabled, onChange, onSav
     || !node.resultSchema || !Array.isArray(node.resultSchema.statuses)
     || !Array.isArray(node.resultSchema.ringStatuses) || !Array.isArray(node.resultSchema.intentions)
     || !node.matchSchema || !Array.isArray(node.matchSchema.fields) || !node.matchSchema.operators
-    || !node.previews) {
+    || !Array.isArray(node.callbackFields) || !node.previews) {
     return <Alert type="error" showIcon message="Hermes Mock 配置协议不兼容"
-      description="当前 Hermes 后端未返回类型化 cases/defaultSelection/schema/previews。请先部署配套 Hermes 后端并清理旧 sf:mock:cfg:* 配置；本节点已停止编辑以避免页面白屏。" />
+      description="当前 Hermes 后端未返回类型化 cases/defaultSelection/schema/callbackFields/previews。请先部署配套 Hermes 后端并清理旧 sf:mock:cfg:* 配置；本节点已停止编辑以避免页面白屏。" />
   }
   const update = (fn: (next: SfNodeConfig) => void) => { const next = cloneConfig(value); fn(next); onChange(next) }
   const caseOptions = value.cases.map((item) => ({ value: item.key, label: `${item.name}（${item.key}）` }))
@@ -235,6 +290,9 @@ export function StratflowMockNodeEditor({ node, value, disabled, onChange, onSav
                 <Text>errorDesc</Text><Input style={{ width: 220 }} value={result.errorDesc || ''} onChange={(e) => updateResult({ errorDesc: e.target.value || null })} />
                 <Text>计费条数</Text><InputNumber min={0} max={1000} value={result.partCount ?? undefined} onChange={(v) => updateResult({ partCount: v == null ? null : Number(v) })} />
               </Space>}
+
+              {result.status !== 'NO_RECEIPT' && <CallbackOverridesEditor fields={node.callbackFields}
+                value={result.callbackOverrides} onChange={(callbackOverrides) => updateResult({ callbackOverrides })} />}
 
               <Space><Button size="small" icon={<CopyOutlined />} onClick={() => update((next) => {
                 const copied = JSON.parse(JSON.stringify(next.cases[index])) as SfMockCase; copied.key = uniqueKey(next.cases, `${copied.key}_copy`); copied.name += '（复制）'; next.cases.splice(index + 1, 0, copied)

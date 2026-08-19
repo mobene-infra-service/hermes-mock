@@ -70,6 +70,7 @@ export interface HTTPMockEndpointConfig {
   overridePolicy?: HTTPMockOverridePolicy
   defaultResponse: HTTPMockResponseSpec
   defaultWeightedCases?: HTTPMockWeightedCase[]
+  sequenceCases?: string[]
   cases?: Record<string, HTTPMockResponseSpec>
   rules?: HTTPMockRule[]
 }
@@ -598,6 +599,13 @@ export interface SfMockCaseResult {
   errorCode?: string | null
   errorDesc?: string | null
   partCount?: number | null
+  callbackOverrides?: Record<string, unknown>
+}
+export interface SfAPIPushFieldOption { value: unknown; i18nKey: string; fallbackLabel: string }
+export interface SfAPIPushFieldDefinition {
+  path: string; type: string; i18nKey: string; fallbackLabel: string
+  required: boolean; sensitive: boolean; defaultSelected: boolean; sample: unknown
+  options: SfAPIPushFieldOption[]
 }
 export interface SfMockCase { key: string; name: string; delayMs: number; result: SfMockCaseResult }
 export interface SfWeightedCase { caseKey: string; weight: number }
@@ -616,6 +624,7 @@ export interface SfNode {
   configured: boolean
   resultSchema: SfResultSchema
   matchSchema: SfMatchSchema
+  callbackFields: SfAPIPushFieldDefinition[]
   config: SfNodeConfig
   previews: Record<string, SfCasePreview>
 }
@@ -683,7 +692,14 @@ export interface SfImportFieldError { fieldKey: string; reason: string; itemInde
 export interface SfImportRowError { rowNo: number; errors: SfImportFieldError[] }
 export interface SfImportFailureData { total: number; success: number; fail: number; errors: SfImportRowError[]; errorsTruncated: boolean }
 export interface SfImportResult { code: string; batchCode: string; collectionCode: string; status: number; total: number; success: number; fail: number; plans: SfImportPlan[]; errors: SfImportRowError[]; errorsTruncated: boolean }
-export interface SfImportRow { phone: string; bizFields?: Record<string, unknown> }
+export interface SfImportRow {
+  phone: string
+  businessId?: string | null
+  ticketId?: string | null
+  orderId?: string | null
+  userId?: string | null
+  bizFields?: Record<string, unknown>
+}
 // import result 码：1=已生成 run / 2=字段契约失败(failFields) / 3=无可用绑定
 export const SF_IMPORT_RUN_CREATED = 1
 export const SF_IMPORT_FIELD_FAIL = 2

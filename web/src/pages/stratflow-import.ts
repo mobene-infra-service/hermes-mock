@@ -20,6 +20,14 @@ export interface SfImportComposeResult {
 type JsonRecord = Record<string, unknown>
 
 const PHONE_KEYS = new Set(['phone', 'phone_number', 'phonenumber', 'number'])
+type BusinessIdentifierKey = keyof Pick<SfImportRow, 'businessId' | 'ticketId' | 'orderId' | 'userId'>
+
+const BUSINESS_IDENTIFIER_KEYS: Map<string, BusinessIdentifierKey> = new Map([
+  ['businessid', 'businessId'],
+  ['ticketid', 'ticketId'],
+  ['orderid', 'orderId'],
+  ['userid', 'userId'],
+] as const)
 const DECIMAL_PATTERN = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -52,12 +60,12 @@ function parseCsvGrid(content: string): { grid: string[][]; error?: string } {
   let quoted = false
 
   const pushCell = () => {
-    row.push(cell.trim())
+    row.push(cell)
     cell = ''
   }
   const pushRow = () => {
     pushCell()
-    if (row.some((value) => value !== '')) grid.push(row)
+    if (row.some((value) => value.trim() !== '')) grid.push(row)
     row = []
   }
 
@@ -123,11 +131,22 @@ export function parseStratflowImportCsv(content: string, fields: SfField[]): SfI
   })
 
   const fieldColumns = new Map<number, { key: string; field?: SfField }>()
+  const identifierColumns = new Map<number, BusinessIdentifierKey>()
   const usedKeys = new Set<string>()
+  const usedIdentifiers = new Set<string>()
   normalizedHeaders.forEach((header, index) => {
     if (PHONE_KEYS.has(header)) return
     if (!header) {
       headerErrors.push(`CSV 第 ${index + 1} 列表头为空`)
+      return
+    }
+    const identifier = BUSINESS_IDENTIFIER_KEYS.get(header)
+    if (identifier) {
+      if (usedIdentifiers.has(identifier)) headerErrors.push(`CSV 业务标识「${identifier}」被重复提供`)
+      else {
+        usedIdentifiers.add(identifier)
+        identifierColumns.set(index, identifier)
+      }
       return
     }
     const field = fieldsByKey.get(header) ?? fieldsByDisplayName.get(header)
@@ -163,7 +182,7 @@ export function parseStratflowImportCsv(content: string, fields: SfField[]): SfI
   const rowErrors: string[] = []
   const rows: SfImportRow[] = dataRows.map((cells, index) => {
     const rowNo = index + 1
-    if (cells.length > headers.length && cells.slice(headers.length).some(Boolean)) {
+    if (cells.length > headers.length && cells.slice(headers.length).some((value) => value.trim() !== '')) {
       rowErrors.push(`第 ${rowNo} 行：列数超过表头，请检查逗号或双引号转义`)
     }
     const bizFields: Record<string, unknown> = {}
@@ -174,7 +193,9 @@ export function parseStratflowImportCsv(content: string, fields: SfField[]): SfI
         ? raw.split('|').map((item) => item.trim()).filter(Boolean)
         : raw
     })
-    return { phone: cells[phoneIndexes[0]]?.trim() || '', bizFields }
+    const identifiers: Partial<SfImportRow> = {}
+    identifierColumns.forEach((key, columnIndex) => { identifiers[key] = cells[columnIndex] ?? '' })
+    return { phone: cells[phoneIndexes[0]]?.trim() || '', ...identifiers, bizFields }
   })
 
   collectSemanticWarnings(rows, fields, addSemanticWarning)
@@ -377,6 +398,30 @@ export function composeStratflowImportRows(
   })
   const usedFieldKeys = new Set<string>()
 
+  const extractIdentifiers = (source: JsonRecord, rowNo: number) => {
+    const identifiers: Partial<SfImportRow> = {}
+    const rest: JsonRecord = {}
+    const seen = new Set<string>()
+    Object.entries(source).forEach(([rawKey, value]) => {
+      const key = BUSINESS_IDENTIFIER_KEYS.get(rawKey.trim().toLowerCase())
+      if (!key) {
+        rest[rawKey] = value
+        return
+      }
+      if (seen.has(key)) {
+        addBlockingError(`第 ${rowNo} 行：业务标识「${key}」被重复提供`)
+        return
+      }
+      seen.add(key)
+      if (value !== null && typeof value !== 'string') {
+        addBlockingError(`第 ${rowNo} 行：业务标识「${key}」必须是字符串或 null`)
+        return
+      }
+      identifiers[key] = value
+    })
+    return { identifiers, rest }
+  }
+
   const normalizeBizFields = (source: unknown, rowNo: number): Record<string, unknown> => {
     if (!isRecord(source)) {
       addBlockingError(`第 ${rowNo} 行：业务字段应为 JSON 对象`)
@@ -385,6 +430,10 @@ export function composeStratflowImportRows(
     const normalized: Record<string, unknown> = {}
     Object.entries(source).forEach(([rawKey, value]) => {
       const lookup = rawKey.trim().toLowerCase()
+      if (BUSINESS_IDENTIFIER_KEYS.has(lookup)) {
+        addBlockingError(`第 ${rowNo} 行：业务标识「${rawKey}」应与 phone 同级，不能放入 bizFields`)
+        return
+      }
       const field = fieldsByKey.get(lookup) ?? fieldsByDisplayName.get(lookup)
       if (field === null) {
         addBlockingError(`第 ${rowNo} 行：字段名「${rawKey}」对应多个集合字段，请改用字段 Key`)
@@ -435,26 +484,35 @@ export function composeStratflowImportRows(
       }
       const phoneKey = Object.keys(item).find((key) => PHONE_KEYS.has(key.trim().toLowerCase()))
       const phone = phoneKey ? phoneFromJson(item[phoneKey]) : (phones[index] ?? '')
+      const topLevel = Object.fromEntries(
+        Object.entries(item).filter(([key]) => key !== 'bizFields' && !PHONE_KEYS.has(key.trim().toLowerCase())),
+      )
+      const { identifiers, rest } = extractIdentifiers(topLevel, rowNo)
 
       let source: unknown
       if (Object.prototype.hasOwnProperty.call(item, 'bizFields')) {
         source = item.bizFields
         if (!isRecord(source)) addBlockingError(`第 ${rowNo} 行：bizFields 应为 JSON 对象`)
-        const flatKeys = Object.keys(item).filter((key) => key !== 'bizFields' && !PHONE_KEYS.has(key.trim().toLowerCase()))
+        const flatKeys = Object.keys(rest)
         if (flatKeys.length > 0) addBlockingError(`第 ${rowNo} 行：已使用 bizFields，不能再平铺业务字段 ${flatKeys.join('、')}`)
       } else {
-        source = Object.fromEntries(Object.entries(item).filter(([key]) => !PHONE_KEYS.has(key.trim().toLowerCase())))
+        source = rest
       }
-      return { phone, bizFields: normalizeBizFields(source, rowNo) }
+      return { phone, ...identifiers, bizFields: normalizeBizFields(source, rowNo) }
     })
   } else if (isRecord(parsed)) {
-    const commonSource = Object.keys(parsed).length === 1 && isRecord(parsed.bizFields) ? parsed.bizFields : parsed
+    const topLevel = Object.fromEntries(Object.entries(parsed).filter(([key]) => key !== 'bizFields'))
+    const { identifiers, rest } = extractIdentifiers(topLevel, 1)
+    const commonSource = Object.prototype.hasOwnProperty.call(parsed, 'bizFields') ? parsed.bizFields : rest
+    if (Object.prototype.hasOwnProperty.call(parsed, 'bizFields') && Object.keys(rest).length > 0) {
+      addBlockingError(`第 1 行：已使用 bizFields，不能再平铺业务字段 ${Object.keys(rest).join('、')}`)
+    }
     const common = normalizeBizFields(commonSource, 1)
     if (phones.length === 0) addSemanticWarning('未提供名单行，Hermes 将返回空名单错误')
     if (phones.length > MAX_STRATFLOW_IMPORT_ROWS) {
       addSemanticWarning(`名单共 ${phones.length} 条，超过 Hermes 单次上限 ${MAX_STRATFLOW_IMPORT_ROWS} 条`)
     }
-    rows = phones.map((phone) => ({ phone, bizFields: { ...common } }))
+    rows = phones.map((phone) => ({ phone, ...identifiers, bizFields: { ...common } }))
   } else {
     addBlockingError('业务字段 JSON 顶层须为对象、数组或 {"rows":[...]}')
   }

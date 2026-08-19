@@ -4,7 +4,8 @@ import {
   Row, Select, Space, Switch, Table, Tag, Typography, message,
 } from 'antd'
 import {
-  CopyOutlined, DeleteOutlined, EditOutlined, MinusCircleOutlined, PlusOutlined, ReloadOutlined,
+  ArrowDownOutlined, ArrowUpOutlined, CopyOutlined, DeleteOutlined, EditOutlined, MinusCircleOutlined,
+  PlusOutlined, ReloadOutlined,
 } from '@ant-design/icons'
 import {
   clearHTTPMockRequests, createHTTPMock, deleteHTTPMock, listHTTPMockRequests, listHTTPMocks, updateHTTPMock,
@@ -58,6 +59,7 @@ interface EditorValues {
   defaultResponse: ResponseEditor
   defaultResultMode: ResultMode
   defaultWeightedCases: HTTPMockWeightedCase[]
+  sequenceCases: string[]
   cases: CaseEditor[]
   rules: RuleEditor[]
   remark?: string
@@ -93,6 +95,7 @@ const SELECTION_LABELS: Record<string, string> = {
   DEFAULT_WEIGHTED: '默认概率',
   RULE_WEIGHTED: '规则概率',
   EXPLICIT_CASE: '调用方指定',
+  SEQUENCE: '顺序响应',
 }
 
 const SOURCE_OPTIONS = Object.entries(SOURCE_LABELS).map(([value, label]) => ({ value, label }))
@@ -176,6 +179,7 @@ function endpointToValues(endpoint?: HTTPMockEndpoint): EditorValues {
     defaultWeightedCases: config?.defaultWeightedCases?.length
       ? config.defaultWeightedCases
       : suggestedWeightedCases,
+    sequenceCases: config?.sequenceCases || [],
     cases: Object.entries(sourceCases).map(([name, response]) => ({ name, ...responseToEditor(response) })),
     rules: (config?.rules || []).map((rule) => ({
       name: rule.name,
@@ -282,10 +286,16 @@ function EndpointStrategy({ endpoint }: { endpoint: HTTPMockEndpoint }) {
       <Alert
         type="info"
         showIcon
-        message="允许 Method 只负责准入；真正选择响应的是下面的请求条件。规则按优先级从高到低，第一条命中即停止。"
+        message={endpoint.config.sequenceCases?.length
+          ? '当前启用全局顺序响应；所有请求共享位置，显式 Case 不消耗顺序。'
+          : '允许 Method 只负责准入；真正选择响应的是下面的请求条件。规则按优先级从高到低，第一条命中即停止。'}
         style={{ marginBottom: 12 }}
       />
       <Space direction="vertical" style={{ width: '100%' }} size={8}>
+        {!!endpoint.config.sequenceCases?.length && (
+          <Card size="small"><Text strong>顺序响应：</Text> {endpoint.config.sequenceCases.map((name, index) => <Tag key={`${index}-${name}`}>{index + 1}. {name}</Tag>)}</Card>
+        )}
+        {!endpoint.config.sequenceCases?.length && <>
         {rules.length === 0
           ? <Text type="secondary">没有参数规则，所有允许的请求都走“未命中规则时”的结果。</Text>
           : rules.map((rule, index) => (
@@ -303,6 +313,7 @@ function EndpointStrategy({ endpoint }: { endpoint: HTTPMockEndpoint }) {
             ? <><Tag color="purple">概率</Tag><Text>{weightedSummary(endpoint.config.defaultWeightedCases)}</Text></>
             : <><Tag>固定</Tag><Text>{responseSummary(endpoint.config.defaultResponse)}</Text></>}
         </Card>
+        </>}
         <div>
           <Text type="secondary">可用 Cases：</Text>{' '}
           {Object.entries(cases).map(([name, response]) => <Tag key={name}>{name} · {responseSummary(response)}</Tag>)}
@@ -334,7 +345,9 @@ function UsageDrawer({ endpoint, onClose }: { endpoint: HTTPMockEndpoint | null;
             type="info"
             showIcon
             message="决策顺序"
-            description="请求先通过允许 Method 校验，再按 priority 命中第一条参数规则；规则可固定返回一个 Case，也可按权重随机 Case。最后才应用调用方显式 Case 和 FULL 覆盖。"
+            description={endpoint.config.sequenceCases?.length
+              ? '请求通过 Method 校验后按 Endpoint 全局顺序选择 Case；序列结束后保持最后一项。调用方显式 Case 优先且不消耗顺序，FULL 覆盖最后生效。'
+              : '请求先通过允许 Method 校验，再按 priority 命中第一条参数规则；规则可固定返回一个 Case，也可按权重随机 Case。最后才应用调用方显式 Case 和 FULL 覆盖。'}
           />
           <Collapse
             defaultActiveKey={['plain', 'match']}
@@ -363,6 +376,13 @@ function UsageDrawer({ endpoint, onClose }: { endpoint: HTTPMockEndpoint | null;
                     ]} />
                   </Space>
                 ),
+              },
+              {
+                key: 'sequence',
+                label: '确定性顺序响应',
+                children: endpoint.config.sequenceCases?.length
+                  ? <Text>{endpoint.config.sequenceCases.join(' → ')}；序列结束后保持最后一项，保存 Endpoint 或重启进程后回到第一项。</Text>
+                  : <Text type="secondary">当前未配置顺序响应。</Text>,
               },
               {
                 key: 'probability',
@@ -475,6 +495,7 @@ export default function HttpMockPage() {
         overridePolicy: values.overridePolicy,
         defaultResponse: responseFromEditor(values.defaultResponse, '默认响应'),
         defaultWeightedCases: values.defaultResultMode === 'WEIGHTED' ? values.defaultWeightedCases : undefined,
+        sequenceCases: values.sequenceCases?.length ? values.sequenceCases : undefined,
         cases,
         rules,
       }
@@ -581,6 +602,7 @@ export default function HttpMockPage() {
               title: '请求分流',
               width: 180,
               render: (_: unknown, row: HTTPMockEndpoint) => {
+                if (row.config.sequenceCases?.length) return <><div>全局顺序响应</div><Tag color="cyan">{row.config.sequenceCases.join(' → ')}</Tag></>
                 const rules = row.config.rules || []
                 const sources = Array.from(new Set(rules.flatMap((rule) => rule.conditions.map((condition) => condition.source))))
                 return <><div>{rules.length ? rules.length + ' 条参数规则' : '无参数规则'}</div>{sources.map((source) => <Tag key={source} color="blue">{SOURCE_LABELS[source]}</Tag>)}</>
@@ -589,7 +611,9 @@ export default function HttpMockPage() {
             {
               title: '未命中规则时',
               width: 210,
-              render: (_: unknown, row: HTTPMockEndpoint) => row.config.defaultWeightedCases?.length
+              render: (_: unknown, row: HTTPMockEndpoint) => row.config.sequenceCases?.length
+                ? <><Tag color="cyan">顺序</Tag><Text>{row.config.sequenceCases.join(' → ')}</Text></>
+                : row.config.defaultWeightedCases?.length
                 ? <><Tag color="purple">概率</Tag><Text>{weightedSummary(row.config.defaultWeightedCases)}</Text></>
                 : <><Tag>固定</Tag><Text>{responseSummary(row.config.defaultResponse)}</Text></>,
             },
@@ -668,7 +692,29 @@ export default function HttpMockPage() {
             {defaultResultMode === 'WEIGHTED' && <WeightedCaseList name="defaultWeightedCases" caseOptions={caseOptions} />}
           </Card>
 
-          <Card size="small" title="5. 请求匹配规则" style={{ marginBottom: 16 }}>
+          <Card size="small" title="5. 顺序响应（可选）" style={{ marginBottom: 16 }}>
+            <Alert type="info" showIcon style={{ marginBottom: 12 }} message="配置后优先于规则和默认结果；并发请求共享同一顺序，序列结束后保持最后一项。" />
+            <Form.List name="sequenceCases">
+              {(fields, { add, remove, move }) => (
+                <Space direction="vertical" style={{ width: '100%' }} size={8}>
+                  {fields.map((field, index) => (
+                    <Row gutter={8} key={field.key} align="middle">
+                      <Col span={2}><Tag>{index + 1}</Tag></Col>
+                      <Col span={17}><Form.Item name={field.name} rules={[{ required: true, message: '请选择 Case' }]} style={{ marginBottom: 0 }}><Select options={caseOptions} /></Form.Item></Col>
+                      <Col span={5}><Space size={2}>
+                        <Button type="text" disabled={index === 0} icon={<ArrowUpOutlined />} onClick={() => move(index, index - 1)} />
+                        <Button type="text" disabled={index === fields.length - 1} icon={<ArrowDownOutlined />} onClick={() => move(index, index + 1)} />
+                        <Button type="text" danger icon={<MinusCircleOutlined />} onClick={() => remove(field.name)} />
+                      </Space></Col>
+                    </Row>
+                  ))}
+                  <Button type="dashed" icon={<PlusOutlined />} disabled={!caseOptions.length || fields.length >= 100} onClick={() => add(caseOptions[0]?.value)}>增加顺序项</Button>
+                </Space>
+              )}
+            </Form.List>
+          </Card>
+
+          <Card size="small" title="6. 请求匹配规则" style={{ marginBottom: 16 }}>
             <Alert
               type="info"
               showIcon

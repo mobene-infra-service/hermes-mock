@@ -755,14 +755,14 @@ export default function StratflowMockPage() {
                 </div>
                 <div style={{ width: 560, maxWidth: '100%' }}>
                   <Space wrap style={{ width: '100%', justifyContent: 'space-between', marginBottom: 4 }}>
-                    <Text type="secondary">公共业务字段 JSON（手填/批量生成号码时，可空）</Text>
+                    <Text type="secondary">公共业务标识 / 字段 JSON（手填/批量生成号码时，可空）</Text>
                     <Button size="small" disabled={fields.length === 0} onClick={() => previewImportRows()}>校验公共字段</Button>
                   </Space>
                   <Input.TextArea rows={8} style={{ width: '100%', fontFamily: 'monospace' }} value={bizText} onChange={(e) => {
                     setBizText(e.target.value); setImportPreview(null); setCsvFileName(''); setImportRes(null); setImportRequestFailure(null)
-                  }} placeholder={'{"customer_name":"张三","tags":["vip"]}'} />
+                  }} placeholder={'{"businessId":"B123","bizFields":{"customer_name":"张三","tags":["vip"]}}'} />
                   <Text type="secondary" style={{ display: 'block', marginTop: 4, fontSize: 12 }}>
-                    公共对象会应用到号码区的全部号码。逐行号码与业务字段请使用「导入 CSV」：表头为 <Text code>phone</Text> + 业务字段；已知数组字段用 <Text code>|</Text> 分隔，未在当前集合发现的列也会按原表头提交，由 Hermes 最终校验。
+                    公共对象会应用到号码区的全部号码。<Text code>businessId</Text> / <Text code>ticketId</Text> / <Text code>orderId</Text> / <Text code>userId</Text> 与 phone 同级；CSV 也可使用这些独立列。业务字段放入 bizFields，已知数组字段用 <Text code>|</Text> 分隔。
                   </Text>
                 </div>
                 <div style={{ width: 240, maxWidth: '100%' }}>
@@ -813,6 +813,7 @@ export default function StratflowMockPage() {
                       columns={[
                         { title: '#', dataIndex: 'rowNo', width: 54 },
                         { title: 'phone', dataIndex: 'phone', width: 180 },
+                        { title: '业务标识', width: 260, render: (_: unknown, row) => <Text code>{JSON.stringify(Object.fromEntries(Object.entries({ businessId: row.businessId, ticketId: row.ticketId, orderId: row.orderId, userId: row.userId }).filter(([, value]) => value !== undefined)))}</Text> },
                         { title: 'bizFields', dataIndex: 'bizFields', render: (value: Record<string, unknown>) => <Text code style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify(value)}</Text> },
                       ]} />
                   )}

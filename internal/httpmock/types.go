@@ -24,11 +24,13 @@ const (
 	SelectionDefaultWeighted = "DEFAULT_WEIGHTED"
 	SelectionRuleWeighted    = "RULE_WEIGHTED"
 	SelectionExplicitCase    = "EXPLICIT_CASE"
+	SelectionSequence        = "SEQUENCE"
 
 	maxWaitMs          = 30_000
 	maxBodyBytes       = 512 * 1024
 	maxEndpointName    = 128
 	maxWeightedCases   = 100
+	maxSequenceCases   = 100
 	maxWeightPerChoice = 1_000_000
 )
 
@@ -75,6 +77,7 @@ type EndpointConfig struct {
 	OverridePolicy       string                  `json:"overridePolicy,omitempty"`
 	DefaultResponse      ResponseSpec            `json:"defaultResponse"`
 	DefaultWeightedCases []WeightedCase          `json:"defaultWeightedCases,omitempty"`
+	SequenceCases        []string                `json:"sequenceCases,omitempty"`
 	Cases                map[string]ResponseSpec `json:"cases,omitempty"`
 	Rules                []Rule                  `json:"rules,omitempty"`
 }
@@ -187,6 +190,16 @@ func (c *EndpointConfig) normalizeAndValidate() error {
 	c.DefaultWeightedCases, err = normalizeWeightedCases("defaultWeightedCases", c.DefaultWeightedCases, c.Cases)
 	if err != nil {
 		return err
+	}
+	if len(c.SequenceCases) > maxSequenceCases {
+		return fmt.Errorf("sequenceCases 最多支持 %d 项", maxSequenceCases)
+	}
+	for i, rawName := range c.SequenceCases {
+		name := strings.TrimSpace(rawName)
+		if _, ok := c.Cases[name]; !ok {
+			return fmt.Errorf("sequenceCases 第 %d 项引用了不存在的 case %q", i+1, name)
+		}
+		c.SequenceCases[i] = name
 	}
 	for i := range c.Rules {
 		rule := &c.Rules[i]

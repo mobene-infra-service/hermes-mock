@@ -26,10 +26,11 @@ const (
 type Store struct {
 	repo model.Repository
 
-	mu      sync.RWMutex
-	byID    map[int64]*Endpoint
-	byToken map[string]*Endpoint
-	nextID  int64
+	mu            sync.RWMutex
+	byID          map[int64]*Endpoint
+	byToken       map[string]*Endpoint
+	sequenceIndex map[int64]uint64
+	nextID        int64
 
 	recordQueue chan entity.HTTPMockRequest
 	closeOnce   sync.Once
@@ -41,7 +42,10 @@ type Store struct {
 
 // New 创建 Store。repo=nil 仅用于单测，此时配置/记录都保存在内存。
 func New(repo model.Repository) (*Store, error) {
-	s := &Store{repo: repo, byID: map[int64]*Endpoint{}, byToken: map[string]*Endpoint{}}
+	s := &Store{
+		repo: repo, byID: map[int64]*Endpoint{}, byToken: map[string]*Endpoint{},
+		sequenceIndex: map[int64]uint64{},
+	}
 	if repo == nil {
 		return s, nil
 	}
@@ -157,6 +161,7 @@ func (s *Store) Upsert(endpoint Endpoint) (*Endpoint, error) {
 	s.mu.Lock()
 	s.byID[copy.ID] = &copy
 	s.byToken[copy.Token] = &copy
+	s.sequenceIndex[copy.ID] = 0
 	s.mu.Unlock()
 	out, _ := s.GetByID(copy.ID)
 	return out, nil
@@ -177,6 +182,7 @@ func (s *Store) Delete(id int64) error {
 	s.mu.Lock()
 	delete(s.byID, id)
 	delete(s.byToken, endpoint.Token)
+	delete(s.sequenceIndex, id)
 	if s.repo == nil {
 		filtered := s.memoryRecords[:0]
 		for _, row := range s.memoryRecords {
@@ -188,6 +194,32 @@ func (s *Store) Delete(id int64) error {
 	}
 	s.mu.Unlock()
 	return nil
+}
+
+// Resolve 原子选取 Endpoint 的下一项顺序响应；显式 Case 不消耗顺序位置。
+func (s *Store) Resolve(endpointID int64, req IncomingRequest) (Decision, error) {
+	s.mu.Lock()
+	endpoint, ok := s.byID[endpointID]
+	if !ok {
+		s.mu.Unlock()
+		return Decision{}, fmt.Errorf("HTTP Mock endpoint %d 不存在", endpointID)
+	}
+	config := endpoint.Config
+	sequenceCase := ""
+	explicitCase := config.OverridePolicy != OverrideNone &&
+		firstNonBlank(req.Query["__mock_case"], []string{req.Header.Get("X-Mock-Case")}) != ""
+	if !explicitCase && len(config.SequenceCases) > 0 {
+		index := s.sequenceIndex[endpointID]
+		if index >= uint64(len(config.SequenceCases)) {
+			index = uint64(len(config.SequenceCases) - 1)
+		}
+		sequenceCase = config.SequenceCases[index]
+		if index < uint64(len(config.SequenceCases)-1) {
+			s.sequenceIndex[endpointID] = index + 1
+		}
+	}
+	s.mu.Unlock()
+	return resolveWithSequence(config, req, sequenceCase)
 }
 
 // RecordAsync 异步记录调用。队列满时丢观测记录并告警，绝不阻塞响应。
